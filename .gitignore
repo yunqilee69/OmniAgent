@@ -1,0 +1,8 @@
+node_modules/
+dist/
+coverage/
+*.log
+.DS_Store
+
+# 运行时产物（transcript / 审计日志）
+.omniagent/

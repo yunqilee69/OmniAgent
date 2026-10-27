@@ -1,0 +1,14 @@
+{
+  "name": "@omniagent/core",
+  "version": "0.0.0",
+  "private": true,
+  "type": "module",
+  "exports": {
+    ".": "./src/index.ts",
+    "./*": "./src/*.ts"
+  },
+  "dependencies": {
+    "openai": "^7.45.0",
+    "zod": "^4.0.0"
+  }
+}

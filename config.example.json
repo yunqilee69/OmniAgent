@@ -1,0 +1,10 @@
+{
+  "model": "fake",
+  "mode": "default",
+  "maxSteps": 25,
+  "permissions": {
+    "allow": ["read_file(./docs/**)", "list_dir"],
+    "ask": ["write_file(./.git/**)"],
+    "deny": ["read_file(./.env)", "shell(rm -rf *)"]
+  }
+}
