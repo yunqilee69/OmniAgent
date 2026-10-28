@@ -11,7 +11,7 @@
 ```bash
 pnpm install
 pnpm dev        # TUI；没配 provider 时走 FakeModel 演示剧本，零 token
-pnpm test       # 37 个单测，零 token
+pnpm test       # 单测，零 token
 pnpm eval       # 跑 eval 任务集
 pnpm typecheck
 ```
@@ -134,6 +134,7 @@ OmniAgent/
 | `exec/` | 执行器：把异常统一转成 observation | M1 完成 |
 | `tools/` | 工具契约、注册表、内置工具（读/写/列目录） | M1 完成（shell 在 M3） |
 | `store/` | transcript 持久化、JSONL 审计日志 | M1 完成（compaction 后改造） |
+| `workspace/` | 工作区身份，登记到 `~/.omniagent/sessions/<key>/` | 已落地（会话正文未写） |
 | `config/` | 加载 `~/.omniagent/config.json`（含 provider） | M1 完成 |
 | `context/` | token 计数、截断策略、compaction | M2（目录已留，未实现） |
 | `sandbox/` | seatbelt / bubblewrap 封装 | M3（未创建） |
@@ -246,3 +247,4 @@ export type AgentEvent =
 - [docs/notes/](docs/notes/) — 读别人家实现的笔记（Codex、Claude Code），带出处
 - [docs/adr/](docs/adr/) — 自己做的决定：背景、候选、结论、后果
 - [docs/spec/](docs/spec/) — 自家的协议与 schema 设计
+- [docs/spec/agent-harness.md](docs/spec/agent-harness.md) — agent harness：循环、工具、上下文、记忆、权限、可靠性、观测，以及当前落地情况

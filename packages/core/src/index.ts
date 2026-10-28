@@ -134,8 +134,22 @@ export {
 } from './config/load';
 export type { Config, LoadedConfig, ProviderConfig } from './config/load';
 
+// 工作区
+export { identifyWorkspace } from './workspace/id';
+export type { WorkspaceId } from './workspace/id';
+export { defaultWorkspaceLayout, workspaceLayout } from './workspace/layout';
+export type { WorkspaceLayout } from './workspace/layout';
+export {
+  WorkspaceConfigSchema,
+  ensureWorkspaceConfig,
+  readWorkspaceConfig,
+} from './workspace/config';
+export type { WorkspaceConfig } from './workspace/config';
+export { openWorkspace } from './workspace/open';
+export type { OpenedWorkspace } from './workspace/open';
+
 // 组合根
-export { DEFAULT_SYSTEM_PROMPT, Session } from './session';
+export { DEFAULT_SYSTEM_PROMPT, Session, createSessionId } from './session';
 export type { SessionOptions } from './session';
 
 // 评测

@@ -1,11 +1,13 @@
-import { join } from 'node:path';
 import { createInterface } from 'node:readline/promises';
 import {
   AuditLog,
   FakeModel,
   Session,
   createConfiguredModel,
+  createSessionId,
+  defaultConfigDir,
   loadConfig,
+  openWorkspace,
   textResponse,
   toolCallResponse,
 } from '@omniagent/core';
@@ -53,12 +55,15 @@ async function approve(request: PermissionRequest): Promise<ApprovalResponse> {
 
 async function main(): Promise<void> {
   const { config, rules } = await loadConfig();
+  const workspace = await openWorkspace(cwd, defaultConfigDir());
+  const sessionId = createSessionId();
   const configured = createConfiguredModel(config);
   const model = configured ?? createDemoModel();
 
-  const audit = new AuditLog(join(cwd, '.omniagent', 'audit.jsonl'));
+  const audit = new AuditLog(workspace.layout.auditPath(sessionId));
   const session = new Session({
-    cwd,
+    cwd: workspace.root,
+    sessionId,
     model,
     modelId: config.model,
     mode: config.mode,
@@ -73,6 +78,8 @@ async function main(): Promise<void> {
     ? `OpenAI 兼容 · ${config.model}`
     : 'FakeModel 演示（未配置 provider）';
   console.log(`\x1b[1mOmniAgent\x1b[0m · ${label}`);
+  console.log(`工作区 ${workspace.root}`);
+  console.log(`数据 ${workspace.layout.dir}`);
   console.log('输入任意内容开始，输入 exit 退出。\n');
 
   for (;;) {
