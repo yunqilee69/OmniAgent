@@ -32,7 +32,7 @@ function createDemoModel(): FakeModel {
         '再看一眼 README。',
       ),
       textResponse(
-        '以上就是演示：模型发起了两次工具调用，每次都被权限门拦下来问过你。\n配置真实 provider 后，这段剧本就会被真正的推理替代。',
+        '以上就是演示：模型发起了两次工具调用，由权限门按规则和模式决定是否需要确认。\n配置真实 provider 后，这段剧本就会被真正的推理替代。',
       ),
     ],
     {
@@ -66,7 +66,7 @@ async function main(): Promise<void> {
     sessionId,
     model,
     modelId: config.model,
-    mode: config.mode,
+    mode: workspace.config.mode ?? config.mode,
     rules,
     maxSteps: config.maxSteps,
     approve,

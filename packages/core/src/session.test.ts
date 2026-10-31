@@ -1,4 +1,7 @@
-import { describe, expect, it } from 'vitest';
+import { mkdtemp, readFile, rm } from 'node:fs/promises';
+import { tmpdir } from 'node:os';
+import { join } from 'node:path';
+import { describe, expect, it, vi } from 'vitest';
 import type { AgentEvent } from './protocol/events';
 import type { PermissionRequest } from './protocol/permission';
 import { FakeModel, textResponse, toolCallResponse } from './providers/fake';
@@ -31,6 +34,31 @@ async function collect(generator: AsyncGenerator<AgentEvent>) {
 }
 
 describe('Session', () => {
+  it('省略 mode 时默认允许工作区读写，未知工具仍询问', async () => {
+    const cwd = await mkdtemp(join(tmpdir(), 'omni-session-'));
+    const approve = vi.fn(async (_request: PermissionRequest) => 'deny' as const);
+    const model = new FakeModel([
+      toolCallResponse([{ name: 'write_file', args: { path: 'hello.txt', content: 'hello' } }]),
+      toolCallResponse([{ name: 'read_file', args: { path: 'hello.txt' } }]),
+      toolCallResponse([{ name: 'list_dir', args: { path: '.' } }]),
+      toolCallResponse([{ name: 'unknown_tool', args: {} }]),
+      textResponse('完成'),
+    ]);
+    try {
+      const session = new Session({ cwd, model, approve });
+      const events = await collect(session.send('开始'));
+      expect(await readFile(join(cwd, 'hello.txt'), 'utf8')).toBe('hello');
+      expect(events.filter((event) => event.type === 'tool.result')).toHaveLength(4);
+      expect(events.filter((event) => event.type === 'permission.decided').map(
+        (event) => event.decision,
+      )).toEqual(['allow', 'allow', 'allow', 'deny']);
+      expect(approve).toHaveBeenCalledTimes(1);
+      expect(approve.mock.calls[0]?.[0]).toMatchObject({ call: { name: 'unknown_tool' } });
+    } finally {
+      await rm(cwd, { recursive: true, force: true });
+    }
+  });
+
   it('把权限确认交给 UI 回调，而不是自己弹窗', async () => {
     const asked: PermissionRequest[] = [];
     const model = new FakeModel([

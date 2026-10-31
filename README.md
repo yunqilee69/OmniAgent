@@ -16,7 +16,7 @@ pnpm eval       # 跑 eval 任务集
 pnpm typecheck
 ```
 
-`pnpm dev` 会走完整链路：模型产出工具调用 → 权限门拦截 → 问你 y/N → 执行 → 结果回灌 → 再问模型。换成真模型只需要在 `~/.omniagent/config.json` 里配置 `provider`（见下一节），循环和权限一行都不用改。
+`pnpm dev` 会走完整链路：模型产出工具调用 → 权限门求值（需要时问你 y/N）→ 执行 → 结果回灌 → 再问模型。换成真模型只需要在 `~/.omniagent/config.json` 里配置 `provider`（见下一节），循环和权限一行都不用改。
 
 ---
 
@@ -34,7 +34,7 @@ pnpm typecheck
     "baseURL": "https://api.deepseek.com/v1",
     "apiKeyEnv": "DEEPSEEK_API_KEY"
   },
-  "mode": "default",
+  "mode": "workspace-write",
   "maxSteps": 25,
   "permissions": {
     "allow": ["read_file(./docs/**)", "list_dir"],
@@ -54,6 +54,14 @@ pnpm dev
 - **`baseURL`**：不填则用 SDK 默认的 OpenAI 地址。
 - **`model`**：必须填端点支持的模型 id；配了 `provider` 却仍写 `"fake"` 会直接报错。
 - **`headers` / `timeoutMs` / `maxRetries`**：可选，透传给 SDK。
+
+### 权限模式与工作区覆盖
+
+默认 `mode` 为 `workspace-write`：`read_file`、`list_dir` 和普通 `write_file` / `edit_file` 自动放行；访问 `.git`、`.omniagent` 路径及其他工具调用仍需确认。显式规则始终按 `deny → ask → allow` 优先于模式默认值求值。
+
+其他模式仍可显式选择：`default` 全部询问，`acceptEdits` 自动接受普通编辑，`plan` 禁止编辑和 shell，`dontAsk` 拒绝未预授权调用，`bypass` 自动放行未命中规则的调用。
+
+当前工作区的 `~/.omniagent/sessions/<key>/workspace.json` 可以添加可选 `mode` 字段（例如 `"mode": "default"`）覆盖全局模式；不填则沿用全局配置。TUI 启动时显示该工作区的数据目录。
 
 ### 流式输出
 

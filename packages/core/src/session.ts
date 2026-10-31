@@ -62,7 +62,7 @@ export class Session {
       system: options.system ?? DEFAULT_SYSTEM_PROMPT,
       tools: options.tools ?? createDefaultRegistry(),
       permissions: new RuleBasedGate({
-        mode: options.mode ?? 'default',
+        mode: options.mode ?? 'workspace-write',
         rules: options.rules ?? [],
         cwd: options.cwd,
         approve: options.approve,

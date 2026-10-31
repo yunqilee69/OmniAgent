@@ -39,7 +39,7 @@ export const ConfigSchema = z.object({
   model: z.string().default('fake'),
   /** 不配 provider 时使用 FakeModel 演示剧本。 */
   provider: ProviderSchema.optional(),
-  mode: z.enum(PERMISSION_MODES).default('default'),
+  mode: z.enum(PERMISSION_MODES).default('workspace-write'),
   maxSteps: z.number().int().positive().default(25),
   system: z.string().optional(),
   permissions: z

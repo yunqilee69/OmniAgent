@@ -1,6 +1,6 @@
 {
   "model": "fake",
-  "mode": "default",
+  "mode": "workspace-write",
   "maxSteps": 25,
   "permissions": {
     "allow": ["read_file(./docs/**)", "list_dir"],

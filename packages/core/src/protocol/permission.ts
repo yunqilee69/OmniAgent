@@ -8,6 +8,7 @@ import type { ToolCall } from '../domain/message';
  */
 
 export const PERMISSION_MODES = [
+  'workspace-write',
   'default',
   'acceptEdits',
   'plan',

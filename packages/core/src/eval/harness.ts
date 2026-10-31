@@ -116,7 +116,7 @@ export async function runEvalCase(
       cwd: workspace,
       model,
       modelId: model.name,
-      mode: testCase.mode ?? 'default',
+      ...(testCase.mode !== undefined ? { mode: testCase.mode } : {}),
       rules: parseRuleSet(testCase.permissions ?? {}, 'session', workspace),
       approve: async (request) =>
         testCase.approve ? await testCase.approve(request) : 'allow',

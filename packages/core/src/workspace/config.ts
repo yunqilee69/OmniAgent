@@ -1,16 +1,19 @@
 import { mkdir, readFile, writeFile } from 'node:fs/promises';
 import { dirname } from 'node:path';
 import { z } from 'zod';
+import { PERMISSION_MODES } from '../protocol/permission';
 
 /**
- * 工作区配置。只描述「这是哪个目录」，不描述模型、权限或记忆。
- * 那些仍在 ~/.omniagent/config.json。文件不存在时创建，已有内容原样保留。
+ * 工作区配置：登记根目录，可选覆盖全局权限模式。
+ * 文件不存在时创建，已有内容原样保留。
  */
 
 export const WorkspaceConfigSchema = z
   .object({
     /** 工作区根目录，符号链接已解开。 */
     path: z.string().min(1),
+    /** 不填时沿用全局配置。 */
+    mode: z.enum(PERMISSION_MODES).optional(),
   })
   .passthrough();
 

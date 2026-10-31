@@ -61,6 +61,20 @@ function modeDefault(call: ToolCall, mode: PermissionMode): RuleBasedResult {
         ? { decision: 'deny', reason: 'plan 模式只读，不允许修改或执行命令' }
         : { decision: 'allow', reason: 'plan 模式允许读取' };
 
+    case 'workspace-write': {
+      if (touchesProtectedPath(call)) {
+        return { decision: 'ask', reason: '访问受保护路径（如 .git）需要确认' };
+      }
+      if (
+        call.name === 'read_file' ||
+        call.name === 'list_dir' ||
+        isEditTool(call.name)
+      ) {
+        return { decision: 'allow', reason: 'workspace-write 自动允许工作区文件读写' };
+      }
+      return { decision: 'ask', reason: 'workspace-write 下其他工具调用仍需确认' };
+    }
+
     case 'acceptEdits': {
       if (touchesProtectedPath(call)) {
         return { decision: 'ask', reason: '写入受保护路径（如 .git）需要确认' };

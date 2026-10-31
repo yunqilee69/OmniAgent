@@ -126,6 +126,56 @@ describe('路径规则', () => {
   });
 });
 
+describe('workspace-write 模式', () => {
+  it.each(['read_file', 'list_dir', 'write_file', 'edit_file'])(
+    '自动允许普通工作区文件操作 %s',
+    (name) => {
+      const call = { id: 'c1', name, arguments: { path: 'src/a.ts' } };
+      expect(decide({ call, mode: 'workspace-write', rules: [], cwd }).decision).toBe('allow');
+    },
+  );
+
+  it.each(['.git/config', '.omniagent/config.json'])(
+    '访问受保护路径 %s 仍需确认',
+    (path) => {
+      for (const name of ['read_file', 'list_dir', 'write_file', 'edit_file']) {
+        const call = { id: 'c1', name, arguments: { path } };
+        expect(decide({ call, mode: 'workspace-write', rules: [], cwd }).decision).toBe('ask');
+      }
+    },
+  );
+
+  it.each(['shell', 'unknown_tool'])(
+    '其他工具 %s 仍需确认',
+    (name) => {
+      const call = { id: 'c1', name, arguments: {} };
+      expect(decide({ call, mode: 'workspace-write', rules: [], cwd }).decision).toBe('ask');
+    },
+  );
+
+  it('显式 deny 和 ask 优先于自动读写及 allow 规则', () => {
+    for (const decision of ['deny', 'ask'] as const) {
+      const result = decide({
+        call: readCall('a.txt'),
+        mode: 'workspace-write',
+        rules: rules(['read_file', 'allow'], ['read_file', decision]),
+        cwd,
+      });
+      expect(result.decision).toBe(decision);
+    }
+  });
+
+  it('显式 allow 优先于模式的确认默认值', () => {
+    const result = decide({
+      call: { id: 'c1', name: 'write_file', arguments: { path: '.git/config' } },
+      mode: 'workspace-write',
+      rules: rules(['write_file', 'allow']),
+      cwd,
+    });
+    expect(result.decision).toBe('allow');
+  });
+});
+
 describe('acceptEdits 模式下的受保护路径', () => {
   it('.git 里的写入仍然要问', () => {
     const result = decide({

@@ -4,6 +4,32 @@ import { join } from 'node:path';
 import { describe, expect, it } from 'vitest';
 import { identifyWorkspace } from './id';
 import { openWorkspace } from './open';
+import { WorkspaceConfigSchema } from './config';
+import { ConfigSchema, loadConfig } from '../config/load';
+import { PERMISSION_MODES } from '../protocol/permission';
+
+describe('权限模式配置', () => {
+  it('全局缺省 mode 为 workspace-write，工作区不注入默认 mode', () => {
+    expect(ConfigSchema.parse({}).mode).toBe('workspace-write');
+    expect(WorkspaceConfigSchema.parse({ path: '/work' })).toEqual({ path: '/work' });
+  });
+
+  it.each(PERMISSION_MODES)('全局和工作区支持模式 %s', (mode) => {
+    expect(ConfigSchema.parse({ mode }).mode).toBe(mode);
+    expect(WorkspaceConfigSchema.parse({ path: '/work', mode }).mode).toBe(mode);
+  });
+
+  it.each(['invalid', null, 1])('拒绝非法 mode %s', (mode) => {
+    expect(ConfigSchema.safeParse({ mode }).success).toBe(false);
+    expect(WorkspaceConfigSchema.safeParse({ path: '/work', mode }).success).toBe(false);
+  });
+
+  it('全局配置文件不存在时也使用 workspace-write', async () => {
+    const dir = await mkdtemp(join(tmpdir(), 'omni-config-'));
+    const { config } = await loadConfig(join(dir, 'missing.json'));
+    expect(config.mode).toBe('workspace-write');
+  });
+});
 
 describe('identifyWorkspace', () => {
   it('目录名是基名加路径哈希，符号链接和原目录是同一个工作区', async () => {
@@ -47,13 +73,14 @@ describe('openWorkspace', () => {
     const root = await mkdtemp(join(tmpdir(), 'omni-proj-'));
     const home = await mkdtemp(join(tmpdir(), 'omni-home-'));
     const first = await openWorkspace(root, home);
-    await writeFile(first.layout.configPath, `${JSON.stringify({ path: root, note: 'keep' }, null, 2)}\n`);
+    await writeFile(first.layout.configPath, `${JSON.stringify({ path: root, mode: 'default', note: 'keep' }, null, 2)}\n`);
 
     const second = await openWorkspace(root, home);
 
-    expect(second.config).toEqual({ path: root, note: 'keep' });
+    expect(second.config).toEqual({ path: root, mode: 'default', note: 'keep' });
     expect(JSON.parse(await readFile(second.layout.configPath, 'utf8'))).toEqual({
       path: root,
+      mode: 'default',
       note: 'keep',
     });
   });
