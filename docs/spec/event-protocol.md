@@ -7,10 +7,13 @@
 ```ts
 type AgentEvent =
   | { type: 'turn.start'; step: number }
+  | { type: 'assistant.reasoning.delta'; text: string }
   | { type: 'assistant.delta'; text: string }
   | { type: 'assistant.message'; message: AssistantMessage }
   | { type: 'tool.call'; call: ToolCall }
   | { type: 'permission.decided'; callId: string; decision: 'allow' | 'deny'; source: string }
+  | { type: 'plan.review.requested'; requestId: string; plan: string }
+  | { type: 'plan.review.decided'; requestId: string; approved: boolean; feedback?: string }
   | { type: 'tool.result'; result: ToolResult }
   | { type: 'context.compacted'; beforeTokens: number; afterTokens: number }
   | { type: 'turn.end'; reason: StopReason }
@@ -25,6 +28,7 @@ type AgentEvent =
 
 ```
 turn.start
+assistant.reasoning.delta*   ← 流式思考增量，可能没有
 assistant.delta*             ← 流式文本增量，可能没有
 assistant.message            ← 完整消息，可能带 toolCalls
   tool.call                  ← 每个调用依次
@@ -43,10 +47,11 @@ turn.end
 3. 一次 `send()` 以且仅以一个 `turn.end` 或 `error` 结束。
 4. `assistant.message` 里的 `toolCalls` 与后续 `tool.call` 一一对应，顺序一致。
 5. `assistant.delta` 只出现在同一轮的 `assistant.message` 之前；把所有 delta 的 `text` 依次拼接，等于该条 assistant 消息的文本内容（provider 实现 `stream()` 时成立）。
+6. `assistant.reasoning.delta` 同样只出现在 `assistant.message` 之前，但它**不是**正文的一部分，也不保证被持久化或回放。UI 可以只把它当实时展示；没有思考内容时该事件完全缺席。
 
 ## 流式是可选的
 
-`ModelClient.stream()` 是可选方法。实现了它的 provider 在生成过程中 yield 文本增量，最后 return 完整的 `ModelResponse`；没实现的 provider 走 `complete()`，这一轮就不会有 `assistant.delta`。
+`ModelClient.stream()` 是可选方法。实现了它的 provider 在生成过程中 yield 文本或思考增量，最后 return 完整的 `ModelResponse`；没实现的 provider 走 `complete()`，这一轮就不会有 `assistant.delta` 或 `assistant.reasoning.delta`。
 
 `tool_call` 的分片不放进事件流：provider 内部按 `index` 累积 id / name / arguments，拼完整后随 `assistant.message` 一起出现。UI 需要的是「模型正在输出文本」，不是「工具参数拼到第几个字符」。
 
@@ -71,6 +76,8 @@ M1 的权限确认走**注入回调**：`Session` 构造时传入 `approve(reque
 core 调用它并 await，UI 在回调里直接渲染提示。
 
 这是 ADR-0002 的取舍：先不引入 request/response 配对机制。代价是「确认」是同步阻塞的，UI 不能在这期间做别的事。
+
+Web 的实时通道在此之上增加了 live-only 的 `permission.requested`、`plan.review.requested` 和 `plan.review.decided` 事件。它们不会写入持久轨迹；`exit_plan_mode` 的计划和最终结果仍通过普通工具调用与工具结果进入会话记录。计划审核发生在 `tool.call` 之后、`tool.result` 之前。
 
 **升级路径**（做 daemon 时）：改成
 

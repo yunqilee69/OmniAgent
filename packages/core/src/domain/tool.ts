@@ -6,7 +6,7 @@ import type { z } from 'zod';
  * 三条硬规则（都来自踩坑）：
  * 1. execute 里抛出的异常最终会被转成 ok:false 的 ToolResult 回灌给模型，
  *    绝不把异常抛进主循环——模型需要看到错误文本才能自己纠正。
- * 2. 输出必须截断，并给出完整输出所在的引用。
+ * 2. 输出必须截断，并用 truncated 标注，避免模型把残缺输出当成完整结果。
  * 3. parameters 是 zod schema，既做运行时校验，也用来生成给模型的 JSON Schema。
  */
 
@@ -19,9 +19,8 @@ export interface ToolSpec {
 
 export interface ToolOutput {
   content: string;
+  ok?: boolean;
   truncated?: boolean;
-  /** 完整输出落盘的位置，截断时填。 */
-  fullOutputRef?: string;
 }
 
 export interface ToolContext {

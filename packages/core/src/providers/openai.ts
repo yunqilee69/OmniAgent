@@ -110,6 +110,16 @@ export async function* toModelStream(
       continue;
     }
 
+    // OpenAI-compatible reasoning channels use different field names; neither
+    // belongs in the visible assistant text.
+    const reasoning = (choice.delta as { reasoning_content?: unknown; reasoning?: unknown });
+    const reasoningText = typeof reasoning.reasoning_content === 'string'
+      ? reasoning.reasoning_content
+      : typeof reasoning.reasoning === 'string' ? reasoning.reasoning : '';
+    if (reasoningText.length > 0) {
+      yield { type: 'reasoning', text: reasoningText };
+    }
+
     if (choice.delta.content) {
       content += choice.delta.content;
       yield { type: 'text', text: choice.delta.content };

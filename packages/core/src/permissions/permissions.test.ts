@@ -1,13 +1,17 @@
-import { describe, expect, it } from 'vitest';
+import { chmodSync, mkdirSync, mkdtempSync, realpathSync, rmSync, symlinkSync, writeFileSync } from 'node:fs';
+import { tmpdir } from 'node:os';
+import { join } from 'node:path';
+import { afterEach, beforeEach, describe, expect, it } from 'vitest';
 import type { ToolCall } from '../domain/message';
 import type { Rule } from '../protocol/permission';
+import { readFileTool } from '../tools/builtin/read-file';
 import {
   matchesAllSubcommands,
   matchesAnySubcommand,
   splitCommand,
 } from './bash';
 import { decide } from './evaluate';
-import { parseRule } from './rules';
+import { parseRule, resolveRulePath } from './rules';
 
 const cwd = '/work/project';
 
@@ -124,6 +128,135 @@ describe('路径规则', () => {
     expect(denied.decision).toBe('deny');
     expect(allowed.decision).toBe('allow');
   });
+
+  it.each(['deny', 'ask'] as const)(
+    '%s conservatively matches case variants ahead of an allow', (decision) => {
+      const result = decide({
+        call: readCall('secret.txt'),
+        mode: 'bypass',
+        rules: rules(['read_file(./Secret.txt)', decision], ['read_file(*)', 'allow']),
+        cwd,
+      });
+      expect(result.decision).toBe(decision);
+    },
+  );
+
+  it('preserves deny over ask when matching case variants', () => {
+    const result = decide({
+      call: readCall('secret.txt'),
+      mode: 'bypass',
+      rules: rules(['read_file(./secret.txt)', 'ask'], ['read_file(./Secret.txt)', 'deny']),
+      cwd,
+    });
+    expect(result.decision).toBe('deny');
+  });
+
+  it('conservatively matches composed and decomposed Unicode case variants', () => {
+    const result = decide({
+      call: readCall('cafe\u0301.txt'),
+      mode: 'bypass',
+      rules: rules(['read_file(./CAFÉ.txt)', 'deny']),
+      cwd,
+    });
+    expect(result.decision).toBe('deny');
+  });
+
+  it('does not expand case-variant allow rules', () => {
+    const result = decide({
+      call: readCall('secret.txt'),
+      mode: 'dontAsk',
+      rules: rules(['read_file(./Secret.txt)', 'allow']),
+      cwd,
+    });
+    expect(result.decision).toBe('deny');
+  });
+
+  it('keeps single-slash rules anchor-relative and double-slash rules absolute', () => {
+    expect(resolveRulePath('/var/tmp/file', '/rule-anchor', cwd)).toBe('/rule-anchor/var/tmp/file');
+    expect(resolveRulePath('//var/tmp/file', '/rule-anchor', cwd)).toBe('/var/tmp/file');
+  });
+});
+
+describe('路径规则中的现有别名', () => {
+  let fixture: string;
+  let workspace: string;
+  let alias: string;
+
+  beforeEach(() => {
+    fixture = realpathSync(mkdtempSync(join(tmpdir(), 'omniagent-permission-')));
+    workspace = join(fixture, 'workspace');
+    alias = join(fixture, 'workspace-alias');
+    mkdirSync(workspace);
+    symlinkSync(workspace, alias, 'dir');
+  });
+
+  afterEach(() => {
+    rmSync(fixture, { recursive: true, force: true });
+  });
+
+  it.each(['deny', 'ask'] as const)(
+    '%s matches an absolute alias with a real workspace and relative call', async (decision) => {
+      writeFileSync(join(workspace, 'Secret.txt'), 'content');
+      const call = readCall('Secret.txt');
+      const rule = parseRule(`read_file(/${join(alias, 'Secret.txt')})`, decision, 'project', workspace);
+      const output = await readFileTool.execute(call.arguments, {
+        cwd: workspace,
+        signal: new AbortController().signal,
+      });
+      expect(output.content).toContain('content');
+      expect(decide({ call, mode: 'bypass', rules: [rule], cwd: workspace }).decision).toBe(decision);
+    },
+  );
+
+  it('matches aliases before a glob and missing descendants', () => {
+    const rule = parseRule(`write_file(/${join(alias, 'Secret', '**')})`, 'deny', 'project', workspace);
+    const call: ToolCall = {
+      id: 'c1',
+      name: 'write_file',
+      arguments: { path: 'secret/new/file.txt', content: 'x' },
+    };
+    expect(decide({ call, mode: 'bypass', rules: [rule], cwd: workspace }).decision).toBe('deny');
+  });
+
+  it('does not expand allow rules through workspace aliases', () => {
+    writeFileSync(join(workspace, 'Secret.txt'), 'content');
+    const rule = parseRule(`read_file(/${join(alias, 'Secret.txt')})`, 'allow', 'project', workspace);
+    expect(decide({ call: readCall('Secret.txt'), mode: 'dontAsk', rules: [rule], cwd: workspace }).decision)
+      .toBe('deny');
+  });
+
+  it('treats inaccessible rule prefixes as restrictive matches', (context) => {
+    const inaccessible = join(fixture, 'inaccessible');
+    mkdirSync(inaccessible);
+    chmodSync(inaccessible, 0);
+    try {
+      try {
+        realpathSync(join(inaccessible, 'secret'));
+        context.skip();
+      } catch (error) {
+        if ((error as NodeJS.ErrnoException).code !== 'EACCES') context.skip();
+      }
+      const rule = parseRule(`read_file(/${join(inaccessible, 'secret')})`, 'deny', 'project', workspace);
+      expect(decide({ call: readCall('other.txt'), mode: 'bypass', rules: [rule], cwd: workspace }).decision)
+        .toBe('deny');
+    } finally {
+      chmodSync(inaccessible, 0o700);
+    }
+  });
+
+  it.skipIf(process.platform !== 'darwin')('matches //var rules for a /private/var workspace', async (context) => {
+    if (!workspace.startsWith('/private/var/')) context.skip();
+    const aliasWorkspace = workspace.replace(/^\/private\/var\//, '/var/');
+    writeFileSync(join(workspace, 'Secret.txt'), 'content');
+    const rule = parseRule(`read_file(/${join(aliasWorkspace, 'Secret.txt')})`, 'deny', 'project', workspace);
+    const call = readCall('Secret.txt');
+    const output = await readFileTool.execute(call.arguments, {
+      cwd: workspace,
+      signal: new AbortController().signal,
+    });
+    expect(output.content).toContain('content');
+    expect(decide({ call, mode: 'bypass', rules: [rule], cwd: workspace }).decision).toBe('deny');
+  });
 });
 
 describe('acceptEdits 模式下的受保护路径', () => {
@@ -136,6 +269,18 @@ describe('acceptEdits 模式下的受保护路径', () => {
     });
     expect(result.decision).toBe('ask');
   });
+
+  it.each(['.GIT/config', '.OmniAgent/settings.json'])(
+    'prompts for protected directory case variant %s', (path) => {
+      const result = decide({
+        call: { id: 'c1', name: 'write_file', arguments: { path, content: 'x' } },
+        mode: 'acceptEdits',
+        rules: [],
+        cwd,
+      });
+      expect(result.decision).toBe('ask');
+    },
+  );
 
   it('普通文件编辑直接放行', () => {
     const result = decide({

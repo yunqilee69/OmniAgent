@@ -3,13 +3,18 @@ import { tmpdir } from 'node:os';
 import { dirname, join } from 'node:path';
 import type { Message } from '../domain/message';
 import { assistantText } from '../domain/message';
-import { parseRuleSet } from '../permissions/rules';
 import type { AgentEvent, StopReason } from '../protocol/events';
 import type {
   ApprovalResponse,
   PermissionMode,
   PermissionRequest,
 } from '../protocol/permission';
+import {
+  createInitialDshPermissionEvent,
+  projectDshPermissions,
+  snapshotDshPermissions,
+} from '../permissions/dsh-permissions';
+import type { DshPermissionPreset } from '../permissions/dsh-permissions';
 import { FakeModel } from '../providers/fake';
 import type { FakeStep } from '../providers/fake';
 import type { ModelClient } from '../providers/types';
@@ -59,8 +64,11 @@ export interface EvalCase {
   input?: string | string[];
   /** 剧本化模型。不填时使用 runEvalCase 传入的 model。 */
   steps?: FakeStep[];
+  /** The only permission source used by the eval runtime. */
+  permissionPreset?: DshPermissionPreset;
+  /** Legacy fields remain type-compatible but never authorize execution. */
   mode?: PermissionMode;
-  /** 规则格式同 config.json 的 permissions。 */
+  /** Legacy rule fields are recorded only as compatibility input. */
   permissions?: EvalPermissions;
   /** 权限确认的默认回答。不填时一律 allow。 */
   approve?: (request: PermissionRequest) => ApprovalResponse | Promise<ApprovalResponse>;
@@ -112,12 +120,16 @@ export async function runEvalCase(
       throw new Error('这个 case 没有 steps，也没有在 runEvalCase 里传 model');
     }
 
+    const dshPermissions = testCase.permissionPreset === undefined
+      ? undefined
+      : snapshotDshPermissions(projectDshPermissions([
+          createInitialDshPermissionEvent(testCase.permissionPreset),
+        ]));
     const session = new Session({
       cwd: workspace,
       model,
       modelId: model.name,
-      mode: testCase.mode ?? 'default',
-      rules: parseRuleSet(testCase.permissions ?? {}, 'session', workspace),
+      ...(dshPermissions === undefined ? {} : { dshPermissions }),
       approve: async (request) =>
         testCase.approve ? await testCase.approve(request) : 'allow',
       ...(options.system !== undefined ? { system: options.system } : {}),

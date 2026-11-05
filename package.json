@@ -4,10 +4,11 @@
   "type": "module",
   "packageManager": "pnpm@10.17.0",
   "engines": {
-    "node": ">=22"
+    "node": ">=22.19.0"
   },
   "scripts": {
     "dev": "tsx packages/tui/src/main.ts",
+    "web": "tsx packages/web/src/main.ts",
     "typecheck": "tsc --noEmit",
     "test": "vitest run",
     "test:watch": "vitest",

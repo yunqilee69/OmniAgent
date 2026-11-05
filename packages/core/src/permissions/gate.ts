@@ -8,7 +8,7 @@ import type {
 import { decide } from './evaluate';
 
 /**
- * 把纯函数 decide() 接到「问人」这个副作用上。
+ * 把权限求值 decide() 接到「问人」这个副作用上。
  *
  * 关键点：core 不知道 UI 长什么样。它只拿到一个 approve 回调，
  * TUI 可以在回调里渲染提示，以后换成 web 也只需要换这个回调。

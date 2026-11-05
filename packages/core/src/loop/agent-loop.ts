@@ -11,10 +11,12 @@ import type {
   ModelResponse,
   ModelStreamDelta,
 } from '../providers/types';
+import type { ToolSpec } from '../domain/tool';
 import type { ToolRegistry } from '../tools/registry';
 import { ToolExecutor } from '../exec/executor';
 import type { AuditSink } from '../store/audit';
 import { digestArgs } from '../store/audit';
+import { compactMessages, estimateMessages } from '../context/compaction';
 
 /**
  * 主循环。
@@ -26,16 +28,28 @@ import { digestArgs } from '../store/audit';
  * 它是 async generator 而不是回调：UI 消费事件流，core 不需要知道 UI 存在。
  */
 
+export type PreparedToolCall =
+  | { decision: 'deny'; source: string }
+  | { decision: 'allow'; source: string; execute: () => Promise<ToolResult> };
+
 export interface AgentLoopDeps {
   model: ModelClient;
   modelId: string;
-  system: string;
+  system: string | (() => string);
   tools: ToolRegistry;
+  /** Optional dynamic disclosure; execution still resolves through {@link tools}. */
+  toolSpecs?: () => ToolSpec[];
+  /** Drain messages delivered while a turn is running (agent messaging/notices). */
+  takeQueuedMessages?: () => Message[];
   permissions: PermissionGate;
+  /** Trusted host hook: an allowed call carries its own per-call execution policy. */
+  prepareToolCall?: (call: ToolCall, signal: AbortSignal) => Promise<PreparedToolCall>;
   cwd: string;
   sessionId: string;
   /** 防止模型无限循环；到上限就停，并把原因告诉调用方。 */
   maxSteps?: number;
+  contextWindowTokens?: number;
+  retainContextTokens?: number;
   audit?: AuditSink;
 }
 
@@ -58,16 +72,31 @@ export class AgentLoop {
         return messages;
       }
 
+      const queued = this.deps.takeQueuedMessages?.() ?? [];
+      if (queued.length > 0) messages.push(...queued);
+
       yield { type: 'turn.start', step };
+
+      if (this.deps.contextWindowTokens !== undefined) {
+        const beforeTokens = estimateMessages(messages);
+        const compacted = await compactMessages(messages, {
+          maxTokens: this.deps.contextWindowTokens,
+          ...(this.deps.retainContextTokens === undefined ? {} : { retainTokens: this.deps.retainContextTokens }),
+        });
+        if (compacted.compacted) {
+          messages.splice(0, messages.length, ...compacted.messages);
+          yield { type: 'context.compacted', beforeTokens, afterTokens: compacted.afterTokens };
+        }
+      }
 
       let assistant: AssistantMessage;
       let stopReason: StopReason;
       try {
         const request = {
           model: this.deps.modelId,
-          system: this.deps.system,
+          system: typeof this.deps.system === 'function' ? this.deps.system() : this.deps.system,
           messages,
-          tools: this.deps.tools.specs(),
+          tools: this.deps.toolSpecs ? this.deps.toolSpecs() : this.deps.tools.specs(),
           ...(signal ? { signal } : {}),
         };
 
@@ -94,21 +123,37 @@ export class AgentLoop {
       messages.push(assistant);
       yield { type: 'assistant.message', message: assistant };
 
-      if (assistant.toolCalls.length === 0) {
+      if (assistant.toolCalls.length === 0 || stopReason === 'max_tokens') {
         yield { type: 'turn.end', reason: stopReason };
         return messages;
       }
 
       const results: ToolResult[] = [];
+      const callSignal = signal ?? new AbortController().signal;
       const executor = new ToolExecutor(this.deps.tools, {
         cwd: this.deps.cwd,
-        signal: signal ?? new AbortController().signal,
+        signal: callSignal,
       });
 
       for (const call of assistant.toolCalls) {
+        if (callSignal.aborted) {
+          yield { type: 'turn.end', reason: 'interrupted' };
+          return messages;
+        }
         yield { type: 'tool.call', call };
 
-        const permission = await this.deps.permissions.check(call);
+        if (callSignal.aborted) {
+          yield { type: 'turn.end', reason: 'interrupted' };
+          return messages;
+        }
+        const prepared = this.deps.prepareToolCall
+          ? await this.deps.prepareToolCall(call, callSignal)
+          : undefined;
+        const permission = prepared ?? await this.deps.permissions.check(call);
+        if (callSignal.aborted) {
+          yield { type: 'turn.end', reason: 'interrupted' };
+          return messages;
+        }
         yield {
           type: 'permission.decided',
           callId: call.id,
@@ -116,10 +161,15 @@ export class AgentLoop {
           source: permission.source,
         };
 
-        const result =
-          permission.decision === 'allow'
-            ? await executor.execute(call)
-            : deniedResult(call, permission.source);
+        if (callSignal.aborted) {
+          yield { type: 'turn.end', reason: 'interrupted' };
+          return messages;
+        }
+        const result = permission.decision === 'allow'
+          ? prepared?.decision === 'allow'
+            ? await prepared.execute()
+            : await executor.execute(call)
+          : deniedResult(call, permission.source);
 
         results.push(result);
         yield { type: 'tool.result', result };
@@ -148,8 +198,8 @@ export class AgentLoop {
   /**
    * 把 provider 的流式片段转成 UI 事件。
    *
-   * provider 只 yield 文本增量；完整的 assistant 消息和 tool calls 由流结束时
-   * 的 return 值带回。这样 UI 可以边收边画，循环后续逻辑完全不用改。
+   * provider 只 yield 文本/思考增量；完整的 assistant 消息和 tool calls 由流
+   * 结束时的 return 值带回。这样 UI 可以边收边画，循环后续逻辑完全不用改。
    */
   private async *forwardStream(
     stream: AsyncGenerator<ModelStreamDelta, ModelResponse>,
@@ -158,6 +208,8 @@ export class AgentLoop {
     while (!next.done) {
       if (next.value.type === 'text') {
         yield { type: 'assistant.delta', text: next.value.text };
+      } else {
+        yield { type: 'assistant.reasoning.delta', text: next.value.text };
       }
       next = await stream.next();
     }

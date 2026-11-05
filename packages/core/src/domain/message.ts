@@ -30,10 +30,9 @@ export const ToolResultSchema = z.object({
   callId: z.string(),
   name: z.string(),
   ok: z.boolean(),
-  /** 回灌给模型的文本，已截断。完整输出走 fullOutputRef。 */
+  /** 回灌给模型的文本，已截断。 */
   content: z.string(),
   truncated: z.boolean().default(false),
-  fullOutputRef: z.string().optional(),
   durationMs: z.number().optional(),
 });
 export type ToolResult = z.infer<typeof ToolResultSchema>;
@@ -56,11 +55,111 @@ export const UserMessageSchema = z.object({
 });
 export type UserMessage = z.infer<typeof UserMessageSchema>;
 
+const REPLAY_MAX_IDENTIFIER_LENGTH = 1024;
+const REPLAY_MAX_TEXT_LENGTH = 4 * 1024 * 1024;
+const REPLAY_MAX_BLOCKS = 1024;
+const REPLAY_MAX_JSON_NODES = 100_000;
+const REPLAY_MAX_JSON_DEPTH = 64;
+
+const replayIdentifier = z.string().min(1).max(REPLAY_MAX_IDENTIFIER_LENGTH);
+const replayText = z.string().max(REPLAY_MAX_TEXT_LENGTH);
+
+type ReplayJsonValue = null | boolean | number | string | ReplayJsonValue[] | { [key: string]: ReplayJsonValue };
+
+// Validate iteratively before accepting untrusted tool inputs from a session log.
+function isBoundedJsonObject(value: unknown): boolean {
+  if (typeof value !== 'object' || value === null || Array.isArray(value)) return false;
+  const pending: Array<{ value: unknown; depth: number; exiting?: boolean }> = [{ value, depth: 0 }];
+  const ancestors = new Set<object>();
+  let nodes = 0;
+  let characters = 0;
+
+  while (pending.length > 0) {
+    const item = pending.pop()!;
+    if (item.exiting) {
+      ancestors.delete(item.value as object);
+      continue;
+    }
+    if (++nodes > REPLAY_MAX_JSON_NODES || item.depth > REPLAY_MAX_JSON_DEPTH) return false;
+    const current = item.value;
+    if (current === null || typeof current === 'boolean') continue;
+    if (typeof current === 'number') {
+      if (!Number.isFinite(current)) return false;
+      continue;
+    }
+    if (typeof current === 'string') {
+      characters += current.length;
+      if (characters > REPLAY_MAX_TEXT_LENGTH) return false;
+      continue;
+    }
+    if (typeof current !== 'object' || ancestors.has(current)) return false;
+    if (!Array.isArray(current) && Object.getPrototypeOf(current) !== Object.prototype &&
+        Object.getPrototypeOf(current) !== null) return false;
+    if (Object.getOwnPropertySymbols(current).length > 0) return false;
+    ancestors.add(current);
+    pending.push({ value: current, depth: item.depth, exiting: true });
+    for (const [key, child] of Object.entries(current)) {
+      characters += key.length;
+      if (characters > REPLAY_MAX_TEXT_LENGTH) return false;
+      pending.push({ value: child, depth: item.depth + 1 });
+    }
+  }
+  return true;
+}
+
+const DshReplayInputSchema = z.record(z.string(), z.unknown()).refine(isBoundedJsonObject);
+const PiReplayArgumentsSchema = z.custom<{ [key: string]: ReplayJsonValue }>(isBoundedJsonObject);
+
+export const DshReplaySchema = z.object({
+  kind: z.literal('deepseek-messages'),
+  version: z.literal(1),
+  provider: z.literal('deepseek-official'),
+  model: replayIdentifier,
+  endpoint: replayIdentifier.optional(),
+  blocks: z.array(z.discriminatedUnion('type', [
+    z.object({ type: z.literal('text'), text: replayText }).strict(),
+    z.object({ type: z.literal('thinking'), thinking: replayText, signature: replayText.optional() }).strict(),
+    z.object({
+      type: z.literal('tool_use'), id: replayIdentifier, name: replayIdentifier,
+      input: DshReplayInputSchema, raw: replayText,
+    }).strict(),
+  ])).max(REPLAY_MAX_BLOCKS),
+}).strict();
+export type DshReplay = z.infer<typeof DshReplaySchema>;
+
+export const ProviderReplaySchema = z.object({
+  kind: z.literal('pi-ai'),
+  version: z.literal(1),
+  provider: replayIdentifier,
+  model: replayIdentifier,
+  api: replayIdentifier,
+  endpoint: replayIdentifier.optional(),
+  responseModel: replayIdentifier.optional(),
+  responseId: replayIdentifier.optional(),
+  providerThinkingLevel: replayIdentifier.optional(),
+  stopReason: z.enum(['pending', 'stop', 'length', 'toolUse', 'error', 'aborted', 'deferred']).optional(),
+  content: z.array(z.discriminatedUnion('type', [
+    z.object({ type: z.literal('text'), text: replayText, textSignature: replayText.optional() }).strict(),
+    z.object({
+      type: z.literal('thinking'), thinking: replayText,
+      thinkingSignature: replayText.optional(), redacted: z.boolean().optional(),
+    }).strict(),
+    z.object({
+      type: z.literal('toolCall'), id: replayIdentifier, name: replayIdentifier,
+      arguments: PiReplayArgumentsSchema, thoughtSignature: replayText.optional(),
+      namespace: replayIdentifier.optional(),
+    }).strict(),
+  ])).max(REPLAY_MAX_BLOCKS),
+}).strict();
+export type ProviderReplay = z.infer<typeof ProviderReplaySchema>;
+
 export const AssistantMessageSchema = z.object({
   role: z.literal('assistant'),
   content: z.array(ContentPartSchema),
   toolCalls: z.array(ToolCallSchema).default([]),
   usage: UsageSchema.optional(),
+  dshReplay: DshReplaySchema.optional(),
+  providerReplay: ProviderReplaySchema.optional(),
 });
 export type AssistantMessage = z.infer<typeof AssistantMessageSchema>;
 

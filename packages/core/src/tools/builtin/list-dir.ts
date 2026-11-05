@@ -1,7 +1,9 @@
-import { readdir } from 'node:fs/promises';
+import type { Dirent } from 'node:fs';
+import { opendir } from 'node:fs/promises';
 import { z } from 'zod';
 import type { Tool } from '../../domain/tool';
-import { displayPath, resolveInside } from '../paths';
+import { MAX_DIRECTORY_ENTRIES } from '../limits';
+import { displayPath, resolveInside, resolveInsidePhysical } from '../paths';
 import { truncateOutput } from '../tool';
 
 const Params = z.object({
@@ -17,15 +19,28 @@ export const listDirTool: Tool = {
   mutating: false,
   async execute(args, ctx) {
     const { path } = Params.parse(args);
-    const absolute = resolveInside(ctx.cwd, path);
+    const visible = resolveInside(ctx.cwd, path);
+    const absolute = await resolveInsidePhysical(ctx.cwd, path);
     ctx.signal.throwIfAborted();
 
-    const entries = await readdir(absolute, { withFileTypes: true });
-    const lines = entries
-      .filter((entry) => !IGNORED.has(entry.name))
+    const entries = await opendir(absolute);
+    const visibleEntries: Dirent[] = [];
+    let omitted = 0;
+    try {
+      for await (const entry of entries) {
+        ctx.signal.throwIfAborted();
+        if (IGNORED.has(entry.name)) continue;
+        if (visibleEntries.length >= MAX_DIRECTORY_ENTRIES) { omitted += 1; continue; }
+        visibleEntries.push(entry);
+      }
+    } finally {
+      await entries.close().catch(() => undefined);
+    }
+    const lines = visibleEntries
       .sort((a, b) => a.name.localeCompare(b.name))
       .map((entry) => (entry.isDirectory() ? `${entry.name}/` : entry.name));
+    if (omitted > 0) lines.push(`… （另有 ${omitted} 个条目未列出，上限 ${MAX_DIRECTORY_ENTRIES}）`);
 
-    return truncateOutput(`${displayPath(ctx.cwd, absolute)}/\n${lines.join('\n')}`);
+    return truncateOutput(`${displayPath(ctx.cwd, visible)}/\n${lines.join('\n')}`);
   },
 };

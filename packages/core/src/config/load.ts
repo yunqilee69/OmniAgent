@@ -13,43 +13,78 @@ import { parseRuleSet } from '../permissions/rules';
  * 但 Rule 上已经有 source 字段，扩展时不用改数据结构。
  */
 
-/**
- * 模型 provider。
- *
- * 只做 OpenAI 兼容协议：官方 OpenAI、DeepSeek、OpenRouter、Ollama、vLLM
- * 都走同一套 Chat Completions，差别只在 baseURL 和 model id。
- * 密钥优先读环境变量，避免把明文写进 ~/.omniagent/config.json。
- */
+/** Legacy OpenAI Chat Completions settings. Missing type retains the historical default. */
 export const ProviderSchema = z.object({
   type: z.literal('openai').default('openai'),
-  /** 兼容端点根地址，如 https://api.deepseek.com/v1；不填则用 SDK 默认值。 */
   baseURL: z.string().url().optional(),
-  /** 直接写密钥（不推荐）；不填则读取 apiKeyEnv 指向的环境变量。 */
   apiKey: z.string().optional(),
   apiKeyEnv: z.string().default('OPENAI_API_KEY'),
   headers: z.record(z.string(), z.string()).optional(),
   timeoutMs: z.number().int().positive().optional(),
   maxRetries: z.number().int().nonnegative().optional(),
-});
+}).passthrough();
 
 export type ProviderConfig = z.infer<typeof ProviderSchema>;
 
+const nonEmpty = z.string().trim().min(1);
+const positiveInteger = z.number().int().positive().max(Number.MAX_SAFE_INTEGER);
+const reasoningEffort = z.enum(['off', 'minimal', 'low', 'medium', 'high', 'xhigh', 'max']);
+const routeModel = z.object({
+  id: nonEmpty,
+  name: nonEmpty.optional(),
+  contextWindow: positiveInteger.optional(),
+  maxTokens: positiveInteger.optional(),
+  input: z.array(z.enum(['text', 'image'])).min(1).optional(),
+  reasoning: z.boolean().optional(),
+}).passthrough();
+
+/** Provider profiles use the DSH convention: the map key is the route id. */
+const route = z.object({
+  api: z.enum(['deepseek-messages', 'openai-completions', 'openai-responses', 'anthropic-messages']).optional(),
+  baseURL: z.string().url().optional(),
+  apiKey: z.string().optional(),
+  apiKeyEnv: nonEmpty.optional(),
+  auth: z.literal('ambient').optional(),
+  headers: z.record(z.string(), z.string()).optional(),
+  models: z.array(routeModel).optional(),
+  timeoutMs: positiveInteger.optional(),
+  streamIdleTimeoutMs: positiveInteger.max(2_147_483_647).optional(),
+  maxRetries: z.number().int().nonnegative().optional(),
+  reasoning: z.enum(['minimal', 'low', 'medium', 'high', 'xhigh', 'max']).optional(),
+  reasoningEffort: reasoningEffort.optional(),
+  maxTokens: positiveInteger.optional(),
+  systemPromptUpdate: z.enum(['in-history', 'latest']).optional(),
+}).passthrough();
+
 export const ConfigSchema = z.object({
-  /** 模型 id；接真 provider 时就是它那边的 model 名。 */
-  model: z.string().default('fake'),
-  /** 不配 provider 时使用 FakeModel 演示剧本。 */
-  provider: ProviderSchema.optional(),
+  model: nonEmpty.default('fake'),
+  /** String route for DSH/pi-ai; object is the legacy OpenAI configuration. */
+  provider: z.union([nonEmpty, ProviderSchema]).optional(),
+  providers: z.record(nonEmpty, route).optional(),
+  reasoningEffort: reasoningEffort.optional(),
+  maxTokens: positiveInteger.optional(),
+  /** Optional input budget for pre-request compaction; defaults to the model catalog. */
+  contextWindowTokens: positiveInteger.optional(),
+  retainContextTokens: positiveInteger.optional(),
+  // Invalid stored permission values must remain available for explicit repair.
+  dsh: z.unknown().optional(),
+  /** Legacy permission fields are retained for existing callers, never mapped to DSH presets. */
   mode: z.enum(PERMISSION_MODES).default('default'),
   maxSteps: z.number().int().positive().default(25),
+  /** Subagent delegation limits. Depth counts root as 0. */
+  subagents: z.object({
+    maxDepth: z.number().int().nonnegative().default(1),
+    maxActive: z.number().int().positive().default(8),
+  }).passthrough().optional(),
   system: z.string().optional(),
   permissions: z
     .object({
       allow: z.array(z.string()).default([]),
       ask: z.array(z.string()).default([]),
       deny: z.array(z.string()).default([]),
-    })
+    }).passthrough()
     .optional(),
-});
+}).passthrough();
 
 export type Config = z.infer<typeof ConfigSchema>;
 

@@ -26,11 +26,13 @@ export interface ModelResponse {
 /**
  * 流式增量。
  *
- * 目前只有文本。tool_call 的分片不往外抛：它在 provider 内部累积成完整的
- * ToolCall，等流结束随 ModelResponse 一起返回。UI 需要的是「正在说话」，
- * 不是「参数拼到第几个字符」。
+ * reasoning 是模型的思考内容，text 是给用户看的正文；两者分开，UI 才能分别
+ * 渲染。tool_call 的分片不往外抛：它在 provider 内部累积成完整的 ToolCall，
+ * 等流结束随 ModelResponse 一起返回。
  */
-export type ModelStreamDelta = { type: 'text'; text: string };
+export type ModelStreamDelta =
+  | { type: 'text'; text: string }
+  | { type: 'reasoning'; text: string };
 
 export interface ModelClient {
   readonly name: string;

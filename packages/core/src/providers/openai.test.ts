@@ -260,6 +260,22 @@ describe('toModelStream', () => {
     expect(next.value.stopReason).toBe('tool_use');
   });
 
+  it('把 reasoning_content 作为独立增量抛出', async () => {
+    const stream = toModelStream(
+      asyncItems([
+        chunk({ role: 'assistant', content: null, reasoning_content: '想' } as ChatCompletionChunk.Choice['delta']),
+        chunk({ content: '好' }, 'stop'),
+      ]),
+    );
+    const deltas: Array<{ type: string; text: string }> = [];
+    let next = await stream.next();
+    while (!next.done) {
+      deltas.push(next.value);
+      next = await stream.next();
+    }
+    expect(deltas).toEqual([{ type: 'reasoning', text: '想' }, { type: 'text', text: '好' }]);
+  });
+
   it('纯文本流以 end_turn 结束', async () => {
     const stream = toModelStream(
       asyncItems([chunk({ content: '搞定' }), chunk({}, 'stop')]),

@@ -39,10 +39,9 @@ export class ToolExecutor {
       return {
         callId: call.id,
         name: call.name,
-        ok: true,
+        ok: output.ok ?? true,
         content: output.content,
         truncated: output.truncated ?? false,
-        fullOutputRef: output.fullOutputRef,
         durationMs: Date.now() - startedAt,
       };
     } catch (error) {

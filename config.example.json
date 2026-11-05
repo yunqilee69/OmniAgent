@@ -1,10 +1,21 @@
 {
-  "model": "fake",
-  "mode": "default",
+  "model": "deepseek-flash",
+  "provider": "deepseek-official",
+  "reasoningEffort": "high",
+  "maxTokens": 256000,
+  "providers": {
+    "deepseek-official": {
+      "apiKeyEnv": "DEEPSEEK_API_KEY"
+    }
+  },
+  "dsh": {
+    "permission": {
+      "defaultPreset": "workspace-write"
+    }
+  },
   "maxSteps": 25,
-  "permissions": {
-    "allow": ["read_file(./docs/**)", "list_dir"],
-    "ask": ["write_file(./.git/**)"],
-    "deny": ["read_file(./.env)", "shell(rm -rf *)"]
+  "subagents": {
+    "maxDepth": 1,
+    "maxActive": 8
   }
 }

@@ -31,6 +31,6 @@ export function touchesProtectedPath(call: ToolCall): boolean {
   if (typeof path !== 'string') {
     return false;
   }
-  const segments = path.split(/[\\/]+/);
+  const segments = path.split(/[\\/]+/).map((segment) => segment.toLowerCase());
   return PROTECTED_PATH_SEGMENTS.some((segment) => segments.includes(segment));
 }

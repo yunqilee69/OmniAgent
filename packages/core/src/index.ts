@@ -74,6 +74,32 @@ export {
 } from './providers/openai';
 export type { OpenAIModelOptions } from './providers/openai';
 export { createConfiguredModel } from './providers/create';
+export {
+  DeepSeekMessagesError,
+  DeepSeekMessagesModel,
+  DEFAULT_DSH_MODEL,
+  serializeDshRequest,
+} from './providers/dsh-deepseek';
+export type { DeepSeekMessagesOptions } from './providers/dsh-deepseek';
+export {
+  DSH_OFFICIAL_MODELS,
+  DshModelRegistry,
+  createDshRegistry,
+} from './providers/dsh-registry';
+export type { DshModelInfo, DshOpenAIRoute, DshProviderInfo, DshRegistryOptions } from './providers/dsh-registry';
+export {
+  PiAiModel,
+  listPiAiCatalogProviders,
+  resolvePiAiRoute,
+} from './providers/pi-model';
+export type {
+  PiAiConfig,
+  PiAiCustomApi,
+  PiAiModelConfig,
+  PiAiModelDependencies,
+  PiAiResolvedRoute,
+  PiAiRouteConfig,
+} from './providers/pi-model';
 
 // 工具
 export {
@@ -83,6 +109,7 @@ export {
   builtinTools,
   createDefaultRegistry,
   resolveInside,
+  resolveInsidePhysical,
   toSpec,
   truncateOutput,
 } from './tools';
@@ -123,6 +150,130 @@ export { ToolExecutor } from './exec/executor';
 export { AuditLog, digestArgs } from './store/audit';
 export type { AuditEntry, AuditSink } from './store/audit';
 export { TranscriptStore } from './store/transcript';
+export {
+  SESSION_FORMAT_VERSION,
+  SessionEventSchema,
+  SessionHeaderSchema,
+} from './session/types';
+export type { SessionEvent, SessionEventInput, SessionHeader } from './session/types';
+export { SessionLog, SessionStore, sessionPath, workspaceKey, encodeSegment } from './session/store';
+export type { SessionHandle, SessionSummary } from './session/store';
+export { projectMessages, safePublicMessages } from './session/projection';
+export {
+  TODO_STATUSES,
+  TODO_WRITE_EVENT,
+  TodoItemSchema,
+  TodoListSchema,
+  parseTodoList,
+  projectTodos,
+  todoCounts,
+} from './session/todo';
+export type { TodoItem, TodoList, TodoStatus } from './session/todo';
+export {
+  PLAN_MODE_EVENT,
+  PLAN_MODE_GUIDANCE,
+  createPlanModeEvent,
+  projectPlanMode,
+} from './session/plan';
+export type { PlanProjection } from './session/plan';
+export {
+  MODEL_SELECTION_EVENT,
+  MODEL_SELECTION_VERSION,
+  ReasoningEffortSchema,
+  SessionModelSelectionSchema,
+  createModelSelectionEvent,
+  createModelSwitch,
+  createSelectedModel,
+  defaultModelSelection,
+  listConfiguredModels,
+  modelChoiceFor,
+  projectModelSelection,
+  resolveContextWindowTokens,
+} from './session/model-selection';
+export type {
+  ModelChoice,
+  ModelSelectionProjection,
+  ReasoningEffort,
+  SessionModelSelection,
+} from './session/model-selection';
+export {
+  DSH_DEFAULT_PRESET,
+  DSH_PERMISSION_EVENT,
+  DSH_PERMISSION_PRESETS,
+  DSH_PRESET_BUNDLES,
+  createDshPresetSwitch,
+  createInitialDshPermissionEvent,
+  isDshPermissionPreset,
+  projectDshPermissions,
+  resolveDshDefaultPreset,
+  snapshotDshPermissions,
+} from './permissions/dsh-permissions';
+export type {
+  DshApprovalPolicy,
+  DshPermissionEvent,
+  DshPermissionPreset,
+  DshPermissionProjection,
+  DshPermissionSettings,
+  DshPermissionSnapshot,
+  DshPresetBundle,
+  DshSandboxMode,
+} from './permissions/dsh-permissions';
+export { runDshEscalation, DshEscalationError } from './permissions/dsh-escalation';
+export type {
+  DshApprovalOutcome,
+  DshEscalationApprovalRequest,
+  DshEscalationApprover,
+  DshEscalationRequest,
+} from './permissions/dsh-escalation';
+
+// Context
+export { compactMessages, estimateMessageTokens, estimateMessages } from './context/compaction';
+export type { CompactionOptions, CompactionResult } from './context/compaction';
+
+// Sandbox and skills
+export { DshSandboxError, DshSandboxUnavailableError, assertDshMode, dshPhysicalDirectory, dshWorkspaceWritableRoots, dshWritableRoots } from './sandbox/dsh-policy';
+export type { DshConfinedMode, DshSandboxMode as DshSandboxExecutionMode, DshSandboxPolicy } from './sandbox/dsh-policy';
+export { checkDshMutation, checkDshMutations } from './sandbox/dsh-fs';
+export { assertNoHardlinkedFiles } from './sandbox/dsh-hardlinks';
+export { confineDshArgv, probeDshSandbox } from './sandbox/dsh-sandbox';
+export type { DshConfinedArgv, DshSandboxBackend, DshSandboxCapability, DshSandboxOptions } from './sandbox/dsh-sandbox';
+export { executeDshShell, createDshShellTool } from './tools/builtin/dsh-shell';
+export type { DshShellRequest, DshShellResult } from './tools/builtin/dsh-shell';
+export { createTodoWriteTool, TODO_WRITE_TOOL_NAME } from './tools/builtin/todo-write';
+export {
+  EXIT_PLAN_MODE_TOOL_NAME,
+  createExitPlanModeTool,
+  hasPlanHeading,
+} from './tools/builtin/exit-plan-mode';
+export type { PlanReviewResponse } from './tools/builtin/exit-plan-mode';
+export {
+  INTERRUPT_AGENT_TOOL_NAME,
+  LIST_AGENTS_TOOL_NAME,
+  SEND_MESSAGE_TOOL_NAME,
+  SUBAGENT_TOOL_NAME,
+  WAIT_AGENT_TOOL_NAME,
+  createSubagentTools,
+} from './tools/builtin/subagent';
+export {
+  SUBAGENT_END_EVENT,
+  SUBAGENT_NOTICE_EVENT,
+  SUBAGENT_START_EVENT,
+} from './domain/subagent';
+export type {
+  SubagentInfo,
+  SubagentNotice,
+  SubagentOutcome,
+  SubagentService,
+  SubagentStartRequest,
+  SubagentStartResult,
+  SubagentStatus,
+} from './domain/subagent';
+export { SubagentManager } from './subagents/manager';
+export type { SubagentManagerOptions } from './subagents/manager';
+export { SandboxUnavailableError, createSandboxRunner, sandboxCommand } from './sandbox/runner';
+export type { SandboxCommand, SandboxPlatform, SandboxProfile } from './sandbox/runner';
+export { discoverSkills, loadSkill, loadSkillByName, renderSkillCatalog } from './skills/filesystem';
+export type { LoadedSkill, SkillSummary } from './skills/filesystem';
 
 // 配置
 export {

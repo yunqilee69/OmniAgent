@@ -15,6 +15,8 @@ export interface FakeStep {
   message: AssistantMessage;
   usage?: Usage;
   stopReason?: StopReason;
+  /** Optional scripted reasoning, streamed before the visible text. */
+  reasoning?: string;
 }
 
 export function textResponse(body: string): FakeStep {
@@ -73,7 +75,13 @@ export class FakeModel implements ModelClient {
 
   /** 和真 provider 走同一条流式路径，让循环的 delta 转发也能被零成本测到。 */
   async *stream(request: ModelRequest): AsyncGenerator<ModelStreamDelta, ModelResponse> {
+    const step = this.steps[this.cursor] ?? this.options.onExhausted;
     const response = await this.complete(request);
+    if (step?.reasoning) {
+      for (const chunk of splitText(step.reasoning)) {
+        yield { type: 'reasoning', text: chunk };
+      }
+    }
     for (const chunk of splitText(assistantText(response.message))) {
       yield { type: 'text', text: chunk };
     }

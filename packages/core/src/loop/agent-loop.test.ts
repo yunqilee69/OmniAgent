@@ -100,6 +100,29 @@ describe('AgentLoop', () => {
     ]);
   });
 
+  it('把思考增量作为独立事件转发，且不混入正文', async () => {
+    const model = new FakeModel([
+      { ...textResponse('完成'), reasoning: '先想一下' },
+    ]);
+    const loop = new AgentLoop({
+      model,
+      modelId: 'fake',
+      system: 'test',
+      tools: registryWithEcho(),
+      permissions: allowAll,
+      cwd: process.cwd(),
+      sessionId: 'test',
+    });
+
+    const { events } = await collect(loop.run([userMessage('开始')]));
+    const reasoning = events.filter((event) => event.type === 'assistant.reasoning.delta');
+    expect(reasoning.map((event) => (event.type === 'assistant.reasoning.delta' ? event.text : '')))
+      .toEqual(['先想一下']);
+    expect(events.filter((event) => event.type === 'assistant.delta').length).toBeGreaterThan(0);
+    const message = events.find((event) => event.type === 'assistant.message');
+    expect(message).toMatchObject({ message: { content: [{ type: 'text', text: '完成' }] } });
+  });
+
   it('权限拒绝会变成一条可读的 observation，而不是异常', async () => {
     const model = new FakeModel([
       toolCallResponse([{ id: 'c1', name: 'echo', args: { text: 'hi' } }]),
@@ -161,6 +184,29 @@ describe('AgentLoop', () => {
     const end = events.at(-1);
     expect(end).toEqual({ type: 'turn.end', reason: 'max_steps' });
     expect(model.requests).toHaveLength(2);
+  });
+
+  it('compacts oversized history before the next provider request', async () => {
+    const model = new FakeModel([textResponse('done')]);
+    const loop = new AgentLoop({
+      model,
+      modelId: 'fake',
+      system: 'test',
+      tools: registryWithEcho(),
+      permissions: allowAll,
+      cwd: process.cwd(),
+      sessionId: 'test',
+      contextWindowTokens: 8,
+      retainContextTokens: 2,
+    });
+
+    const { events } = await collect(loop.run([userMessage('a'.repeat(300))]));
+
+    expect(events.some((event) => event.type === 'context.compacted')).toBe(true);
+    expect(model.requests[0]?.messages[0]).toMatchObject({
+      role: 'user',
+      content: [{ type: 'text', text: expect.stringContaining('summary') }],
+    });
   });
 
   it('未知工具不会抛异常，而是变成错误结果的 observation', async () => {

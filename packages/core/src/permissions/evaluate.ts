@@ -8,10 +8,10 @@ import { isEditTool, touchesProtectedPath } from './modes';
 import { matchesCall } from './rules';
 
 /**
- * 权限求值：一个纯函数。
+ * 权限求值。
  *
- * 输入只有 call + 规则 + 模式 + cwd，输出一个决定和理由。
- * 不读文件、不发网络、不问人 —— 所以可以全量单测，也不会有「测试要 mock 半天」的问题。
+ * 文件路径 deny / ask 在需要时读取文件系统已有前缀，以识别路径别名。
+ * 不发网络、不问人；路径匹配仍不是抵御 symlink 或 TOCTOU 的沙盒。
  *
  * 求值顺序沿用 Claude Code：
  *   deny -> ask -> allow -> 模式默认。
@@ -28,7 +28,8 @@ export interface DecideInput {
 export function decide(input: DecideInput): RuleBasedResult {
   const { call, mode, rules, cwd } = input;
 
-  const matched = rules.filter((rule) => matchesCall(rule, call, cwd));
+  const pathCache = new Map<string, string | null>();
+  const matched = rules.filter((rule) => matchesCall(rule, call, cwd, pathCache));
 
   const deny = matched.find((rule) => rule.decision === 'deny');
   if (deny) {

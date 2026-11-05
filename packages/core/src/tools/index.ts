@@ -14,4 +14,4 @@ export { ToolRegistry } from './registry';
 export { builtinTools } from './builtin';
 export { truncateOutput, toSpec } from './tool';
 export { MAX_OUTPUT_CHARS, DEFAULT_READ_LINES } from './limits';
-export { resolveInside } from './paths';
+export { resolveInside, resolveInsidePhysical } from './paths';

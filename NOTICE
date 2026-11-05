@@ -1,0 +1,53 @@
+Third-party implementation reference
+====================================
+
+DeepSeek Harness (DSH)
+----------------------
+Copyright (c) 2026 DeepSeek
+License: MIT
+Source: ../deepseek-harness in the development workspace
+
+OmniAgent does not include Cordis, the DSH plugin loader, profile/bundle system,
+patch system, or DSH runtime packages. The following core modules were
+implemented independently, using DSH behavior and public source as design
+references rather than copying source files:
+
+- packages/core/src/session/: JSONL event-log and recovery behavior, informed by
+  DSH session and JSONL persistence contracts.
+- packages/core/src/context/: token pressure estimation and balanced tool-pair
+  retention, informed by DSH token-meter and compaction behavior.
+- packages/core/src/sandbox/: fail-closed platform sandbox selection, informed
+  by DSH sandbox policy and local runner behavior.
+- packages/core/src/skills/: progressive skill discovery/loading, informed by
+  DSH filesystem skill behavior.
+- packages/web/: local UI/API boundary and Web client. Its component structure,
+  CSS, and selected generic SVG artwork are adapted from DSH; it does not include
+  the DSH Web runtime or Cordis client integration.
+
+The Web client in packages/web/src/client.ts adapts component markup and styling
+from DSH's ui-sidebar, ui-workspace, ui-conversation, ui-settings-general,
+ui-approval, ui-trajectory, and session-log-export client packages, as well as
+icon artwork from packages/client/ui-primitives/src/icons/artwork.ts. Adapted
+source is distributed under the DSH MIT license below.
+
+MIT License
+
+Copyright (c) 2026 DeepSeek
+
+Permission is hereby granted, free of charge, to any person obtaining a copy
+of this software and associated documentation files (the "Software"), to deal
+in the Software without restriction, including without limitation the rights
+to use, copy, modify, merge, publish, distribute, sublicense, and/or sell
+copies of the Software, and to permit persons to whom the Software is
+furnished to do so, subject to the following conditions:
+
+The above copyright notice and this permission notice shall be included in all
+copies or substantial portions of the Software.
+
+THE SOFTWARE IS PROVIDED "AS IS", WITHOUT WARRANTY OF ANY KIND, EXPRESS OR
+IMPLIED, INCLUDING BUT NOT LIMITED TO THE WARRANTIES OF MERCHANTABILITY,
+FITNESS FOR A PARTICULAR PURPOSE AND NONINFRINGEMENT. IN NO EVENT SHALL THE
+AUTHORS OR COPYRIGHT HOLDERS BE LIABLE FOR ANY CLAIM, DAMAGES OR OTHER
+LIABILITY, WHETHER IN AN ACTION OF CONTRACT, TORT OR OTHERWISE, ARISING FROM,
+OUT OF OR IN CONNECTION WITH THE SOFTWARE OR THE USE OR OTHER DEALINGS IN THE
+SOFTWARE.
