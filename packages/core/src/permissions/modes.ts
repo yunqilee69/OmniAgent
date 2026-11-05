@@ -3,7 +3,8 @@ import type { ToolCall } from '../domain/message';
 /**
  * 模式与「敏感路径」的定义。
  *
- * 模式语义对齐 Claude Code，但只做 M1 需要的部分：
+ * 模式默认行为（显式规则优先）：
+ * - workspace-write: 默认，已知文件读写自动放行，受保护路径和其他工具仍问
  * - default:      都问
  * - acceptEdits:  编辑类工具自动放行，shell 仍问
  * - plan:         只读，禁止修改

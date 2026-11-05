@@ -62,6 +62,10 @@ export const DEFAULT_SYSTEM_PROMPT = `你是一个运行在用户本机的个人
 - 每次工具调用都会经过权限检查，被拒绝时不要重复同样的调用，换一种做法或直接说明。
 - 回答保持简洁，说明你做了什么、结果如何。`;
 
+export function createSessionId(): string {
+  return `s_${Date.now().toString(36)}`;
+}
+
 export interface SessionOptions {
   cwd: string;
   workspace?: string;
