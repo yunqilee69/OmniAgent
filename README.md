@@ -241,4 +241,3 @@ export type AgentEvent =
 - [docs/notes/](docs/notes/) — 读别人家实现的笔记（Codex、Claude Code），带出处
 - [docs/adr/](docs/adr/) — 自己做的决定：背景、候选、结论、后果
 - [docs/spec/](docs/spec/) — 自家的协议与 schema 设计
-- [docs/spec/agent-harness.md](docs/spec/agent-harness.md) — agent harness：循环、工具、上下文、记忆、权限、可靠性、观测，以及当前落地情况
