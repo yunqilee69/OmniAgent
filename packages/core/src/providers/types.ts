@@ -6,7 +6,10 @@ import type { StopReason } from '../protocol/events';
  * 模型客户端契约。
  *
  * 刻意不用 AI SDK 的高层抽象：这一层薄到能看清 tool_call 的原始形状，
- * 换 provider 时你才真正知道各家差在哪。M1 只有 complete()，流式以后加。
+ * 换 provider 时你才真正知道各家差在哪。
+ *
+ * complete() 是必须实现的基线；stream() 可选，主循环发现它存在就走流式，
+ * 否则自动退化到 complete()。
  */
 
 export interface ModelRequest {

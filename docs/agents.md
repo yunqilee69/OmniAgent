@@ -56,7 +56,10 @@ agents/*.md         →  身份、说明、角色、usage、profile 和 system p
   },
   "agentProfiles": {
     "default": { "tools": "*", "skills": "*" },
-    "search-only": { "tools": ["read_file", "list_dir", "skill"], "skills": ["web-research"] }
+    "search-only": { "tools": ["read_file", "list_dir", "glob", "grep", "web_fetch", "skill"], "skills": ["web-research"] }
+  },
+  "todo": {
+    "allowParallelInProgress": true
   }
 }
 ```
@@ -72,10 +75,11 @@ agents/*.md         →  身份、说明、角色、usage、profile 和 system p
 - `reasoning.default` 必须出现在 `efforts` 中。
 - `reasoning.wire` 使用点分路径写入请求体。拒绝 `__proto__`、`constructor`、`prototype`、空路径段，以及顶层保留字段 `model`、`messages`、`stream`、`tools`。
 - 模型目录只包含元数据，不包含 endpoint、headers 或 API key；这些只留在 config 的 provider route 和进程环境中。
+- `todo.allowParallelInProgress` 默认 `false`；设为 `true` 后允许 `todo_write` 同时保留多个 `in_progress`，适用于把任务分派给多个子智能体并行执行的场景。
 
 `agentProfiles` 未配置时，内置一个 `{ "tools": "*", "skills": "*" }` 的 `default`。一旦配置了 `agentProfiles`，就不会再隐式合并 `default`；引用不存在的 profile 的 agent 会失效。
 
-`tools` 可以是 `"*"` 或精确列表。`subagent` 是组名，展开为 `subagent`、`send_message`、`list_agents`、`wait_agent`、`interrupt_agent`。未知工具名是配置错误。`skills` 可以是 `"*"`、数组；省略等价于 `[]`。
+`tools` 可以是 `"*"` 或精确列表。`subagent` 是组名，展开为 `subagent`、`send_message`、`list_agents`、`wait_agent`、`interrupt_agent`；`todo_write`、`exit_plan_mode`、`get_goal`、`create_goal`、`update_goal` 都是独立的精确工具名，需要逐项授权。未知工具名是配置错误。`skills` 可以是 `"*"`、数组；省略等价于 `[]`。
 
 工具 profile 只是 allowlist，不能扩大 DSH 权限预设或沙盒。它最终与权限预设取交集，因此 `tools: ["bash"]` 在 `read-only` 下仍然不能写文件。
 

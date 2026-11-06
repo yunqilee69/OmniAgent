@@ -23,8 +23,7 @@ async function temporaryRoot() {
 }
 
 function writeCall(id = 'same-model-id', path = 'approval.txt', content = 'private-argument') {
-  return { id, name: 'write_file', args: {
-    path, content, sandbox_permissions: 'workspace-write', justification: 'Write the requested file',
+  return { id, name: 'write_file', args: { file_path: path, content, sandbox_permissions: 'workspace-write', justification: 'Write the requested file',
   } };
 }
 
@@ -113,7 +112,7 @@ describe('web approval broker', () => {
     const workspace = await temporaryRoot();
     const f = await fixture(broker, workspace, 'session', [
       writeCall('same-model-id', 'first.txt', 'first'),
-      { id: 'ordinary', name: 'write_file', args: { path: 'ordinary.txt', content: 'blocked' } },
+      { id: 'ordinary', name: 'write_file', args: { file_path: 'ordinary.txt', content: 'blocked' } },
       writeCall('same-model-id', 'second.txt', 'second'),
     ]);
     const first = (await nextRequest(f.stream)).prompt;
@@ -159,8 +158,8 @@ describe('web approval broker', () => {
       const workspace = await temporaryRoot();
       await writeFile(join(workspace, 'input.txt'), 'readable content');
       const calls: Array<{ id: string; name: string; args: unknown }> = [
-        { id: 'read', name: 'read_file', args: { path: 'input.txt' } },
-        { id: 'write', name: 'write_file', args: { path: 'ordinary.txt', content: 'ordinary write' } },
+        { id: 'read', name: 'read_file', args: { file_path: 'input.txt' } },
+        { id: 'write', name: 'write_file', args: { file_path: 'ordinary.txt', content: 'ordinary write' } },
       ];
       if (preset === 'danger-full-access') {
         const escalation = writeCall('escalation', 'escalation.txt');

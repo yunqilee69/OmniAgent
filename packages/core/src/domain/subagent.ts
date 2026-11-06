@@ -43,6 +43,31 @@ export interface SubagentOutcome {
   result?: string;
 }
 
+/** Activity state exposed by `list_agents`; it says nothing about success. */
+export type SubagentListStatus = 'running' | 'inactive';
+
+export type SubagentListEntry =
+  | {
+    kind: 'root';
+    id: string;
+    status: SubagentListStatus;
+  }
+  | {
+    kind: 'child';
+    id: string;
+    label: string;
+    status: SubagentListStatus;
+    parent?: string;
+    depth?: number;
+  }
+  | {
+    kind: 'diagnostic';
+    id: string;
+    reason: 'corrupt' | 'unsupported' | 'unavailable';
+    parent?: string;
+    depth?: number;
+  };
+
 export interface SubagentNotice {
   childId: string;
   description?: string;
@@ -57,8 +82,10 @@ export interface SubagentNotice {
 export interface SubagentService {
   start(parent: Session, request: SubagentStartRequest): Promise<SubagentStartResult>;
   send(caller: Session, targetId: string, message: string): Promise<{ messageId: string }>;
-  list(caller: Session): Promise<SubagentInfo[]>;
+  list(caller: Session): Promise<SubagentListEntry[]>;
   wait(caller: Session, targetId: string, timeoutMs: number, signal: AbortSignal): Promise<SubagentOutcome>;
+  /** Wait for the caller's next-step input, including messages and notices. */
+  waitForInput(caller: Session, timeoutMs: number, signal: AbortSignal): Promise<{ timedOut: boolean }>;
   interrupt(caller: Session, targetId: string): Promise<boolean>;
   canStart(parent: Session): boolean;
 }

@@ -1,10 +1,10 @@
-import { mkdir, realpath, writeFile } from 'node:fs/promises';
-import { dirname, resolve } from 'node:path';
+import { realpath } from 'node:fs/promises';
+import { resolve } from 'node:path';
 import { z } from 'zod';
 import type { Message, ToolCall } from './domain/message';
 import type { Tool, ToolSpec } from './domain/tool';
 import { userMessage } from './domain/message';
-import type { AgentEvent } from './protocol/events';
+import type { AgentEvent, StopReason } from './protocol/events';
 import type {
   ApprovalHandler,
   PermissionMode,
@@ -16,17 +16,31 @@ import { SUBAGENT_NOTICE_EVENT } from './domain/subagent';
 import type { ModelClient } from './providers/types';
 import type { AuditSink } from './store/audit';
 import { createDefaultRegistry, ToolRegistry } from './tools';
+import { editTextFile, writeTextFile } from './tools/fs-io';
+import { displayPath } from './tools/paths';
+import { editFileTool, formatEditOutput, parseEditArgs } from './tools/builtin/edit-file';
+import { globTool } from './tools/builtin/glob';
+import { grepTool } from './tools/builtin/grep';
 import { listDirTool } from './tools/builtin/list-dir';
 import { readFileTool } from './tools/builtin/read-file';
 import { skillTool, createSkillTool } from './tools/builtin/skill';
-import { writeFileTool } from './tools/builtin/write-file';
+import { formatWriteOutput, parseWriteArgs, writeFileTool } from './tools/builtin/write-file';
+import { webFetchTool } from './tools/builtin/web-fetch';
 import { createDshShellTool } from './tools/builtin/dsh-shell';
 import { createTodoWriteTool } from './tools/builtin/todo-write';
 import { createExitPlanModeTool, EXIT_PLAN_MODE_TOOL_NAME } from './tools/builtin/exit-plan-mode';
 import type { PlanReviewResponse } from './tools/builtin/exit-plan-mode';
 import { createSubagentTools, SUBAGENT_TOOL_NAME } from './tools/builtin/subagent';
+import { createGoalTools, CREATE_GOAL_TOOL_NAME, GET_GOAL_TOOL_NAME, UPDATE_GOAL_TOOL_NAME } from './tools/builtin/goal';
 import { TODO_WRITE_EVENT } from './session/todo';
 import type { TodoItem } from './session/todo';
+import { GoalController, goalRefOf } from './session/goal-controller';
+import {
+  GOAL_DEFAULT_BLOCKED_AFTER,
+  renderGoalRoundPrompt,
+  renderGoalToolGuidance,
+} from './session/goal';
+import type { GoalView } from './session/goal';
 import {
   createPlanModeEvent,
   PLAN_MODE_EVENT,
@@ -64,6 +78,8 @@ export interface SessionOptions {
   agent?: SessionAgent;
   /** Known capabilities of the selected model. */
   modelCapabilities?: ModelCapabilities;
+  /** Allow several todo items to remain in_progress when work runs in parallel. */
+  todoAllowParallelInProgress?: boolean;
   system?: string;
   /** Legacy fields are retained for source compatibility and never authorize calls. */
   mode?: PermissionMode;
@@ -90,6 +106,18 @@ export interface SessionOptions {
   onBackgroundEvent?: (event: AgentEvent) => void;
 }
 
+interface GoalRoundContext {
+  goalId: string;
+  revision: number;
+  round: number;
+  prompt: string;
+}
+
+interface GoalCompletionAuthority {
+  kind: 'direct-human' | 'goal-round';
+  goal: GoalView;
+}
+
 export class Session {
   readonly id: string;
   readonly #dshPermissions: DshPermissionSnapshot | undefined;
@@ -99,6 +127,7 @@ export class Session {
   private readonly trusted = new Set<Tool>();
   private readonly dshShell?: Tool;
   private readonly dshWrite?: Tool;
+  private readonly dshEdit?: Tool;
   private readonly session?: SessionHandle;
   private readonly baseSystem: string;
   private readonly cwdValue: string;
@@ -109,8 +138,13 @@ export class Session {
   private readonly reviewPlanHandler?: SessionOptions['reviewPlan'];
   private readonly onBackgroundEvent?: SessionOptions['onBackgroundEvent'];
   private readonly inbox: Message[] = [];
+  private readonly inboxWaiters = new Set<() => void>();
+  private readonly goalController: GoalController;
   private planActive: boolean;
   private controller?: AbortController;
+  private executing = false;
+  private turnSource: 'human' | 'goal' | 'external' | 'notice' | 'system' = 'system';
+  private currentGoalRound?: GoalRoundContext;
 
   constructor(options: SessionOptions) {
     this.session = options.session;
@@ -128,6 +162,12 @@ export class Session {
       ? options.planActive ?? false
       : projectPlanMode(options.session.events).active;
     if (options.session) this.history = projectMessages(options.session.events);
+    this.goalController = new GoalController({
+      ...(options.session === undefined ? {} : {
+        events: options.session.events,
+        append: (event) => options.session!.append(event),
+      }),
+    });
 
     const cwd = options.cwd;
     const approve = options.approve;
@@ -139,6 +179,10 @@ export class Session {
         this.dshWrite = dshWriteFileTool({ mode: 'read-only', workspaceRoot: options.cwd });
         this.tools.register(this.dshWrite);
         this.trusted.add(this.dshWrite);
+      } else if (tool === editFileTool) {
+        this.dshEdit = dshEditFileTool({ mode: 'read-only', workspaceRoot: options.cwd });
+        this.tools.register(this.dshEdit);
+        this.trusted.add(this.dshEdit);
       } else if (tool === skillTool && options.agent !== undefined) {
         const restricted = createSkillTool({ allowed: options.agent.skills });
         this.tools.register(restricted);
@@ -160,10 +204,14 @@ export class Session {
     }
     if (allows('read_file')) this.trusted.add(readFileTool);
     if (allows('list_dir')) this.trusted.add(listDirTool);
+    if (allows('glob')) this.trusted.add(globTool);
+    if (allows('grep')) this.trusted.add(grepTool);
+    if (allows('web_fetch')) this.trusted.add(webFetchTool);
     if (allows('skill')) this.trusted.add(skillTool);
 
     if (allows('todo_write')) {
       const todoTool = createTodoWriteTool({
+        allowParallel: options.todoAllowParallelInProgress ?? false,
         append: async (todos: TodoItem[]) => {
           if (!this.session) throw new Error('todo_write requires an owning session');
           await this.session.append({ type: TODO_WRITE_EVENT, data: { todos } });
@@ -184,6 +232,12 @@ export class Session {
       this.trusted.add(exitPlanTool);
     }
 
+    for (const tool of createGoalTools(this)) {
+      if (!allows(tool.name)) continue;
+      this.tools.register(tool);
+      this.trusted.add(tool);
+    }
+
     if (this.subagents) {
       for (const tool of createSubagentTools(this, this.subagents)) {
         if (!allows(tool.name)) continue;
@@ -195,9 +249,7 @@ export class Session {
     this.loop = new AgentLoop({
       model: options.model,
       modelId: options.modelId ?? 'fake',
-      system: () => this.planActive
-        ? `${this.baseSystem}\n\n${PLAN_MODE_GUIDANCE}`
-        : this.baseSystem,
+      system: () => this.systemText(),
       tools: this.tools,
       toolSpecs: () => this.visibleToolSpecs(),
       takeQueuedMessages: () => this.inbox.splice(0),
@@ -249,8 +301,39 @@ export class Session {
     return this.planActive;
   }
 
+  get goals(): GoalController {
+    return this.goalController;
+  }
+
   get systemPrompt(): string {
-    return this.planActive ? `${this.baseSystem}\n\n${PLAN_MODE_GUIDANCE}` : this.baseSystem;
+    return this.systemText();
+  }
+
+  private systemText(): string {
+    const parts = [this.baseSystem];
+    if (this.planActive) parts.push(PLAN_MODE_GUIDANCE);
+    if (this.hasGoalTools()) parts.push(renderGoalToolGuidance(GOAL_DEFAULT_BLOCKED_AFTER));
+    if (this.depth === 0 && this.subagents !== undefined) {
+      const guidance: string[] = [];
+      if (this.allowsTool('send_message')) {
+        guidance.push('To message other agents, use send_message({ agent_id: "<agent-id>", message: "..." }).');
+      }
+      if (this.allowsTool('list_agents')) {
+        guidance.push('Use list_agents({}) to find your collaborator agents and their ids.');
+      }
+      if (guidance.length > 0) {
+        parts.push(
+          `You are the root agent. Your agent id is ${JSON.stringify(this.id)}.\n\n${guidance.join('\n')}`,
+        );
+      }
+    }
+    return parts.filter(Boolean).join('\n\n');
+  }
+
+  private hasGoalTools(): boolean {
+    return this.allowsTool(CREATE_GOAL_TOOL_NAME)
+      || this.allowsTool(GET_GOAL_TOOL_NAME)
+      || this.allowsTool(UPDATE_GOAL_TOOL_NAME);
   }
 
   get sessionHandle(): SessionHandle | undefined {
@@ -258,7 +341,74 @@ export class Session {
   }
 
   get activeTurn(): boolean {
-    return this.controller !== undefined;
+    return this.controller !== undefined || this.executing;
+  }
+
+  /** Whether the current model turn was started by a direct top-level human message. */
+  get directHumanTurn(): boolean {
+    return this.turnSource === 'human' && this.depth === 0 && this.parentSessionId === undefined;
+  }
+
+  assertGoalDirectHuman(): void {
+    if (!this.directHumanTurn) {
+      throw new Error('this goal operation requires a direct human turn on a top-level agent');
+    }
+  }
+
+  goalCompletionAuthority(): GoalCompletionAuthority {
+    const goal = this.goals.view();
+    if (this.directHumanTurn) {
+      if (goal === undefined) throw new Error('no current goal');
+      return { kind: 'direct-human', goal };
+    }
+    if (goal !== undefined
+      && this.turnSource === 'goal'
+      && this.currentGoalRound?.goalId === goal.id
+      && this.currentGoalRound.revision === goal.revision
+      && this.currentGoalRound.round === goal.roundsStarted) {
+      return { kind: 'goal-round', goal };
+    }
+    throw new Error('complete and blocked require a direct human turn or the current goal round');
+  }
+
+  /**
+   * Add a short model-facing notice for the next step of this turn and persist
+   * it in the session log.
+   */
+  async deferGoalContext(text: string): Promise<void> {
+    const message = userMessage(text);
+    await this.appendMessage('message/notice', { text, source: 'tool-goal' });
+    this.inbox.push(message);
+    this.notifyInbox();
+  }
+
+  /** Resolve when a message or notice is waiting for the next model step. */
+  async waitForInput(timeoutMs: number, signal: AbortSignal): Promise<{ timedOut: boolean }> {
+    if (this.inbox.length > 0) return { timedOut: false };
+    signal.throwIfAborted();
+    return new Promise((resolve, reject) => {
+      let settled = false;
+      const finish = (operation: () => void): void => {
+        if (settled) return;
+        settled = true;
+        clearTimeout(timer);
+        this.inboxWaiters.delete(onInput);
+        signal.removeEventListener('abort', onAbort);
+        operation();
+      };
+      const onInput = (): void => {
+        if (this.inbox.length > 0) finish(() => resolve({ timedOut: false }));
+      };
+      const onAbort = (): void => {
+        finish(() => reject(signal.reason ?? new Error('Input wait aborted')));
+      };
+      const timer = setTimeout(() => finish(() => resolve({ timedOut: true })), timeoutMs);
+      timer.unref?.();
+      this.inboxWaiters.add(onInput);
+      signal.addEventListener('abort', onAbort, { once: true });
+      if (signal.aborted) onAbort();
+      else onInput();
+    });
   }
 
   interrupt(): void {
@@ -268,7 +418,7 @@ export class Session {
   /** Persist a plan-mode selection. UI callers reject changes during active turns. */
   async setPlanMode(active: boolean): Promise<void> {
     if (typeof active !== 'boolean') throw new TypeError('Plan mode state must be a boolean');
-    if (this.controller) throw new Error('Plan mode cannot change during an active turn');
+    if (this.executing) throw new Error('Plan mode cannot change during an active turn');
     await this.applyPlanMode(active);
   }
 
@@ -281,11 +431,17 @@ export class Session {
 
   /** Consume events yourself; when persistence is enabled messages/traces are written first. */
   async *send(input: string): AsyncGenerator<AgentEvent> {
-    if (this.controller) throw new Error('A turn is already active in this session');
-    const user = userMessage(input);
-    this.history.push(user);
-    await this.appendMessage('message/user', { text: input });
-    yield* this.runTurn(false);
+    if (this.executing) throw new Error('A turn is already active in this session');
+    this.executing = true;
+    try {
+      const user = userMessage(input);
+      this.history.push(user);
+      await this.appendMessage('message/user', { text: input });
+      yield* this.runGoalChain(false, 'human');
+    } finally {
+      this.executing = false;
+      this.resumeQueuedBackground();
+    }
   }
 
   /**
@@ -297,11 +453,12 @@ export class Session {
     const message = userMessage(text);
     this.history.push(message);
     await this.appendMessage('message/notice', { text, source });
-    if (this.controller) {
+    if (this.executing) {
       this.inbox.push(message);
+      this.notifyInbox();
       return 'queued';
     }
-    this.runBackgroundTurn();
+    this.runBackgroundTurn('external');
     return 'started';
   }
 
@@ -310,14 +467,100 @@ export class Session {
     const message = userMessage(formatSubagentNotice(notice));
     this.history.push(message);
     await this.appendMessage(SUBAGENT_NOTICE_EVENT, { ...notice });
-    if (this.controller) {
+    if (this.executing) {
       this.inbox.push(message);
+      this.notifyInbox();
       return;
     }
-    this.runBackgroundTurn();
+    this.runBackgroundTurn('notice');
   }
 
-  private async *runTurn(background: boolean): AsyncGenerator<AgentEvent> {
+  private notifyInbox(): void {
+    for (const waiter of [...this.inboxWaiters]) waiter();
+  }
+
+  private async *runGoalChain(
+    background: boolean,
+    initialSource: 'human' | 'external' | 'notice',
+  ): AsyncGenerator<AgentEvent> {
+    let source: 'human' | 'goal' | 'external' | 'notice' = initialSource;
+    let goalRound: GoalRoundContext | undefined;
+    try {
+      while (true) {
+        this.turnSource = source;
+        this.currentGoalRound = goalRound;
+        const reason = yield* this.runTurn(background);
+        if (reason === 'error' || reason === 'max_tokens' || reason === 'max_steps') {
+          this.goalController.disarm();
+        } else if (source === 'goal' && reason === 'interrupted') {
+          await this.pauseGoalAfterCancelledRound();
+        }
+        if (reason !== 'end_turn' && reason !== 'tool_use') return;
+        const next = await this.nextGoalRound();
+        if (next === undefined) return;
+        await this.appendMessage('message/user', {
+          text: next.prompt,
+          source: {
+            kind: 'goal',
+            goalId: next.goalId,
+            revision: next.revision,
+            round: next.round,
+          },
+        });
+        this.history.push(userMessage(next.prompt));
+        this.goalController.recordRound(next.round);
+        source = 'goal';
+        goalRound = next;
+      }
+    } catch (error) {
+      this.goalController.disarm();
+      throw error;
+    } finally {
+      this.turnSource = 'system';
+      this.currentGoalRound = undefined;
+    }
+  }
+
+  private async pauseGoalAfterCancelledRound(): Promise<void> {
+    try {
+      const goal = this.goalController.view();
+      if (goal?.phase !== 'active' || goal.activation !== 'armed') return;
+      await this.goalController.pause(goalRefOf(goal));
+    } catch {
+      this.goalController.disarm();
+    }
+  }
+
+  private async nextGoalRound(): Promise<GoalRoundContext | undefined> {
+    let goal: GoalView | undefined;
+    try {
+      goal = this.goalController.view();
+    } catch {
+      this.goalController.disarm();
+      return undefined;
+    }
+    if (goal === undefined || goal.phase !== 'active' || goal.activation !== 'armed') return undefined;
+    if (goal.roundsStarted >= goal.maxGoalRounds) {
+      try {
+        await this.goalController.block(goalRefOf(goal), {
+          code: 'round-limit',
+          message: `Goal reached its configured limit of ${goal.maxGoalRounds} rounds.`,
+        });
+      } catch {
+        this.goalController.disarm();
+      }
+      return undefined;
+    }
+    const round = goal.roundsStarted + 1;
+    return {
+      goalId: goal.id,
+      revision: goal.revision,
+      round,
+      prompt: renderGoalRoundPrompt(goal, round),
+    };
+  }
+
+  private async *runTurn(background: boolean): AsyncGenerator<AgentEvent, StopReason> {
     if (this.controller) throw new Error('A turn is already active in this session');
     if (this.planActive && !this.allowsTool(EXIT_PLAN_MODE_TOOL_NAME)) {
       throw new Error('The current agent profile must allow exit_plan_mode while plan mode is active');
@@ -332,6 +575,7 @@ export class Session {
     let failed = false;
     let recordedError = false;
     let pendingAudit = false;
+    let stopReason: StopReason = 'interrupted';
 
     try {
       const modelHistory = prepareModelHistory(this.history);
@@ -353,14 +597,14 @@ export class Session {
           terminal = true;
           if (background) this.onBackgroundEvent?.(event);
           yield event;
-          return;
+          return 'interrupted';
         }
 
         pendingAudit = false;
         const next = await generator.next();
         if (next.done) {
           if (!modelHistory.repaired) this.history = next.value;
-          return;
+          return stopReason;
         }
 
         const event = next.value;
@@ -375,7 +619,10 @@ export class Session {
           else this.history.push({ role: 'tool', results: [event.result] });
         }
         await this.appendTrace(event);
-        if (event.type === 'turn.end') terminal = true;
+        if (event.type === 'turn.end') {
+          terminal = true;
+          stopReason = event.reason;
+        }
         if (event.type === 'error') {
           recordedError = true;
           failed = true;
@@ -392,7 +639,7 @@ export class Session {
           if (background) this.onBackgroundEvent?.(event);
           yield event;
         }
-        return;
+        return 'interrupted';
       }
       failed = true;
       if (!recordedError) await this.appendTrace({ type: 'error', error: { message: '' } });
@@ -426,9 +673,9 @@ export class Session {
             // A notice or external message can arrive after the last model
             // step. Its text is already in history, so retire the step queue
             // and continue in a background turn instead of leaving it unread.
-            if (!controller.signal.aborted && this.inbox.length > 0) {
+            if (!controller.signal.aborted && !this.executing && this.inbox.length > 0) {
               this.inbox.length = 0;
-              this.runBackgroundTurn();
+              this.runBackgroundTurn('external');
             }
           }
         }
@@ -436,16 +683,27 @@ export class Session {
     }
   }
 
-  private runBackgroundTurn(): void {
+  private runBackgroundTurn(source: 'external' | 'notice'): void {
+    if (this.executing) return;
+    this.executing = true;
     void (async () => {
       try {
-        for await (const _event of this.runTurn(true)) {
+        for await (const _event of this.runGoalChain(true, source)) {
           // Events are persisted and forwarded through onBackgroundEvent.
         }
       } catch {
         // runTurn persists a redacted trace/error before rethrowing.
+      } finally {
+        this.executing = false;
+        this.resumeQueuedBackground();
       }
     })();
+  }
+
+  private resumeQueuedBackground(): void {
+    if (this.executing || this.controller !== undefined || this.inbox.length === 0) return;
+    this.inbox.length = 0;
+    this.runBackgroundTurn('external');
   }
 
   private visibleToolSpecs(): ToolSpec[] {
@@ -473,7 +731,7 @@ export class Session {
     let cleanCall: ToolCall = call;
     let mode = snapshot.sandbox;
     const args = call.arguments;
-    const canEscalate = tool === this.dshWrite || tool === this.dshShell;
+    const canEscalate = tool === this.dshWrite || tool === this.dshEdit || tool === this.dshShell;
     if (args !== null && typeof args === 'object' && !Array.isArray(args)) {
       let fields: Record<string, unknown>;
       try {
@@ -483,7 +741,7 @@ export class Session {
       }
       cleanCall = { ...cleanCall, arguments: fields };
       if (Object.hasOwn(fields, 'sandbox_permissions') || Object.hasOwn(fields, 'justification')) {
-        if (!canEscalate) return deny('Sandbox escalation is only available for write_file and bash');
+        if (!canEscalate) return deny('Sandbox escalation is only available for write_file, edit_file and bash');
         const target = fields.sandbox_permissions;
         const justification = fields.justification;
         if (!isDshPermissionPreset(target) || typeof justification !== 'string' || !justification.trim() ||
@@ -521,6 +779,7 @@ export class Session {
     signal.throwIfAborted();
     let selected: Tool | undefined = tool;
     if (tool === this.dshWrite) selected = dshWriteFileTool(policy);
+    else if (tool === this.dshEdit) selected = dshEditFileTool(policy);
     else if (tool === this.dshShell) selected = createDshShellTool({ policy });
     const registry = new ToolRegistry();
     if (selected) registry.register(selected);
@@ -597,7 +856,8 @@ function containsImage(history: readonly Message[]): boolean {
     message.role === 'user' && message.content.some((part) => part.type === 'image'));
 }
 
-function formatSubagentNotice(notice: SubagentNotice): string {  const title = `[Subagent ${notice.childId} ${notice.status}]`;
+function formatSubagentNotice(notice: SubagentNotice): string {
+  const title = `[Subagent ${notice.childId} ${notice.status}]`;
   const description = notice.description ? `\n${notice.description}` : '';
   const result = notice.result?.trim() ? `\n\n${notice.result.trim()}` : '';
   return `${title}${description}${result}\n\nReview the result before relying on it; open the child session for full details.`;
@@ -622,22 +882,52 @@ function isStrictlyWider(current: DshSandboxMode, target: DshSandboxMode): boole
 }
 
 function dshWriteFileTool(policy: DshSandboxPolicy): Tool {
-  const params = z.object({ path: z.string(), content: z.string() }).strict();
+  const params = z.object({
+    file_path: z.string(),
+    content: z.string(),
+    sandbox_permissions: z.enum(['workspace-write', 'danger-full-access']).optional(),
+    justification: z.string().optional(),
+  }).strict();
   return {
     ...writeFileTool,
-    parameters: params.extend({
-      sandbox_permissions: z.enum(['workspace-write', 'danger-full-access']).optional(),
-      justification: z.string().optional(),
-    }),
+    parameters: params,
     async execute(args, ctx) {
-      const { path, content } = params.parse(args);
+      const input = parseWriteArgs(params.parse(args));
       ctx.signal.throwIfAborted();
-      const target = await checkDshMutation(resolve(ctx.cwd, path), policy);
+      const target = await checkDshMutation(resolve(ctx.cwd, input.filePath), policy);
       ctx.signal.throwIfAborted();
-      await mkdir(dirname(target), { recursive: true });
+      const outcome = await writeTextFile(target, input.filePath, input.content, ctx.signal);
+      return { content: formatWriteOutput(displayPath(ctx.cwd, target), outcome.operation) };
+    },
+  };
+}
+
+function dshEditFileTool(policy: DshSandboxPolicy): Tool {
+  const params = z.object({
+    file_path: z.string(),
+    old_string: z.string(),
+    new_string: z.string(),
+    replace_all: z.boolean().optional(),
+    sandbox_permissions: z.enum(['workspace-write', 'danger-full-access']).optional(),
+    justification: z.string().optional(),
+  }).strict();
+  return {
+    ...editFileTool,
+    parameters: params,
+    async execute(args, ctx) {
+      const input = parseEditArgs(params.parse(args));
       ctx.signal.throwIfAborted();
-      await writeFile(target, content, 'utf8');
-      return { content: `Wrote ${path} (${content.length} characters)` };
+      const target = await checkDshMutation(resolve(ctx.cwd, input.filePath), policy);
+      ctx.signal.throwIfAborted();
+      await editTextFile(
+        target,
+        input.filePath,
+        input.oldString,
+        input.newString,
+        input.replaceAll,
+        ctx.signal,
+      );
+      return { content: formatEditOutput(displayPath(ctx.cwd, target), input.replaceAll) };
     },
   };
 }

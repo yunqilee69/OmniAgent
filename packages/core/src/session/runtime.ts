@@ -33,6 +33,8 @@ export interface ResolvedSessionRuntime {
   modelDescriptor?: ModelDescriptor;
   reasoningEffort?: ReasoningEffort;
   capabilities: ModelCapabilities;
+  /** Whether todo_write may keep several items in_progress at once. */
+  todoAllowParallelInProgress: boolean;
   system: string;
   contextWindowTokens?: number;
   warnings: string[];
@@ -136,6 +138,7 @@ export class RuntimeResolver {
     const system = [baseSystem, skillCatalog, agentCatalog].filter(Boolean).join('\n\n');
 
     const contextWindowTokens = configSnapshot.config.contextWindowTokens ?? resolvedModel.model?.contextWindow;
+    const todoAllowParallelInProgress = configSnapshot.config.todo?.allowParallelInProgress ?? false;
     const revision = revisionOf([
       configSnapshot.revision,
       agentSnapshot.revision,
@@ -147,6 +150,7 @@ export class RuntimeResolver {
       tools === '*' ? '*' : [...tools].sort().join(','),
       skills === '*' ? '*' : [...skills].sort().join(','),
       availableSkills.map((skill) => skill.name).sort().join(','),
+      String(todoAllowParallelInProgress),
     ]);
 
     return {
@@ -165,6 +169,7 @@ export class RuntimeResolver {
       ...(resolvedModel.model === undefined ? {} : { modelDescriptor: resolvedModel.model }),
       ...(resolvedModel.reasoningEffort === undefined ? {} : { reasoningEffort: resolvedModel.reasoningEffort }),
       capabilities: resolvedModel.model?.capabilities ?? { imageInput: false },
+      todoAllowParallelInProgress,
       system,
       ...(contextWindowTokens === undefined ? {} : { contextWindowTokens }),
       warnings,

@@ -54,7 +54,7 @@ describe('Session todo_write', () => {
     }
   });
 
-  it('rejects parallel active items and leaves the previous list intact', async () => {
+  it('rejects parallel active items when parallel work is disabled', async () => {
     const cwd = await mkdtemp(join(tmpdir(), 'omniagent-todo-invalid-'));
     try {
       const handle = await new SessionStore(join(cwd, 'sessions')).create({ id: 'agent', workspace: cwd, cwd });
@@ -62,6 +62,7 @@ describe('Session todo_write', () => {
       const session = new Session({
         cwd,
         dshPermissions: permissions,
+        todoAllowParallelInProgress: false,
         model: new FakeModel([
           toolCallResponse([
             { id: 'valid', name: 'todo_write', args: { todos } },
@@ -81,6 +82,37 @@ describe('Session todo_write', () => {
         expect.objectContaining({ result: expect.objectContaining({ name: 'todo_write', ok: false, content: expect.stringContaining('one todo') }) }),
       ]);
       expect(projectTodos(handle.events)).toEqual(todos);
+    } finally {
+      await rm(cwd, { recursive: true, force: true });
+    }
+  });
+
+  it('keeps multiple todos in progress when parallel work is enabled', async () => {
+    const cwd = await mkdtemp(join(tmpdir(), 'omniagent-todo-parallel-'));
+    try {
+      const handle = await new SessionStore(join(cwd, 'sessions')).create({ id: 'agent', workspace: cwd, cwd });
+      await handle.append(createInitialDshPermissionEvent('read-only'));
+      const parallel = [
+        { content: 'Explore the API', status: 'in_progress' },
+        { content: 'Implement the client', status: 'in_progress' },
+        { content: 'Review the result', status: 'pending' },
+      ];
+      const session = new Session({
+        cwd,
+        dshPermissions: permissions,
+        todoAllowParallelInProgress: true,
+        model: new FakeModel([
+          toolCallResponse([{ id: 'parallel', name: 'todo_write', args: { todos: parallel } }]),
+          textResponse('tracked'),
+        ]),
+        modelId: 'fake',
+        session: handle,
+      });
+      const events = await collect(session.send('split work'));
+      expect(events.find((event) => event.type === 'tool.result')).toMatchObject({
+        result: { name: 'todo_write', ok: true, content: expect.stringContaining('2 in progress') },
+      });
+      expect(projectTodos(handle.events)).toEqual(parallel);
     } finally {
       await rm(cwd, { recursive: true, force: true });
     }

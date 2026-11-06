@@ -58,7 +58,7 @@ function modeDefault(call: ToolCall, mode: PermissionMode): RuleBasedResult {
       return { decision: 'deny', reason: 'dontAsk 模式下未预授权的调用一律拒绝' };
 
     case 'plan':
-      return isEditTool(call.name) || call.name === 'shell'
+      return isEditTool(call.name) || call.name === 'bash'
         ? { decision: 'deny', reason: 'plan 模式只读，不允许修改或执行命令' }
         : { decision: 'allow', reason: 'plan 模式允许读取' };
 

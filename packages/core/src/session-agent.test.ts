@@ -31,7 +31,7 @@ describe('Session agent profiles', () => {
   it('registers only allowlisted tools and rejects fabricated calls', async () => {
     const cwd = await fixture();
     const model = new FakeModel([
-      toolCallResponse([{ name: 'write_file', args: { path: 'escape.txt', content: 'x' } }], 'try to write'),
+      toolCallResponse([{ name: 'write_file', args: { file_path: 'escape.txt', content: 'x' } }], 'try to write'),
       textResponse('done'),
     ]);
     const session = new Session({

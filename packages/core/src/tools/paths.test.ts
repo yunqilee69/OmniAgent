@@ -59,7 +59,7 @@ describe('physical read paths', () => {
     await symlink(secret, join(workspace, 'file-link'));
     await symlink(outside, join(workspace, 'dir-link'));
     const signal = new AbortController().signal;
-    await expect(readFileTool.execute({ path: 'file-link' }, { cwd: workspace, signal }))
+    await expect(readFileTool.execute({ file_path: 'file-link' }, { cwd: workspace, signal }))
       .rejects.toThrow(/越出工作区/);
     await expect(listDirTool.execute({ path: 'dir-link' }, { cwd: workspace, signal }))
       .rejects.toThrow(/越出工作区/);
@@ -69,7 +69,7 @@ describe('physical read paths', () => {
     await writeFile(join(workspace, 'file.txt'), 'inside');
     await mkdir(join(workspace, 'sub'));
     const signal = new AbortController().signal;
-    expect((await readFileTool.execute({ path: 'file.txt' }, { cwd: workspace, signal })).content)
+    expect((await readFileTool.execute({ file_path: 'file.txt' }, { cwd: workspace, signal })).content)
       .toContain('inside');
     expect((await listDirTool.execute({ path: '.' }, { cwd: workspace, signal })).content)
       .toContain('file.txt');

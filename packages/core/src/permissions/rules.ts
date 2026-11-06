@@ -93,7 +93,7 @@ export function matchesCall(
   }
 
   try {
-    if (call.name === 'shell') {
+    if (call.name === 'bash') {
       const command = readStringArg(call, 'command');
       if (command === undefined) {
         return false;
@@ -104,7 +104,7 @@ export function matchesCall(
         : matchesAnySubcommand(rule.specifier, command);
     }
     if (FS_TOOLS.has(call.name)) {
-      const path = readStringArg(call, 'path');
+      const path = readStringArg(call, call.name === 'list_dir' ? 'path' : 'file_path');
       return path !== undefined && matchesPath(rule.specifier, path, rule.anchor, cwd, rule.decision, pathCache);
     }
   } catch {

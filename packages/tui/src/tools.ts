@@ -24,7 +24,11 @@ const PRESENTATION: Record<string, { title: string; icon: string }> = {
   bash: { title: '执行命令', icon: '❯' },
   read_file: { title: '读取文件', icon: '▤' },
   write_file: { title: '写入文件', icon: '✎' },
+  edit_file: { title: '编辑文件', icon: '✎' },
   list_dir: { title: '浏览目录', icon: '☰' },
+  glob: { title: '查找文件', icon: '⌕' },
+  grep: { title: '搜索内容', icon: '⌕' },
+  web_fetch: { title: '抓取网页', icon: '↗' },
   skill: { title: '加载技能', icon: '◆' },
   todo_write: { title: '更新任务', icon: '☑' },
   subagent: { title: '子代理', icon: '⑂' },
@@ -33,6 +37,9 @@ const PRESENTATION: Record<string, { title: string; icon: string }> = {
   list_agents: { title: '代理列表', icon: '⑂' },
   interrupt_agent: { title: '中断代理', icon: '■' },
   exit_plan_mode: { title: '提交计划', icon: '◫' },
+  get_goal: { title: '读取目标', icon: '◎' },
+  create_goal: { title: '创建目标', icon: '◎' },
+  update_goal: { title: '更新目标', icon: '◎' },
 };
 
 const SHELL_TOOL = 'bash';
@@ -57,18 +64,38 @@ function summarizeArguments(name: string, args: Record<string, unknown>): string
   }
   switch (name) {
     case 'read_file': {
-      const path = stringValue(args['path']) ?? '';
+      const path = stringValue(args['file_path']) ?? '';
       const offset = numberValue(args['offset']);
       const limit = numberValue(args['limit']);
-      if (offset !== undefined && limit !== undefined) return `${path}:${offset + 1}-${offset + limit}`;
-      if (offset !== undefined) return `${path}:${offset + 1}`;
+      if (offset !== undefined && limit !== undefined) return `${path}:${offset}-${offset + limit - 1}`;
+      if (offset !== undefined) return `${path}:${offset}`;
       return path;
     }
     case 'write_file': {
-      const path = stringValue(args['path']) ?? '';
+      const path = stringValue(args['file_path']) ?? '';
       const body = stringValue(args['content']);
       return body === undefined ? path : `${path} · ${formatCharacters(body.length)}`;
     }
+    case 'edit_file': {
+      const path = stringValue(args['file_path']) ?? '';
+      const replaceAll = args['replace_all'] === true ? ' · 全部替换' : '';
+      return `${path}${replaceAll}`;
+    }
+    case 'glob': {
+      const pattern = stringValue(args['pattern']) ?? '';
+      const path = stringValue(args['path']);
+      return path === undefined ? pattern : `${pattern} · ${path}`;
+    }
+    case 'grep': {
+      const pattern = stringValue(args['pattern']) ?? '';
+      const include = stringValue(args['include']);
+      const path = stringValue(args['path']);
+      return [pattern, include === undefined ? undefined : `(${include})`, path]
+        .filter((part): part is string => part !== undefined)
+        .join(' · ');
+    }
+    case 'web_fetch':
+      return stringValue(args['url']) ?? '';
     case 'list_dir':
       return stringValue(args['path']) ?? '.';
     case 'skill':
@@ -86,10 +113,23 @@ function summarizeArguments(name: string, args: Record<string, unknown>): string
       return `${target} · ${firstLine(message)}`;
     }
     case 'wait_agent':
+      return '';
     case 'interrupt_agent':
       return stringValue(args['agent_id']) ?? '';
     case 'list_agents':
       return '';
+    case 'get_goal':
+      return '当前目标';
+    case 'create_goal':
+      return stringValue(args['objective']) ?? '';
+    case 'update_goal': {
+      const action = stringValue(args['action']) ?? '';
+      const detail = stringValue(args['blocked_reason'])
+        ?? stringValue(args['objective'])
+        ?? stringValue(args['goal_id'])
+        ?? '';
+      return detail === '' ? action : `${action} · ${detail}`;
+    }
     case 'exit_plan_mode': {
       const plan = stringValue(args['plan']) ?? '';
       const heading = plan.split('\n').find((line) => /^#{1,6}\s+\S/.test(line.trim()));
@@ -140,10 +180,12 @@ export function describeToolResult(
   }
 
   if (call.name === 'read_file' && result.ok) {
-    const lines = result.content.split('\n');
-    const header = /^#\s+(.+?)（共\s*(\d+)\s*行）\s*$/.exec(lines[0] ?? '');
-    if (header !== null) meta.unshift(`${header[2]} 行`);
-    const content = trimBlankLines(lines.slice(1));
+    const envelope = /<content>\n([\s\S]*)\n<\/content>$/.exec(result.content);
+    const lines = trimBlankLines((envelope?.[1] ?? result.content).split('\n'));
+    const footer = lines.at(-1) ?? '';
+    const total = /(?:total|of)\s+(\d+)\s+lines?/.exec(footer);
+    if (total?.[1] !== undefined) meta.unshift(`${total[1]} 行`);
+    const content = /^\((?:Showing|Output capped|End of file)/.test(footer) ? lines.slice(0, -1) : lines;
     const limit = options.verbose ? (options.maxLines ?? 60) : 5;
     const selected = content.slice(0, limit);
     body.push(...selected.map(stripLineNumberPrefix));
@@ -157,10 +199,37 @@ export function describeToolResult(
     return { meta, body, hiddenBodyLines: 0 };
   }
 
+  if (call.name === 'glob' && result.ok) {
+    const lines = trimBlankLines(result.content.split('\n'));
+    const count = /^No files found$/i.test(result.content) ? 0 : lines.filter((line) => !line.startsWith('(')).length;
+    meta.unshift(`${count} 个文件`);
+    if (!options.verbose) return { meta, body, hiddenBodyLines: 0 };
+    body.push(...lines);
+    return { meta, body, hiddenBodyLines: 0 };
+  }
+
+  if (call.name === 'grep' && result.ok) {
+    meta.unshift(firstLine(result.content) || '无匹配');
+    if (!options.verbose) return { meta, body, hiddenBodyLines: 0 };
+    body.push(...trimBlankLines(result.content.split('\n')).slice(1));
+    return { meta, body, hiddenBodyLines: 0 };
+  }
+
   if (call.name === 'write_file' && result.ok) {
-    const size = /(?:（(\d+)\s*字符|\((\d+)\s*characters?)/.exec(result.content);
-    const characters = size?.[1] ?? size?.[2];
-    if (characters !== undefined) meta.unshift(`${Number(characters).toLocaleString('en-US')} 字符`);
+    meta.unshift(result.content.includes('Created file') ? '已创建' : '已写入');
+    return { meta, body, hiddenBodyLines: 0 };
+  }
+
+  if (call.name === 'edit_file' && result.ok) {
+    meta.unshift('已修改');
+    return { meta, body, hiddenBodyLines: 0 };
+  }
+
+  if (call.name === 'web_fetch' && result.ok) {
+    const header = /^Fetched .* \(HTTP (\d+)\)/.exec(result.content);
+    if (header?.[1] !== undefined) meta.unshift(`HTTP ${header[1]}`);
+    if (!options.verbose) return { meta, body, hiddenBodyLines: 0 };
+    body.push(...trimBlankLines(result.content.split('\n')).slice(0, 20));
     return { meta, body, hiddenBodyLines: 0 };
   }
 
@@ -221,7 +290,7 @@ function normalizeShellStatus(status: string): string {
 }
 
 function stripLineNumberPrefix(line: string): string {
-  const match = /^\s*(\d+)\t(.*)$/.exec(line);
+  const match = /^\s*(\d+)(?:\t|: )(.*)$/.exec(line);
   return match === null ? line : `${match[1]?.padStart(4, ' ')}  ${match[2] ?? ''}`;
 }
 

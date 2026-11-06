@@ -15,12 +15,12 @@ import { parseRule, resolveRulePath } from './rules';
 
 const cwd = '/work/project';
 
-function shellCall(command: string, id = 'c1'): ToolCall {
-  return { id, name: 'shell', arguments: { command } };
+function bashCall(command: string, id = 'c1'): ToolCall {
+  return { id, name: 'bash', arguments: { command } };
 }
 
 function readCall(path: string, id = 'c1'): ToolCall {
-  return { id, name: 'read_file', arguments: { path } };
+  return { id, name: 'read_file', arguments: { file_path: path } };
 }
 
 function rules(...entries: Array<[string, 'allow' | 'ask' | 'deny']>): Rule[] {
@@ -59,9 +59,9 @@ describe('复合命令的匹配语义', () => {
 describe('decide 的求值顺序', () => {
   it('deny 优先于更精确的 allow', () => {
     const result = decide({
-      call: shellCall('npm install && rm -rf /'),
+      call: bashCall('npm install && rm -rf /'),
       mode: 'bypass',
-      rules: rules(['shell(npm *)', 'allow'], ['shell(rm *)', 'deny']),
+      rules: rules(['bash(npm *)', 'allow'], ['bash(rm *)', 'deny']),
       cwd,
     });
     expect(result.decision).toBe('deny');
@@ -69,9 +69,9 @@ describe('decide 的求值顺序', () => {
 
   it('ask 优先于 allow', () => {
     const result = decide({
-      call: shellCall('git push origin main'),
+      call: bashCall('git push origin main'),
       mode: 'default',
-      rules: rules(['shell(git *)', 'allow'], ['shell(git push *)', 'ask']),
+      rules: rules(['bash(git *)', 'allow'], ['bash(git push *)', 'ask']),
       cwd,
     });
     expect(result.decision).toBe('ask');
@@ -79,9 +79,9 @@ describe('decide 的求值顺序', () => {
 
   it('allow 放行整条命令的前提是每个子命令都命中', () => {
     const result = decide({
-      call: shellCall('npm install && rm -rf build'),
+      call: bashCall('npm install && rm -rf build'),
       mode: 'default',
-      rules: rules(['shell(npm *)', 'allow']),
+      rules: rules(['bash(npm *)', 'allow']),
       cwd,
     });
     // rm 没被 allow 覆盖，落到模式默认 -> ask
@@ -93,7 +93,7 @@ describe('decide 的求值顺序', () => {
       'allow',
     );
     expect(
-      decide({ call: shellCall('ls'), mode: 'plan', rules: [], cwd }).decision,
+      decide({ call: bashCall('ls'), mode: 'plan', rules: [], cwd }).decision,
     ).toBe('deny');
     expect(decide({ call: readCall('a.txt'), mode: 'dontAsk', rules: [], cwd }).decision).toBe(
       'deny',
@@ -213,7 +213,7 @@ describe('路径规则中的现有别名', () => {
     const call: ToolCall = {
       id: 'c1',
       name: 'write_file',
-      arguments: { path: 'secret/new/file.txt', content: 'x' },
+      arguments: { file_path: 'secret/new/file.txt', content: 'x' },
     };
     expect(decide({ call, mode: 'bypass', rules: [rule], cwd: workspace }).decision).toBe('deny');
   });
@@ -262,7 +262,7 @@ describe('路径规则中的现有别名', () => {
 describe('acceptEdits 模式下的受保护路径', () => {
   it('.git 里的写入仍然要问', () => {
     const result = decide({
-      call: { id: 'c1', name: 'write_file', arguments: { path: '.git/config', content: 'x' } },
+      call: { id: 'c1', name: 'write_file', arguments: { file_path: '.git/config', content: 'x' } },
       mode: 'acceptEdits',
       rules: [],
       cwd,
@@ -273,7 +273,7 @@ describe('acceptEdits 模式下的受保护路径', () => {
   it.each(['.GIT/config', '.OmniAgent/settings.json'])(
     'prompts for protected directory case variant %s', (path) => {
       const result = decide({
-        call: { id: 'c1', name: 'write_file', arguments: { path, content: 'x' } },
+        call: { id: 'c1', name: 'write_file', arguments: { file_path: path, content: 'x' } },
         mode: 'acceptEdits',
         rules: [],
         cwd,
@@ -284,7 +284,7 @@ describe('acceptEdits 模式下的受保护路径', () => {
 
   it('普通文件编辑直接放行', () => {
     const result = decide({
-      call: { id: 'c1', name: 'write_file', arguments: { path: 'src/a.ts', content: 'x' } },
+      call: { id: 'c1', name: 'write_file', arguments: { file_path: 'src/a.ts', content: 'x' } },
       mode: 'acceptEdits',
       rules: [],
       cwd,

@@ -43,7 +43,7 @@ function writeEscalation(id: string, path: string) {
     id,
     name: 'write_file',
     args: {
-      path,
+      file_path: path,
       content: 'approved content',
       sandbox_permissions: 'workspace-write',
       justification: 'Write the requested workspace file.',
@@ -99,7 +99,7 @@ describe('Session', () => {
     const model = new FakeModel([
       toolCallResponse([
         escalation,
-        { id: 'c2', name: 'write_file', args: { path: 'later.txt', content: 'not approved' } },
+        { id: 'c2', name: 'write_file', args: { file_path: 'later.txt', content: 'not approved' } },
       ]),
       textResponse('好了'),
     ]);

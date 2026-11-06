@@ -27,7 +27,8 @@ export function touchesProtectedPath(call: ToolCall): boolean {
   if (typeof args !== 'object' || args === null) {
     return false;
   }
-  const path = (args as Record<string, unknown>)['path'];
+  const record = args as Record<string, unknown>;
+  const path = typeof record['file_path'] === 'string' ? record['file_path'] : record['path'];
   if (typeof path !== 'string') {
     return false;
   }

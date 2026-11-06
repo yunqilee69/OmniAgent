@@ -133,12 +133,12 @@ describe('TuiRenderer blocks', () => {
     tui.handle({ type: 'assistant.reasoning.delta', text: '先分析**需求**。\n' });
     tui.handle({ type: 'assistant.delta', text: '## 结果\n\n完成了 `read_file`。\n' });
     tui.handle({ type: 'assistant.message', message: { role: 'assistant', content: [{ type: 'text', text: '## 结果' }], toolCalls: [] } });
-    tui.handle({ type: 'tool.call', call: { id: 'c1', name: 'read_file', arguments: { path: 'README.md' } } });
+    tui.handle({ type: 'tool.call', call: { id: 'c1', name: 'read_file', arguments: { file_path: 'README.md' } } });
     tui.handle({
       type: 'tool.result',
       result: {
         callId: 'c1', name: 'read_file', ok: true, truncated: false, durationMs: 12,
-        content: '# README.md（共 2 行）\n    1\t# Hi\n    2\ttext',
+        content: "<path>README.md</path>\n<type>file</type>\n<content>\n1: # Hi\n2: text\n(End of file - total 2 lines)\n</content>",
       },
     });
     tui.handle({ type: 'turn.end', reason: 'end_turn' });
@@ -199,8 +199,8 @@ describe('TuiRenderer blocks', () => {
     tui.handle({ type: 'assistant.reasoning.delta', text: '想。\n' });
     tui.handle({ type: 'assistant.delta', text: '# 标题\n\n`code` 和 [链接](https://example.com)\n' });
     tui.handle({ type: 'assistant.message', message: { role: 'assistant', content: [{ type: 'text', text: '# 标题\n\n`code` 和 [链接](https://example.com)' }], toolCalls: [] } });
-    tui.handle({ type: 'tool.call', call: { id: 'c1', name: 'read_file', arguments: { path: 'a.txt' } } });
-    tui.handle({ type: 'tool.result', result: { callId: 'c1', name: 'read_file', ok: true, truncated: false, content: '# a.txt（共 1 行）\n    1\tone' } });
+    tui.handle({ type: 'tool.call', call: { id: 'c1', name: 'read_file', arguments: { file_path: 'a.txt' } } });
+    tui.handle({ type: 'tool.result', result: { callId: 'c1', name: 'read_file', ok: true, truncated: false, content: "<path>a.txt</path>\n<type>file</type>\n<content>\n1: one\n(End of file - total 1 line)\n</content>" } });
     tui.handle({ type: 'turn.end', reason: 'end_turn' });
     expect(roleViolations(output())).toEqual([]);
     // 内收文字走 dim（SGR 2），不再用固定的亮灰 90。
@@ -275,7 +275,7 @@ describe('TuiRenderer blocks', () => {
     const { text, tui } = harness();
     tui.showPermissionRequest({
       id: 'c1',
-      call: { id: 'c1', name: 'write_file', arguments: { path: 'a.txt', content: 'x' } },
+      call: { id: 'c1', name: 'write_file', arguments: { file_path: 'a.txt', content: 'x' } },
       reason: '需要写入工作区',
     });
     tui.recordPermissionAnswer(false, 'c1');
@@ -297,12 +297,48 @@ describe('tool summaries', () => {
     expect(call).toMatchObject({ title: '执行命令', summary: '$ npm test' });
 
     const read = describeToolResult(
-      { id: 'c2', name: 'read_file', arguments: { path: 'a.txt' } },
-      { callId: 'c2', name: 'read_file', ok: true, truncated: false, durationMs: 1500, content: '# a.txt（共 3 行）\n    1\tone' },
+      { id: 'c2', name: 'read_file', arguments: { file_path: 'a.txt' } },
+      { callId: 'c2', name: 'read_file', ok: true, truncated: false, durationMs: 1500, content: "<path>a.txt</path>\n<type>file</type>\n<content>\n1: one\n(End of file - total 3 lines)\n</content>" },
       { verbose: false },
     );
     expect(read.meta).toContain('3 行');
     expect(read.meta).toContain('1.5s');
+  });
+
+  it('summarizes the DSH-ported edit, glob, grep, and web_fetch tools', () => {
+    expect(describeToolCall({
+      id: 'c1', name: 'edit_file', arguments: { file_path: 'a.ts', replace_all: true },
+    })).toMatchObject({ title: '编辑文件', summary: 'a.ts · 全部替换' });
+    expect(describeToolCall({
+      id: 'c2', name: 'glob', arguments: { pattern: '**/*.ts', path: 'src' },
+    })).toMatchObject({ title: '查找文件', summary: '**/*.ts · src' });
+    expect(describeToolCall({
+      id: 'c3', name: 'grep', arguments: { pattern: 'answer', include: '*.ts', path: 'src' },
+    })).toMatchObject({ title: '搜索内容', summary: 'answer · (*.ts) · src' });
+    expect(describeToolCall({
+      id: 'c4', name: 'web_fetch', arguments: { url: 'https://example.com' },
+    })).toMatchObject({ title: '抓取网页', summary: 'https://example.com' });
+
+    expect(describeToolResult(
+      { id: 'c1', name: 'edit_file', arguments: { file_path: 'a.ts' } },
+      { callId: 'c1', name: 'edit_file', ok: true, truncated: false, content: 'updated' },
+      { verbose: false },
+    ).meta).toContain('已修改');
+    expect(describeToolResult(
+      { id: 'c2', name: 'glob', arguments: { pattern: '**/*.ts' } },
+      { callId: 'c2', name: 'glob', ok: true, truncated: false, content: 'a.ts\nb.ts' },
+      { verbose: false },
+    ).meta).toContain('2 个文件');
+    expect(describeToolResult(
+      { id: 'c3', name: 'grep', arguments: { pattern: 'answer' } },
+      { callId: 'c3', name: 'grep', ok: true, truncated: false, content: 'Found 1 match\n\nsrc/a.ts\nLine 1: answer' },
+      { verbose: false },
+    ).meta).toContain('Found 1 match');
+    expect(describeToolResult(
+      { id: 'c4', name: 'web_fetch', arguments: { url: 'https://example.com' } },
+      { callId: 'c4', name: 'web_fetch', ok: true, truncated: false, content: 'Fetched https://example.com (HTTP 200)\n\nBody' },
+      { verbose: false },
+    ).meta).toContain('HTTP 200');
   });
 });
 

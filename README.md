@@ -32,7 +32,7 @@ TUI 的排版只有一条规则：**四类内容各有自己的左缘**，所以
 
 配色只用 ANSI 16 色前景与属性（无 24 位 RGB、无背景色），内收文字用 `dim`（SGR 2）而不是固定灰，因此浅色与深色终端都能自动重映射，不另设主题；`/color off` 或 `NO_COLOR=1` 关掉颜色，`FORCE_COLOR` 可在管道里强制开启。角色表见 [ADR-0003](docs/adr/0003-tui-visual-hierarchy.md)。
 
-plan 模式会将调研约束注入系统提示，并要求模型通过 `exit_plan_mode` 提交计划供你批准；`todo_write` 会持久化整份任务清单，TUI 在每次更新后展示。Web 工作台支持登记和切换本地工作区、浏览及恢复会话、实时对话、plan 模式开关与计划审批、任务清单、权限、智能体与模型设置、一次性工具审批、子会话显示和轨迹图。智能体配置存放在 `~/.omniagent/agents/*.md`，新建会话或切换智能体时可以从 Web/TUI 选择；子代理会作为独立会话出现在会话列表中，它们继承父会话的工作区、权限预设和 cwd 限制，但按目标智能体的角色选择模型，并可通过 `subagent`、`send_message`、`list_agents`、`wait_agent`、`interrupt_agent` 协作。会话菜单可以复制 Markdown 或下载 JSON 会话摘录；导出可能包含敏感对话和工具输出，分享前应检查。JSON 不是 DSH 的 ZIP/JSONL 归档，也不包含子会话和附件。取消登记工作区不会删除目录或会话；会话按工作区保存在 `~/.omniagent/sessions/` 下。
+plan 模式会将调研约束注入系统提示，并要求模型通过 `exit_plan_mode` 提交计划供你批准；`todo_write` 会持久化整份任务清单，TUI 在每次更新后展示。`create_goal` 可以把长期目标登记到会话中，之后由自动续轮推进，`get_goal` / `update_goal` 负责读取、编辑、暂停、恢复和结束目标；每次自动续轮都写入带 goal source 的用户消息，达到轮次上限会自动进入 blocked。Web 工作台支持登记和切换本地工作区、浏览及恢复会话、实时对话、plan 模式开关与计划审批、任务清单、权限、智能体与模型设置、一次性工具审批、子会话显示和轨迹图。智能体配置存放在 `~/.omniagent/agents/*.md`，新建会话或切换智能体时可以从 Web/TUI 选择；子代理会作为独立会话出现在会话列表中，它们继承父会话的工作区、权限预设和 cwd 限制，但按目标智能体的角色选择模型，并可通过 `subagent`、`send_message`、`list_agents`、`wait_agent`、`interrupt_agent` 协作。`list_agents` 返回整棵协作树的根节点、自身和可继续的子代理；`wait_agent` 等待下一步输入（消息、完成通知或用户 steering），而不是轮询某个子代理的最终状态。会话菜单可以复制 Markdown 或下载 JSON 会话摘录；导出可能包含敏感对话和工具输出，分享前应检查。JSON 不是 DSH 的 ZIP/JSONL 归档，也不包含子会话和附件。取消登记工作区不会删除目录或会话；会话按工作区保存在 `~/.omniagent/sessions/` 下。
 
 Web 仅监听本机，不提供本地用户身份认证；Host/Origin 检查不能限制其他本地进程。会话使用 `read-only`、`workspace-write` 或 `danger-full-access` 权限预设，并将选择持久化在该会话中；旧会话不会从旧 `mode` 或规则猜测权限，须显式选择。普通 `workspace-write` 不逐次询问；只有请求扩大当前调用的沙盒范围时才进行一次性审批。`~/.omniagent/config.json` 中的全局默认值只作用于新会话。Web 与 TUI 都支持会话级智能体和模型切换：智能体选择以 `agent/selected`、模型绑定以 v2 `model/selected` 事件持久化，两者都不含凭据。`.agents/skills` 中的 skill 会在会话系统提示里列出，模型通过 `skill` 工具按需加载完整说明；智能体 profile 可以进一步收窄可见工具和 skill。文件和 shell 限制不隔离网络，且不是完整 OS 安全边界。会话消息、实时 SSE、原始审计文件以及加载的 skill 文本都可能包含敏感内容。设置 `OMNIAGENT_PORT` 可更换监听端口。接口和数据边界见 [Web API](docs/web-api.md)，配置分层与智能体文件格式见 [智能体、角色与模型绑定](docs/agents.md)。
 
@@ -83,7 +83,10 @@ agents/*.md         →  身份、说明、角色、usage、profile、system pro
   },
   "agentProfiles": {
     "default": { "tools": "*", "skills": "*" },
-    "search-only": { "tools": ["read_file", "list_dir", "skill"], "skills": ["web-research"] }
+    "search-only": { "tools": ["read_file", "list_dir", "glob", "grep", "web_fetch", "skill"], "skills": ["web-research"] }
+  },
+  "todo": {
+    "allowParallelInProgress": true
   }
 }
 ```
@@ -99,9 +102,10 @@ agents/*.md         →  身份、说明、角色、usage、profile、system pro
 
 - `role.provider`、`role.model` 必须存在于模型目录；`reasoningEffort` 必须是该模型支持的值。
 - `agentProfiles` 未配置时内置 `default = { "tools": "*", "skills": "*" }`。一旦配置了 `agentProfiles`，引用不存在的 profile 的智能体就会失效。
-- `tools` 可以是 `"*"` 或精确列表；`subagent` 组展开为 `subagent`、`send_message`、`list_agents`、`wait_agent`、`interrupt_agent`。未知工具名是配置错误。
+- `tools` 可以是 `"*"` 或精确列表；`subagent` 组展开为 `subagent`、`send_message`、`list_agents`、`wait_agent`、`interrupt_agent`；`todo_write`、`exit_plan_mode`、`get_goal`、`create_goal`、`update_goal` 需要逐项授权。未知工具名是配置错误。
 - `skills` 可以是 `"*"` 或数组，省略等价于 `[]`。缺失的 skill 只产生 warning，不会授予额外能力。
 - profile 只是 allowlist，不能扩大 DSH 权限预设、沙盒、endpoint 或凭据范围。
+- `todo.allowParallelInProgress` 默认 `false`，此时 `todo_write` 最多一个任务处于 `in_progress`。当工作会交给多个子智能体并行推进时设为 `true`，允许同时保留多个进行中任务。
 
 智能体内容不写在 `config.json`，而是放在 `~/.omniagent/agents/*.md`，文件名就是 id：
 
@@ -171,7 +175,7 @@ pnpm eval -- --keep    # 失败时保留临时工作区，方便看现场
   name: '只读预设阻止写文件',
   permissionPreset: 'read-only',
   steps: [
-    toolCallResponse([{ name: 'write_file', args: { path: 'secret.txt', content: 'x' } }]),
+    toolCallResponse([{ name: 'write_file', args: { file_path: 'secret.txt', content: 'x' } }]),
     textResponse('写文件被拒绝了。'),
   ],
   expect: {
@@ -211,7 +215,7 @@ OmniAgent/
 
 ```text
 ~/.omniagent/
-├── config.json                providers、models、roles、agentProfiles、权限默认值
+├── config.json                providers、models、roles、agentProfiles、todo、权限默认值
 ├── agents/                    每个 *.md 是一个智能体
 ├── sessions/                  按工作区和会话 id 保存的 JSONL 事件日志
 ├── workspaces.json            Web 登记的工作区
@@ -228,9 +232,9 @@ OmniAgent/
 | `loop/` | 主循环、停止条件、步数上限和上下文压缩 hook | DSH-shaped loop 已接入 |
 | `permissions/` | DSH preset、持久事件和一次性 escalation | 三种 preset；旧 mode/rules 不授权 |
 | `exec/` | 执行器：把异常统一转成 observation | 已接入真实工具执行 |
-| `tools/` | 工具契约、注册表、内置读/写/列目录、skill、`bash`、todo/plan/subagent 工具 | 工具 allowlist 与 DSH 权限取交集 |
-| `subagents/` | 子会话启动、消息、list/wait/interrupt、通知与模型/权限继承 | 目标 agent + role；depth/active 上限；懒恢复需有效选择 |
-| `session/` | plan/todo 投影、agent/model 绑定、RuntimeResolver、会话投影与持久化辅助 | agent/selected v1 与 model/selected v2；旧绑定 invalid |
+| `tools/` | 工具契约、注册表、DSH 移植的 read/write/edit/glob/grep/web_fetch、`list_dir`、skill、`bash`、todo/plan/goal/subagent 工具 | 工具 allowlist 与 DSH 权限取交集 |
+| `subagents/` | 子会话启动、消息、整树 list、下一步输入 wait、interrupt、通知与模型/权限继承 | 目标 agent + role；depth/active 上限；懒恢复需有效选择 |
+| `session/` | plan/todo/goal 投影、agent/model 绑定、RuntimeResolver、会话投影与持久化辅助 | goal/change + CAS 与自动续轮；agent/selected v1 与 model/selected v2 |
 | `agents/` | `*.md` 智能体发现、frontmatter、usage/profile 校验和目录渲染 | 内置 default；拒绝符号链接和超限文件 |
 | `store/` | transcript 持久化、JSONL 审计日志 | append 使用跨进程锁、暂存文件、fsync 和原子 rename |
 | `config/` | 加载 providers/models/roles/agentProfiles、模型目录、热加载 ConfigStore | schema 严格校验；内容哈希 revision；失败 fail closed |
@@ -332,7 +336,7 @@ export type AgentEvent =
 - 同一会话的 append 通过 `<session>.lock` 协调多个 OmniAgent 进程，并在 rename 前 fsync 文件和目录；锁只约束协作写入者，非协作的外部进程修改仍会在元数据校验时被拒绝。工作区 registry 仍只保证单进程写入。
 - Web 审计日志保存在 `~/.omniagent/web-audit/`；Observe API 每个会话最多返回最近 1,000 条记录，并只读取文件尾部 2 MiB。旧版或 TUI 写在工作区内的 `.omniagent/audit.jsonl` 不会被自动读取或迁移。TUI 新建审计目录/文件使用 `0700/0600`，但不会修改既有路径的权限；指向符号链接或非普通文件的审计路径会被拒绝。
 - Web loopback 不做本地用户认证；活动 turn 或 session 创建期间，权限/default/模型修改和新建 session 返回 `409`，这只是防止运行中权限竞态，不是身份认证。实时 SSE 和原始会话/审计记录可能包含工具参数、结果或其他敏感内容，不能当作脱敏导出格式。
-- 上下文窗口优先取 `contextWindowTokens` 配置，否则取会话所选模型目录中的上下文长度；两者都不可用时不做自动压缩。`read_file` 单次最多读取 16 MiB，`list_dir` 最多收集 10,000 个条目；工具输出仍会截断，不存在可回读的完整输出引用。
+- 上下文窗口优先取 `contextWindowTokens` 配置，否则取会话所选模型目录中的上下文长度；两者都不可用时不做自动压缩。`read_file` 默认和单次最多返回 2,000 行，单行最多 2,000 字符、选中内容最多 50 KiB，达到 10 MiB 的文件走流式读取；`glob` 最多展示 100 个路径，`grep` 最多 250 条匹配、单行预览 2,000 字节，`web_fetch` 响应体最多 5 MB、正文 100,000 字符、完整输出 200,000 字符。工具输出仍会截断，不存在可回读的完整输出引用。
 - 智能体 profile 和 skill allowlist 只是减少暴露面，不是安全隔离。被允许的工具仍受 DSH 权限预设和沙盒约束，被加载的 skill 文本也属于模型上下文，不能视为可信指令。
 - `capabilities.imageInput` 是当前唯一的模型能力标记。模型不支持图片时，包含图片历史的回合会在请求前失败，不会静默丢弃图片。
 - 配置和智能体文件按内容哈希热加载；运行中的回合使用旧快照，变化从下一回合生效。无效配置或 agent 文件会 fail closed，不回退到旧配置、其他模型或其他智能体，也不会删除既有会话。

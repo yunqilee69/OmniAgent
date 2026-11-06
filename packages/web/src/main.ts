@@ -116,6 +116,7 @@ async function main(): Promise<void> {
         ...(resolved.modelId === undefined ? {} : { modelId: resolved.modelId }),
         agent: resolved.sessionAgent,
         modelCapabilities: resolved.capabilities,
+        todoAllowParallelInProgress: resolved.todoAllowParallelInProgress,
         dshPermissions: permissions,
         maxSteps: config.maxSteps,
         ...(resolved.contextWindowTokens === undefined ? {} : { contextWindowTokens: resolved.contextWindowTokens }),

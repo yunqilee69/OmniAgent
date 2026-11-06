@@ -44,10 +44,23 @@ turn.end
 
 1. `permission.decided` 一定出现在对应 `tool.call` 之后、`tool.result` 之前。
 2. 每个 `tool.call` 一定恰好有一个 `tool.result`（被拒绝也要有一个 `ok: false` 的结果）。
-3. 一次 `send()` 以且仅以一个 `turn.end` 或 `error` 结束。
+3. 每个模型回合段以且仅以一个 `turn.end` 或 `error` 结束；`send()` 在最后一个回合段后关闭流。
 4. `assistant.message` 里的 `toolCalls` 与后续 `tool.call` 一一对应，顺序一致。
 5. `assistant.delta` 只出现在同一轮的 `assistant.message` 之前；把所有 delta 的 `text` 依次拼接，等于该条 assistant 消息的文本内容（provider 实现 `stream()` 时成立）。
 6. `assistant.reasoning.delta` 同样只出现在 `assistant.message` 之前，但它**不是**正文的一部分，也不保证被持久化或回放。UI 可以只把它当实时展示；没有思考内容时该事件完全缺席。
+
+## 自动目标续轮
+
+当会话里存在 `active` 且进程内 `armed` 的 goal 时，一次 `send()` 可能包含多个模型回合段：
+
+```
+turn.start ... turn.end     ← 直接人类回合
+turn.start ... turn.end     ← goal round 1
+turn.start ... turn.end     ← goal round 2
+...
+```
+
+每个后续回合开始前，Session 先追加一条带 `source: { kind: 'goal', goalId, revision, round }` 的 `message/user` 事件，再运行模型。客户端必须能在同一个流里处理多次 `turn.start` / `turn.end`，不能在第一个 `turn.end` 就关闭连接或允许新的并发发送；服务端的运行锁在整个目标链结束后才释放。goal 完成、blocked、paused、disarmed、中断、错误或达到轮次上限时链停止。中断正在执行的 goal round 会把 goal 持久化为 `paused`；错误会 disarm 但保留 phase。
 
 ## 流式是可选的
 

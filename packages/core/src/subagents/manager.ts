@@ -21,6 +21,8 @@ import {
 } from '../domain/subagent';
 import type {
   SubagentInfo,
+  SubagentListEntry,
+  SubagentListStatus,
   SubagentNotice,
   SubagentOutcome,
   SubagentService,
@@ -232,23 +234,43 @@ export class SubagentManager implements SubagentService {
     return { messageId };
   }
 
-  async list(caller: Session): Promise<SubagentInfo[]> {
+  async list(caller: Session): Promise<SubagentListEntry[]> {
     const summaries = await this.options.store.list();
     const byId = new Map(summaries.map((summary) => [summary.id, summary]));
     const callerRoot = this.rootOf(caller.id, byId) ?? caller.id;
-    const result: SubagentInfo[] = [];
-    for (const summary of summaries) {
-      if (summary.id === caller.id) continue;
-      if (summary.workspace !== caller.workspace) continue;
-      if ((this.rootOf(summary.id, byId) ?? summary.id) !== callerRoot) continue;
-      const live = this.children.get(summary.id);
-      if (live) {
-        result.push({ ...live.info, status: live.status, updatedAt: Date.now() });
-        continue;
-      }
-      result.push(await this.storedInfo(summary, summary.workspace));
-    }
-    return result.sort((left, right) => left.depth - right.depth || left.createdAt - right.createdAt);
+    const root: SubagentListEntry = {
+      kind: 'root',
+      id: callerRoot,
+      status: this.activityOf(callerRoot, caller),
+    };
+    const children = summaries
+      .filter((summary) => summary.workspace === caller.workspace
+        && summary.id !== callerRoot
+        && (this.rootOf(summary.id, byId) ?? summary.id) === callerRoot)
+      .sort((left, right) => (left.depth ?? 0) - (right.depth ?? 0) || left.createdAt - right.createdAt)
+      .map((summary): SubagentListEntry => {
+        const child = this.children.get(summary.id);
+        return {
+          kind: 'child',
+          id: summary.id,
+          label: summary.description ?? child?.info.agent ?? 'subagent',
+          status: this.activityOf(summary.id, caller),
+          ...(summary.parentSessionId === undefined ? {} : { parent: summary.parentSessionId }),
+          depth: summary.depth ?? child?.info.depth ?? 1,
+        };
+      });
+    return [root, ...children];
+  }
+
+  private activityOf(id: string, caller: Session): SubagentListStatus {
+    const child = this.children.get(id);
+    if (child?.status === 'running') return 'running';
+    const live = this.live.get(id) ?? (id === caller.id ? caller : undefined);
+    return live?.activeTurn ? 'running' : 'inactive';
+  }
+
+  waitForInput(caller: Session, timeoutMs: number, signal: AbortSignal): Promise<{ timedOut: boolean }> {
+    return caller.waitForInput(timeoutMs, signal);
   }
 
   async wait(caller: Session, targetId: string, timeoutMs: number, signal: AbortSignal): Promise<SubagentOutcome> {
@@ -354,6 +376,7 @@ export class SubagentManager implements SubagentService {
       ...(runtime.modelId === undefined ? {} : { modelId: runtime.modelId }),
       agent: runtime.sessionAgent,
       modelCapabilities: runtime.capabilities,
+      todoAllowParallelInProgress: runtime.todoAllowParallelInProgress,
       system,
       dshPermissions: snapshotDshPermissions({ status: 'ready', preset: permissions.preset }),
       maxSteps: this.options.maxSteps,
@@ -587,31 +610,5 @@ export class SubagentManager implements SubagentService {
       current = parent;
     }
     return current?.id;
-  }
-
-  private async storedInfo(
-    summary: { id: string; parentSessionId?: string; depth?: number; description?: string; createdAt: number },
-    workspace: string,
-  ): Promise<SubagentInfo> {
-    let handle: SessionHandle | undefined;
-    try {
-      handle = await this.options.store.open(workspace, summary.id);
-    } catch {
-      handle = undefined;
-    }
-    const events = handle?.events ?? [];
-    const result = handle ? clipResult(lastAssistant(events)) : undefined;
-    const agentSelection = handle ? projectAgentSelection(events) : { status: 'legacy' as const, agent: null };
-    return {
-      id: summary.id,
-      ...(summary.parentSessionId === undefined ? {} : { parentId: summary.parentSessionId }),
-      depth: summary.depth ?? 0,
-      ...(summary.description === undefined ? {} : { description: summary.description }),
-      ...(agentSelection.status === 'selected' ? { agent: agentSelection.agent } : {}),
-      status: handle ? lastTurnState(events) : 'idle',
-      createdAt: summary.createdAt,
-      updatedAt: handle?.events.at(-1)?.ts ?? summary.createdAt,
-      ...(result === undefined ? {} : { result }),
-    };
   }
 }

@@ -31,6 +31,7 @@ async function fixture() {
       search: { tools: ['read_file', 'skill', 'subagent'], skills: ['allowed-skill'] },
     },
     contextWindowTokens: 1234,
+    todo: { allowParallelInProgress: true },
     system: 'GLOBAL',
   }));
   await writeFile(join(configDir, 'agents', 'default.md'), '---\nname: Root Default\n---\nDEFAULT BODY');
@@ -65,6 +66,7 @@ describe('RuntimeResolver', () => {
     expect(resolved.modelId).toBe('deepseek-flash');
     expect(resolved.reasoningEffort).toBe('high');
     expect(resolved.capabilities).toEqual({ imageInput: true });
+    expect(resolved.todoAllowParallelInProgress).toBe(true);
     expect(resolved.contextWindowTokens).toBe(1234);
     expect(resolved.system).toContain('GLOBAL');
     expect(resolved.system).toContain('DEFAULT BODY');
@@ -72,6 +74,17 @@ describe('RuntimeResolver', () => {
     expect(resolved.system).toContain('<available_agents>');
     expect(resolved.system).toContain('explorer');
     expect(resolved.revision).toMatch(/^[a-f0-9]{64}$/);
+  });
+
+  it('defaults parallel todos off when the policy is unconfigured', async () => {
+    const { runtime, workspace, configDir } = await fixture();
+    const config = JSON.parse(await readFile(join(configDir, 'config.json'), 'utf8'));
+    delete config.todo;
+    await writeFile(join(configDir, 'config.json'), JSON.stringify(config));
+    const resolved = await runtime.resolve({
+      cwd: workspace, agentId: 'default', binding: { version: 2, kind: 'agent' }, isRoot: true,
+    });
+    expect(resolved.todoAllowParallelInProgress).toBe(false);
   });
 
   it('enforces agent usage and applies tool/skill profiles for subagents', async () => {

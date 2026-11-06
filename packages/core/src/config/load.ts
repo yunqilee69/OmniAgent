@@ -135,6 +135,10 @@ export const ConfigSchema = z.object({
     maxDepth: z.number().int().nonnegative().default(1),
     maxActive: z.number().int().positive().default(8),
   }).passthrough().optional(),
+  /** Model-facing todo policy. Parallel active items suit workflows that delegate work to subagents. */
+  todo: z.object({
+    allowParallelInProgress: z.boolean().default(false),
+  }).passthrough().optional(),
   system: z.string().optional(),
   permissions: z
     .object({

@@ -20,7 +20,7 @@ const assistantWithTool: AssistantMessage = {
   role: 'assistant',
   content: [],
   toolCalls: [
-    { id: 'call_1', name: 'read_file', arguments: { path: 'a.txt' }, raw: '{"path":"a.txt"}' },
+    { id: 'call_1', name: 'read_file', arguments: { file_path: 'a.txt' }, raw: '{"file_path":"a.txt"}' },
   ],
 };
 
@@ -99,7 +99,7 @@ describe('toOpenAIMessages', () => {
         {
           id: 'call_1',
           type: 'function',
-          function: { name: 'read_file', arguments: '{"path":"a.txt"}' },
+          function: { name: 'read_file', arguments: '{"file_path":"a.txt"}' },
         },
       ],
     });
@@ -137,13 +137,13 @@ describe('toOpenAIMessages', () => {
   it('没有 raw 时回退到 JSON.stringify', () => {
     const withoutRaw: AssistantMessage = {
       ...assistantWithTool,
-      toolCalls: [{ id: 'call_1', name: 'read_file', arguments: { path: 'a.txt' } }],
+      toolCalls: [{ id: 'call_1', name: 'read_file', arguments: { file_path: 'a.txt' } }],
     };
 
     const messages = toOpenAIMessages('sys', [withoutRaw]);
     const assistant = messages[1] as { tool_calls: Array<{ function: { arguments: string } }> };
 
-    expect(assistant.tool_calls[0]?.function.arguments).toBe('{"path":"a.txt"}');
+    expect(assistant.tool_calls[0]?.function.arguments).toBe('{"file_path":"a.txt"}');
   });
 });
 
@@ -176,7 +176,7 @@ describe('toModelResponse', () => {
       completion({
         content: '我先读文件。',
         finishReason: 'tool_calls',
-        toolCalls: [{ id: 'call_1', name: 'read_file', arguments: '{"path":"a.txt"}' }],
+        toolCalls: [{ id: 'call_1', name: 'read_file', arguments: '{"file_path":"a.txt"}' }],
       }),
     );
 
@@ -185,8 +185,8 @@ describe('toModelResponse', () => {
       {
         id: 'call_1',
         name: 'read_file',
-        arguments: { path: 'a.txt' },
-        raw: '{"path":"a.txt"}',
+        arguments: { file_path: 'a.txt' },
+        raw: '{"file_path":"a.txt"}',
       },
     ]);
     expect(response.usage).toEqual({ inputTokens: 12, outputTokens: 7 });
@@ -223,7 +223,7 @@ describe('toModelStream', () => {
               index: 0,
               id: 'call_1',
               type: 'function',
-              function: { name: 'read_file', arguments: '{"path":' },
+              function: { name: 'read_file', arguments: '{"file_path":' },
             },
           ],
         }),
@@ -252,8 +252,8 @@ describe('toModelStream', () => {
       {
         id: 'call_1',
         name: 'read_file',
-        arguments: { path: 'a.txt' },
-        raw: '{"path":"a.txt"}',
+        arguments: { file_path: 'a.txt' },
+        raw: '{"file_path":"a.txt"}',
       },
     ]);
     expect(next.value.usage).toEqual({ inputTokens: 9, outputTokens: 3 });

@@ -277,9 +277,9 @@ describe('permission settings API', () => {
       ...initial, dsh: { permission: { defaultPreset: 'read-only' } },
     });
     const [parentheses, backslash] = parseRuleSet(settings.configSnapshot().permissions!, 'user', workspace.path);
-    expect(matchesCall(parentheses!, { id: 'p', name: 'read_file', arguments: { path: './docs/(draft)/report.txt' } }, workspace.path)).toBe(true);
-    expect(matchesCall(backslash!, { id: 'b', name: 'read_file', arguments: { path: './docs/foo\\bar.txt' } }, workspace.path)).toBe(true);
-    expect(matchesCall(backslash!, { id: 'n', name: 'read_file', arguments: { path: './docs/foo/bar.txt' } }, workspace.path)).toBe(false);
+    expect(matchesCall(parentheses!, { id: 'p', name: 'read_file', arguments: { file_path: './docs/(draft)/report.txt' } }, workspace.path)).toBe(true);
+    expect(matchesCall(backslash!, { id: 'b', name: 'read_file', arguments: { file_path: './docs/foo\\bar.txt' } }, workspace.path)).toBe(true);
+    expect(matchesCall(backslash!, { id: 'n', name: 'read_file', arguments: { file_path: './docs/foo/bar.txt' } }, workspace.path)).toBe(false);
     expect(await (await permissionStore(configPath)).read()).toEqual(selected('read-only'));
   });
 

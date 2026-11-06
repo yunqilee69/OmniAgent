@@ -36,7 +36,7 @@ describe('exportSession', () => {
       role: 'assistant',
       content: [{ type: 'text', text: 'Inspecting' }, { type: 'image', mediaType: 'image/png', data: 'IMAGE SECRET' }],
       toolCalls: [
-        { id: 'same', name: 'read_file', arguments: { path: '/private/argument', token: 'ARGUMENT SECRET' }, raw: 'RAW SECRET' },
+        { id: 'same', name: 'read_file', arguments: { file_path: '/private/argument', token: 'ARGUMENT SECRET' }, raw: 'RAW SECRET' },
         { id: 'same', name: 'search', arguments: { query: 'another secret' } },
       ],
     } });
@@ -180,7 +180,7 @@ describe('exportSession', () => {
       const handle = await store.create({ id: 'same-id', workspace, cwd: workspace });
       const other = await store.create({ id: 'same-id', workspace: join(root, 'other'), cwd: join(root, 'other') });
       await other.append({ type: 'message/user', data: { text: 'OTHER WORKSPACE SECRET' } });
-      const toolResponse = toolCallResponse([{ id: 'c1', name: 'read_file', args: { path: 'SECRET ARGUMENT' } }], 'Inspecting');
+      const toolResponse = toolCallResponse([{ id: 'c1', name: 'read_file', args: { file_path: 'SECRET ARGUMENT' } }], 'Inspecting');
       toolResponse.message.dshReplay = {
         kind: 'deepseek-messages', version: 1, provider: 'deepseek-official', model: 'test',
         endpoint: replayEndpointHash('https://api.deepseek.com/anthropic/v1/messages'),

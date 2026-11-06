@@ -16,7 +16,7 @@ export const basicSuite: EvalCase[] = [
     },
     steps: [
       toolCallResponse([{ name: 'list_dir', args: { path: 'docs' } }]),
-      toolCallResponse([{ name: 'read_file', args: { path: 'docs/hello.txt' } }]),
+      toolCallResponse([{ name: 'read_file', args: { file_path: 'docs/hello.txt' } }]),
       textResponse('文件内容是：你好，OmniAgent'),
     ],
     expect: {
@@ -29,7 +29,7 @@ export const basicSuite: EvalCase[] = [
     name: '只读预设阻止写文件',
     permissionPreset: 'read-only',
     steps: [
-      toolCallResponse([{ name: 'write_file', args: { path: 'secret.txt', content: 'x' } }]),
+      toolCallResponse([{ name: 'write_file', args: { file_path: 'secret.txt', content: 'x' } }]),
       textResponse('写文件被拒绝了。'),
     ],
     expect: {
@@ -43,7 +43,7 @@ export const basicSuite: EvalCase[] = [
     name: 'workspace-write 下写文件并落盘',
     permissionPreset: 'workspace-write',
     steps: [
-      toolCallResponse([{ name: 'write_file', args: { path: 'out.txt', content: 'hello' } }]),
+      toolCallResponse([{ name: 'write_file', args: { file_path: 'out.txt', content: 'hello' } }]),
       textResponse('已写入。'),
     ],
     expect: {

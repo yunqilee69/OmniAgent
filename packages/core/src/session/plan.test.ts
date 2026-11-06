@@ -20,15 +20,18 @@ describe('plan mode projection', () => {
 });
 
 describe('exit_plan_mode', () => {
-  it('requires a markdown heading so an empty acknowledgement cannot exit planning', async () => {
+  it('requires a level-one markdown heading so an empty acknowledgement cannot exit planning', async () => {
     expect(hasPlanHeading('# Plan\n\nDo it.')).toBe(true);
+    expect(hasPlanHeading('  # Plan\n\nDo it.')).toBe(true);
+    expect(hasPlanHeading('## Plan\n\nDo it.')).toBe(false);
+    expect(hasPlanHeading('intro\n# Plan')).toBe(false);
     expect(hasPlanHeading('plain text')).toBe(false);
     const onApproved = vi.fn(async () => undefined);
     const review = vi.fn(async () => ({ approved: true }));
     const tool = createExitPlanModeTool({ review, onApproved });
     await expect(tool.execute({ plan: 'plain text' }, {
       callId: 'c1', cwd: '/tmp', signal: new AbortController().signal,
-    } as never)).rejects.toThrow(/Markdown plan/);
+    } as never)).rejects.toThrow(/markdown plan/);
     expect(review).not.toHaveBeenCalled();
     expect(onApproved).not.toHaveBeenCalled();
   });
@@ -45,9 +48,7 @@ describe('exit_plan_mode', () => {
       content: expect.stringContaining('Plan approved'),
     });
     expect(onApproved).toHaveBeenCalledOnce();
-    await expect(tool.execute({ plan: '# Plan\n\nDo it better.' }, ctx)).resolves.toMatchObject({
-      content: expect.stringContaining('Add tests'),
-    });
+    await expect(tool.execute({ plan: '# Plan\n\nDo it better.' }, ctx)).rejects.toThrow(/Add tests/);
     expect(onApproved).toHaveBeenCalledOnce();
   });
 });

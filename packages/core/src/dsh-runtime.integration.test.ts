@@ -65,8 +65,8 @@ describe('DSH permissions through Session and AgentLoop', () => {
     const approve = vi.fn(async () => 'allow' as const);
     const model = new FakeModel([
       toolCallResponse([
-        { id: 'overwrite', name: 'write_file', args: { path: 'existing.txt', content: 'changed' } },
-        { id: 'create', name: 'write_file', args: { path: 'new-dir/file.txt', content: 'new' } },
+        { id: 'overwrite', name: 'write_file', args: { file_path: 'existing.txt', content: 'changed' } },
+        { id: 'create', name: 'write_file', args: { file_path: 'new-dir/file.txt', content: 'new' } },
       ]),
       textResponse('Could not write.'),
     ]);
@@ -90,7 +90,7 @@ describe('DSH permissions through Session and AgentLoop', () => {
   it('writes inside the workspace without soliciting approval and returns the result to the model', async () => {
     const approve = vi.fn(async () => 'deny' as const);
     const model = new FakeModel([
-      toolCallResponse([{ id: 'inside', name: 'write_file', args: { path: 'nested/file.txt', content: 'inside' } }]),
+      toolCallResponse([{ id: 'inside', name: 'write_file', args: { file_path: 'nested/file.txt', content: 'inside' } }]),
       textResponse('Written.'),
     ]);
 
@@ -112,8 +112,8 @@ describe('DSH permissions through Session and AgentLoop', () => {
     const approve = vi.fn(async () => 'allow' as const);
     const model = new FakeModel([
       toolCallResponse([
-        { id: 'outside-existing', name: 'write_file', args: { path: 'link/existing.txt', content: 'changed' } },
-        { id: 'outside-new', name: 'write_file', args: { path: 'link/new-dir/file.txt', content: 'new' } },
+        { id: 'outside-existing', name: 'write_file', args: { file_path: 'link/existing.txt', content: 'changed' } },
+        { id: 'outside-new', name: 'write_file', args: { file_path: 'link/new-dir/file.txt', content: 'new' } },
       ]),
       textResponse('Could not escape.'),
     ]);
@@ -135,7 +135,7 @@ describe('DSH permissions through Session and AgentLoop', () => {
     const target = join(outside, 'full-access.txt');
     const approve = vi.fn(async () => 'deny' as const);
     const model = new FakeModel([
-      toolCallResponse([{ id: 'full', name: 'write_file', args: { path: target, content: 'allowed' } }]),
+      toolCallResponse([{ id: 'full', name: 'write_file', args: { file_path: target, content: 'allowed' } }]),
       textResponse('Written.'),
     ]);
 
@@ -149,12 +149,11 @@ describe('DSH permissions through Session and AgentLoop', () => {
   it('approves an explicit wider retry for one call without changing the standing policy', async () => {
     const approve = vi.fn<NonNullable<SessionOptions['approve']>>(async () => 'allow');
     const model = new FakeModel([
-      toolCallResponse([{ id: 'initial', name: 'write_file', args: { path: 'approved.txt', content: 'approved' } }]),
-      toolCallResponse([{ id: 'retry', name: 'write_file', args: {
-        path: 'approved.txt', content: 'approved',
+      toolCallResponse([{ id: 'initial', name: 'write_file', args: { file_path: 'approved.txt', content: 'approved' } }]),
+      toolCallResponse([{ id: 'retry', name: 'write_file', args: { file_path: 'approved.txt', content: 'approved',
         sandbox_permissions: 'workspace-write', justification: 'Write the requested workspace file.',
       } }]),
-      toolCallResponse([{ id: 'later', name: 'write_file', args: { path: 'later.txt', content: 'not approved' } }]),
+      toolCallResponse([{ id: 'later', name: 'write_file', args: { file_path: 'later.txt', content: 'not approved' } }]),
       textResponse('Finished.'),
     ]);
 
@@ -177,8 +176,7 @@ describe('DSH permissions through Session and AgentLoop', () => {
   it('does not write when an explicit escalation is rejected', async () => {
     const approve = vi.fn(async () => 'deny' as const);
     const model = new FakeModel([
-      toolCallResponse([{ id: 'rejected', name: 'write_file', args: {
-        path: 'rejected.txt', content: 'must not exist',
+      toolCallResponse([{ id: 'rejected', name: 'write_file', args: { file_path: 'rejected.txt', content: 'must not exist',
         sandbox_permissions: 'workspace-write', justification: 'Write the requested workspace file.',
       } }]),
       textResponse('Not approved.'),
@@ -198,7 +196,7 @@ describe('DSH permissions through Session and AgentLoop', () => {
       const target = join(workspace, 'invalid-preset.txt');
       const approve = vi.fn(async () => 'allow' as const);
       const model = new FakeModel([
-        toolCallResponse([{ id: 'invalid', name: 'write_file', args: { path: target, content: 'must not exist' } }]),
+        toolCallResponse([{ id: 'invalid', name: 'write_file', args: { file_path: target, content: 'must not exist' } }]),
         textResponse('Finished.'),
       ]);
 
@@ -226,7 +224,7 @@ describe('DSH permissions through Session and AgentLoop', () => {
     const target = join(workspace, 'truncated.txt');
     const approve = vi.fn(async () => 'allow' as const);
     const model = new FakeModel([
-      { ...toolCallResponse([{ id: 'truncated', name: 'write_file', args: { path: target, content: 'partial' } }]),
+      { ...toolCallResponse([{ id: 'truncated', name: 'write_file', args: { file_path: target, content: 'partial' } }]),
         stopReason: 'max_tokens' },
       textResponse('Must not be requested.'),
     ]);
@@ -243,7 +241,7 @@ describe('DSH permissions through Session and AgentLoop', () => {
   it('interrupts before a workspace write at the tool-call event boundary', async () => {
     const approve = vi.fn(async () => 'allow' as const);
     const model = new FakeModel([
-      toolCallResponse([{ id: 'cancelled', name: 'write_file', args: { path: 'cancelled.txt', content: 'no' } }]),
+      toolCallResponse([{ id: 'cancelled', name: 'write_file', args: { file_path: 'cancelled.txt', content: 'no' } }]),
     ]);
     const session = sessionWith(model, 'workspace-write', approve);
     const turn = session.send('write');
@@ -265,8 +263,7 @@ describe('DSH permissions through Session and AgentLoop', () => {
     const asked = deferred<AbortSignal>();
     const approval = deferred<'allow' | 'deny'>();
     const model = new FakeModel([
-      toolCallResponse([{ id: 'pending', name: 'write_file', args: {
-        path: 'pending.txt', content: 'must not exist',
+      toolCallResponse([{ id: 'pending', name: 'write_file', args: { file_path: 'pending.txt', content: 'must not exist',
         sandbox_permissions: 'workspace-write', justification: 'Write the requested workspace file.',
       } }]),
       textResponse('Continued.'),

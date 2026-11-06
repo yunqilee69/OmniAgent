@@ -23,9 +23,9 @@ describe('session trajectory projection', () => {
     await session.append({ ts: 1100, type: 'trace/turn.start', data: { step: 0 } });
     await session.append({ ts: 1200, type: 'message/assistant', data: {
       role: 'assistant', content: [{ type: 'text', text: 'SECRET ASSISTANT CONTENT' }],
-      toolCalls: [{ id: 'c', name: 'read_file', arguments: { path: 'SECRET ARGUMENT' } }],
+      toolCalls: [{ id: 'c', name: 'read_file', arguments: { file_path: 'SECRET ARGUMENT' } }],
     } });
-    await session.append({ ts: 1300, type: 'trace/tool.call', data: { id: 'c', name: 'read_file', arguments: { path: 'SECRET ARGUMENT' } } });
+    await session.append({ ts: 1300, type: 'trace/tool.call', data: { id: 'c', name: 'read_file', arguments: { file_path: 'SECRET ARGUMENT' } } });
     await session.append({ ts: 1400, type: 'trace/permission.decided', data: { callId: 'c', decision: 'allow', source: 'SECRET RULE' } });
     await session.append({ ts: 1500, type: 'message/tool-result', data: { result: {
       callId: 'c', name: 'read_file', ok: true, content: 'SECRET OUTPUT', truncated: false, durationMs: 17,

@@ -70,7 +70,7 @@ function createDemoModel(): FakeModel {
       reasoning: '用户刚进入工作区。先列出目录，再读 README；每一步都应该让权限门检查。',
     },
     {
-      ...toolCallResponse([{ name: 'read_file', args: { path: 'README.md' } }], '再看一眼 README。'),
+      ...toolCallResponse([{ name: 'read_file', args: { file_path: 'README.md' } }], '再看一眼 README。'),
       reasoning: '目录里 README 最可能是项目说明，读它来确认这个项目的用途。',
     },
     {
@@ -337,6 +337,7 @@ async function main(): Promise<void> {
       ...(resolved.modelId === undefined ? {} : { modelId: resolved.modelId }),
       agent: resolved.sessionAgent,
       modelCapabilities: resolved.capabilities,
+      todoAllowParallelInProgress: resolved.todoAllowParallelInProgress,
       dshPermissions: permissions,
       maxSteps: latest.maxSteps,
       approve,

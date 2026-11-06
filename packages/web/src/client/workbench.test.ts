@@ -71,7 +71,7 @@ describe('workbench client protocol', () => {
     const { hydrateTranscript } = clientFunctions();
     const transcript = hydrateTranscript([
       { role: 'user', content: [{ type: 'text', text: 'Read it' }] },
-      { role: 'assistant', content: [{ type: 'text', text: 'Checking' }], toolCalls: [{ id: 'c1', name: 'read_file', arguments: { path: 'a.txt' } }] },
+      { role: 'assistant', content: [{ type: 'text', text: 'Checking' }], toolCalls: [{ id: 'c1', name: 'read_file', arguments: { file_path: 'a.txt' } }] },
       { role: 'tool', results: [{ callId: 'c1', name: 'read_file', ok: true, content: 'contents' }] },
       { role: 'assistant', content: [{ type: 'text', text: 'Done' }], toolCalls: [] },
     ], []);
@@ -94,13 +94,13 @@ describe('workbench client protocol', () => {
     applyAgentEvent(turn, { type: 'assistant.delta', text: 'Hel' });
     applyAgentEvent(turn, { type: 'assistant.delta', text: 'lo' });
     applyAgentEvent(turn, { type: 'assistant.message', message: { content: [{ type: 'text', text: 'Hello!' }], toolCalls: [{ id: 'c1', name: 'read_file' }] } });
-    applyAgentEvent(turn, { type: 'tool.call', call: { id: 'c1', name: 'read_file', arguments: { path: 'a' } } });
+    applyAgentEvent(turn, { type: 'tool.call', call: { id: 'c1', name: 'read_file', arguments: { file_path: 'a' } } });
     applyAgentEvent(turn, { type: 'tool.result', result: { callId: 'c1', name: 'read_file', ok: true, content: 'ok' } });
     applyAgentEvent(turn, { type: 'turn.start', step: 1 });
     applyAgentEvent(turn, { type: 'assistant.delta', text: 'Done' });
     applyAgentEvent(turn, { type: 'assistant.message', message: { content: [{ type: 'text', text: 'Done' }], toolCalls: [] } });
     expect(turn.transcript.map((item: any) => [item.kind, item.text])).toEqual([['assistant', 'Hello!'], ['tool', undefined], ['assistant', 'Done']]);
-    expect(turn.transcript[1]).toMatchObject({ call: { id: 'c1', arguments: { path: 'a' } }, result: { ok: true } });
+    expect(turn.transcript[1]).toMatchObject({ call: { id: 'c1', arguments: { file_path: 'a' } }, result: { ok: true } });
   });
 
   it('keeps event inspection limited to metadata, excluding payloads and audit digests', () => {

@@ -89,12 +89,12 @@ describe('Session DSH permissions', () => {
     try {
       const approve = vi.fn(async () => 'allow' as const);
       const calls = [
-        { id: 'missing-reason', name: 'write_file', args: { path: 'a', content: '', sandbox_permissions: 'danger-full-access' } },
-        { id: 'blank-reason', name: 'write_file', args: { path: 'b', content: '', sandbox_permissions: 'danger-full-access', justification: ' ' } },
-        { id: 'bad-target', name: 'write_file', args: { path: 'c', content: '', sandbox_permissions: 'bypass', justification: 'reason' } },
-        { id: 'reason-only', name: 'write_file', args: { path: 'd', content: '', justification: 'reason' } },
-        { id: 'same', name: 'write_file', args: { path: 'e', content: '', sandbox_permissions: 'workspace-write', justification: 'reason' } },
-        { id: 'narrow', name: 'write_file', args: { path: 'f', content: '', sandbox_permissions: 'read-only', justification: 'reason' } },
+        { id: 'missing-reason', name: 'write_file', args: { file_path: 'a', content: '', sandbox_permissions: 'danger-full-access' } },
+        { id: 'blank-reason', name: 'write_file', args: { file_path: 'b', content: '', sandbox_permissions: 'danger-full-access', justification: ' ' } },
+        { id: 'bad-target', name: 'write_file', args: { file_path: 'c', content: '', sandbox_permissions: 'bypass', justification: 'reason' } },
+        { id: 'reason-only', name: 'write_file', args: { file_path: 'd', content: '', justification: 'reason' } },
+        { id: 'same', name: 'write_file', args: { file_path: 'e', content: '', sandbox_permissions: 'workspace-write', justification: 'reason' } },
+        { id: 'narrow', name: 'write_file', args: { file_path: 'f', content: '', sandbox_permissions: 'read-only', justification: 'reason' } },
       ];
       const session = new Session({ cwd: root, dshPermissions: snapshot('workspace-write'), model: model(calls), approve });
       expect(decisions(await collect(session.send('go')))).toEqual(calls.map(({ id }) => ({ callId: id, decision: 'deny' })));
@@ -106,12 +106,11 @@ describe('Session DSH permissions', () => {
     const root = await workspace();
     try {
       const approve = vi.fn(async () => 'allow' as const);
-      const call = (id: string, path: string) => ({ id, name: 'write_file', args: {
-        path, content: id, sandbox_permissions: 'workspace-write', justification: 'Write a requested file',
+      const call = (id: string, path: string) => ({ id, name: 'write_file', args: { file_path: path, content: id, sandbox_permissions: 'workspace-write', justification: 'Write a requested file',
       } });
       const session = new Session({
         cwd: root, dshPermissions: snapshot('read-only'), approve,
-        model: model([call('first', 'a'), { id: 'normal', name: 'write_file', args: { path: 'b', content: 'no' } }, call('second', 'c')]),
+        model: model([call('first', 'a'), { id: 'normal', name: 'write_file', args: { file_path: 'b', content: 'no' } }, call('second', 'c')]),
       });
       const events = await collect(session.send('go'));
       expect(approve).toHaveBeenCalledTimes(2);
@@ -141,8 +140,7 @@ describe('Session DSH permissions', () => {
     try {
       const session = new Session({
         cwd: root, dshPermissions: snapshot('read-only'),
-        model: model([{ id: 'write', name: 'write_file', args: {
-          path: 'approved', content: 'original',
+        model: model([{ id: 'write', name: 'write_file', args: { file_path: 'approved', content: 'original',
           sandbox_permissions: 'workspace-write', justification: 'Write the file',
         } }]),
         approve: async (request) => {
@@ -203,7 +201,7 @@ describe('Session DSH permissions', () => {
       const options = {
         cwd: root,
         dshPermissions: snapshot('workspace-write'),
-        model: model([{ id: 'write', name: 'write_file', args: { path: target, content: 'no' } }]),
+        model: model([{ id: 'write', name: 'write_file', args: { file_path: target, content: 'no' } }]),
       };
       const session = new Session(options);
       options.cwd = outside;
@@ -220,7 +218,7 @@ describe('Session DSH permissions', () => {
     try {
       const session = new Session({
         cwd: root, dshPermissions: snapshot('read-only'),
-        model: model([{ id: 'write', name: 'write_file', args: { path: 'blocked', content: 'no' } }]),
+        model: model([{ id: 'write', name: 'write_file', args: { file_path: 'blocked', content: 'no' } }]),
       });
       try {
         (session as unknown as { dshPermissions: DshPermissionSnapshot }).dshPermissions = snapshot('danger-full-access');

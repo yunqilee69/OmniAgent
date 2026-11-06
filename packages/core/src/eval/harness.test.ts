@@ -14,7 +14,7 @@ describe('eval harness', () => {
       permissionPreset: 'read-only',
       steps: [
         toolCallResponse([{ name: 'list_dir', args: { path: 'docs' } }]),
-        toolCallResponse([{ name: 'read_file', args: { path: 'docs/hello.txt' } }]),
+        toolCallResponse([{ name: 'read_file', args: { file_path: 'docs/hello.txt' } }]),
         textResponse('内容是：你好'),
       ],
       expect: {
@@ -45,7 +45,7 @@ describe('eval harness', () => {
       name: 'read-only-write',
       permissionPreset: 'read-only',
       steps: [
-        toolCallResponse([{ name: 'write_file', args: { path: 'secret.txt', content: 'x' } }]),
+        toolCallResponse([{ name: 'write_file', args: { file_path: 'secret.txt', content: 'x' } }]),
         textResponse('被拒绝了'),
       ],
       expect: {
@@ -67,7 +67,7 @@ describe('eval harness', () => {
     const result = await runEvalCase({
       name: 'dsh-workspace-write',
       steps: [
-        toolCallResponse([{ name: 'write_file', args: { path: 'out.txt', content: 'hello' } }]),
+        toolCallResponse([{ name: 'write_file', args: { file_path: 'out.txt', content: 'hello' } }]),
         textResponse('已写入。'),
       ],
       permissionPreset: 'workspace-write',
@@ -89,7 +89,7 @@ describe('eval harness', () => {
       name: 'legacy-rules-do-not-authorize',
       permissionPreset: 'read-only',
       steps: [
-        toolCallResponse([{ name: 'write_file', args: { path: 'out.txt', content: 'hello' } }]),
+        toolCallResponse([{ name: 'write_file', args: { file_path: 'out.txt', content: 'hello' } }]),
         textResponse('拒绝了。'),
       ],
       ...legacyPermissionFields,

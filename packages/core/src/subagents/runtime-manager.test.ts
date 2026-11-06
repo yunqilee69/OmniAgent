@@ -99,7 +99,15 @@ describe('SubagentManager with RuntimeResolver', () => {
     }));
     await waitFor(() => parentHandle.events.some((event) => event.type === 'subagent/notice'), 'parent notice');
     expect(await manager.list(parent)).toEqual([
-      expect.objectContaining({ id: started.id, agent: 'explorer', status: 'completed' }),
+      expect.objectContaining({ kind: 'root', id: 'parent' }),
+      expect.objectContaining({
+        kind: 'child',
+        id: started.id,
+        label: 'Explore',
+        status: 'inactive',
+        parent: 'parent',
+        depth: 1,
+      }),
     ]);
   });
 
@@ -138,7 +146,17 @@ describe('SubagentManager with RuntimeResolver', () => {
     });
     managers.push(second);
     const listed = await second.list(parent);
-    expect(listed).toEqual([expect.objectContaining({ id, agent: 'explorer', status: 'completed' })]);
+    expect(listed).toEqual([
+      { kind: 'root', id: 'parent', status: 'inactive' },
+      {
+        kind: 'child',
+        id,
+        label: 'Explore',
+        status: 'inactive',
+        parent: 'parent',
+        depth: 1,
+      },
+    ]);
 
     await second.send(parent, id, 'again');
     expect((await second.wait(parent, id, 4_000, new AbortController().signal)).result).toBe('second');

@@ -5,12 +5,12 @@ export const TODO_STATUSES = ['pending', 'in_progress', 'completed'] as const;
 export type TodoStatus = (typeof TODO_STATUSES)[number];
 
 export const TodoItemSchema = z.object({
-  content: z.string().trim().min(1).max(500),
+  content: z.string().trim().min(1),
   status: z.enum(TODO_STATUSES),
 }).strict();
 export type TodoItem = z.infer<typeof TodoItemSchema>;
 
-export const TodoListSchema = z.array(TodoItemSchema).max(100);
+export const TodoListSchema = z.array(TodoItemSchema);
 export type TodoList = z.infer<typeof TodoListSchema>;
 
 /**
@@ -49,7 +49,9 @@ export function projectTodos(events: readonly { type: string; data: unknown }[])
       if (parsed.success) todos = parsed.data;
       continue;
     }
-    if (event.type === 'turn/start' || event.type === 'message/user') todos = null;
+    if (event.type === 'turn/start' || event.type === 'message/user' || event.type === 'user/message') {
+      todos = null;
+    }
   }
   return todos;
 }

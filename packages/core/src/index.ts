@@ -103,7 +103,6 @@ export type {
 
 // 工具
 export {
-  DEFAULT_READ_LINES,
   MAX_OUTPUT_CHARS,
   ToolRegistry,
   builtinTools,
@@ -177,6 +176,49 @@ export {
 } from './session/plan';
 export type { PlanProjection } from './session/plan';
 export {
+  GOAL_ACTIVATIONS,
+  GOAL_CHANGE_EVENT,
+  GOAL_CHANGE_VERSION,
+  GOAL_DEFAULT_BLOCKED_AFTER,
+  GOAL_DEFAULT_MAX_ROUNDS,
+  GOAL_PHASES,
+  GoalChangeSchema,
+  GoalError,
+  GoalRefSchema,
+  GoalSnapshotSchema,
+  applyGoalChange,
+  applyGoalEvent,
+  decodeGoalChange,
+  emptyGoalFoldState,
+  goalChangeRef,
+  projectGoal,
+  renderGoalRoundPrompt,
+  renderGoalToolGuidance,
+  renderGoalWrapup,
+  resolveBlockReason,
+  resolveMaxGoalRounds,
+  resolveObjective,
+} from './session/goal';
+export type {
+  GoalActivation,
+  GoalBlockReason,
+  GoalChange,
+  GoalClearChange,
+  GoalErrorCode,
+  GoalFoldState,
+  GoalMessageSource,
+  GoalOperation,
+  GoalPhase,
+  GoalProjection,
+  GoalProjectionState,
+  GoalRef,
+  GoalSnapshot,
+  GoalSnapshotChange,
+  GoalView,
+} from './session/goal';
+export { GoalController, goalRefOf } from './session/goal-controller';
+export type { CreateGoalRequest, EditGoalRequest, GoalControllerOptions } from './session/goal-controller';
+export {
   DSH_DEFAULT_PRESET,
   DSH_PERMISSION_EVENT,
   DSH_PERMISSION_PRESETS,
@@ -219,13 +261,19 @@ export { confineDshArgv, probeDshSandbox } from './sandbox/dsh-sandbox';
 export type { DshConfinedArgv, DshSandboxBackend, DshSandboxCapability, DshSandboxOptions } from './sandbox/dsh-sandbox';
 export { executeDshShell, createDshShellTool } from './tools/builtin/dsh-shell';
 export type { DshShellRequest, DshShellResult } from './tools/builtin/dsh-shell';
-export { createTodoWriteTool, TODO_WRITE_TOOL_NAME } from './tools/builtin/todo-write';
+export { createTodoWriteTool, describeTodoWrite, TODO_WRITE_TOOL_NAME } from './tools/builtin/todo-write';
 export {
   EXIT_PLAN_MODE_TOOL_NAME,
   createExitPlanModeTool,
   hasPlanHeading,
 } from './tools/builtin/exit-plan-mode';
 export type { PlanReviewResponse } from './tools/builtin/exit-plan-mode';
+export {
+  CREATE_GOAL_TOOL_NAME,
+  GET_GOAL_TOOL_NAME,
+  UPDATE_GOAL_TOOL_NAME,
+  createGoalTools,
+} from './tools/builtin/goal';
 export {
   INTERRUPT_AGENT_TOOL_NAME,
   LIST_AGENTS_TOOL_NAME,
@@ -241,6 +289,8 @@ export {
 } from './domain/subagent';
 export type {
   SubagentInfo,
+  SubagentListEntry,
+  SubagentListStatus,
   SubagentNotice,
   SubagentOutcome,
   SubagentService,

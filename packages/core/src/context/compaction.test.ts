@@ -73,7 +73,7 @@ describe('context compaction', () => {
       {
         role: 'assistant',
         content: [text('x'.repeat(4_000))],
-        toolCalls: [{ id: 'call-1', name: 'read_file', arguments: { path: 'big' } }],
+        toolCalls: [{ id: 'call-1', name: 'read_file', arguments: { file_path: 'big' } }],
       },
       {
         role: 'tool',

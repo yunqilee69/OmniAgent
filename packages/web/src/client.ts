@@ -169,7 +169,7 @@ function hydrateTranscript(messages, events) {
 }
 function applyAgentEvent(turn, event) {
   if (!event || typeof event !== 'object') return;
-  if (event.type === 'turn.start') turn.streamItem = null;
+  if (event.type === 'turn.start') { turn.streamItem = null; turn.reason = ''; }
   else if (event.type === 'assistant.delta') {
     if (!turn.streamItem) {
       turn.streamItem = { kind: 'assistant', text: '' };
@@ -243,7 +243,7 @@ function safeEventMetadata(event) {
     const parsed = Date.parse(raw.Timestamp);
     if (timestamp(parsed) && new Date(parsed).toISOString() === (raw.Timestamp.length === 20 ? raw.Timestamp.slice(0, -1) + '.000Z' : raw.Timestamp)) metadata.Timestamp = parsed;
   } else if (type !== 'audit.tool' && timestamp(raw.Timestamp)) metadata.Timestamp = raw.Timestamp;
-  if (['read_file', 'write_file', 'list_dir'].includes(raw['Tool name'])) metadata['Tool name'] = raw['Tool name'];
+  if (['read_file', 'write_file', 'edit_file', 'list_dir', 'glob', 'grep', 'web_fetch'].includes(raw['Tool name'])) metadata['Tool name'] = raw['Tool name'];
   if (['allow', 'ask', 'deny'].includes(raw.Decision)) metadata.Decision = raw.Decision;
   if (['end_turn', 'tool_use', 'max_tokens', 'max_steps', 'interrupted', 'error'].includes(raw.Reason)) metadata.Reason = raw.Reason;
   for (const label of ['Step', 'Before tokens', 'After tokens']) if (integer(raw[label])) metadata[label] = raw[label];

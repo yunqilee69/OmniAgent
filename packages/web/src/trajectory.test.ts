@@ -20,7 +20,7 @@ describe('projectTrajectory', () => {
       event(0, 'message/user', { text: 'private input' }, 0),
       event(1, 'trace/turn.start', { step: 0 }, 1),
       event(2, 'message/assistant', { role: 'assistant', content: [], usage: { inputTokens: 7, outputTokens: 0 },
-        toolCalls: [{ id: 'c', name: 'read_file', arguments: { path: 'private' } }] }, 10),
+        toolCalls: [{ id: 'c', name: 'read_file', arguments: { file_path: 'private' } }] }, 10),
       event(3, 'trace/tool.call', { id: 'c', name: 'read_file' }, 12),
       event(4, 'trace/permission.decided', { callId: 'c', decision: 'allow' }, 13),
       event(5, 'message/tool-result', { result: { callId: 'c', name: 'read_file', ok: true,
@@ -305,7 +305,7 @@ describe('projectTrajectory', () => {
       const session = new Session({
         cwd: '/private', session: log,
         model: new FakeModel([
-          toolCallResponse([{ id: 'private-id', name: 'read_file', args: { path: 'SECRET ARGUMENT' } }]),
+          toolCallResponse([{ id: 'private-id', name: 'read_file', args: { file_path: 'SECRET ARGUMENT' } }]),
           textResponse('SECRET ANSWER'),
         ]),
         rules: [{ raw: 'SECRET RULE', tool: 'read_file', source: 'session', decision: 'deny', anchor: '/private' }],

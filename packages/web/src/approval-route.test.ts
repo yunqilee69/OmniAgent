@@ -13,8 +13,7 @@ const hosts: WebHost[] = [];
 const roots: string[] = [];
 const originalContent = 'visible contents';
 const newContent = 'private write contents';
-const call = { id: 'call', name: 'write_file', args: {
-  path: 'visible.txt', content: newContent,
+const call = { id: 'call', name: 'write_file', args: { file_path: 'visible.txt', content: newContent,
   sandbox_permissions: 'workspace-write', justification: 'Write the requested file',
 } };
 

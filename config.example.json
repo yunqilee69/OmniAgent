@@ -53,18 +53,25 @@
       "skills": "*"
     },
     "search-only": {
-      "tools": ["read_file", "list_dir", "skill"],
+      "tools": ["read_file", "list_dir", "glob", "grep", "web_fetch", "skill"],
       "skills": ["web-research", "source-review"]
     },
     "coding": {
       "tools": [
         "read_file",
         "write_file",
+        "edit_file",
         "list_dir",
+        "glob",
+        "grep",
+        "web_fetch",
         "bash",
         "skill",
         "todo_write",
         "exit_plan_mode",
+        "get_goal",
+        "create_goal",
+        "update_goal",
         "subagent"
       ],
       "skills": "*"
@@ -79,5 +86,8 @@
   "subagents": {
     "maxDepth": 1,
     "maxActive": 8
+  },
+  "todo": {
+    "allowParallelInProgress": true
   }
 }
