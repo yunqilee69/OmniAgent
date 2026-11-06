@@ -65,7 +65,7 @@ export function highlightCode(line: string, language: string, theme: Theme): str
 
     const comment = commentAt(rest, family);
     if (comment !== undefined) {
-      push(comment, { dim: true, fg: 'gray', italic: true });
+      push(comment, { dim: true, italic: true });
       break;
     }
 

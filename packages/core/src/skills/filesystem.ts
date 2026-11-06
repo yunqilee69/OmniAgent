@@ -82,6 +82,14 @@ export async function loadSkillByName(options: SkillOptions, name: string): Prom
   return { ...summary, body: parseBody(source) };
 }
 
+/** Filter discovered skills by an agent profile. Unknown names grant nothing. */
+export function filterSkills(
+  skills: readonly SkillSummary[],
+  allowed: '*' | ReadonlySet<string>,
+): SkillSummary[] {
+  return allowed === '*' ? [...skills] : skills.filter((skill) => allowed.has(skill.name));
+}
+
 /** Model-facing catalog injected once per session. Descriptions are untrusted text. */
 export function renderSkillCatalog(skills: readonly SkillSummary[]): string {
   if (skills.length === 0) return '';

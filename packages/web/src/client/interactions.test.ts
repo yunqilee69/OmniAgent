@@ -90,6 +90,8 @@ function harness(fetcher: typeof fetch) {
   const initial = client.getEntry('a', 'shared');
   initial.loaded = true;
   initial.permission = { preset: 'workspace-write' };
+  initial.agent = { id: 'default', name: 'Default', description: '', role: 'default', usage: 'both', profile: 'default', valid: true, warnings: [] };
+  initial.binding = { version: 2, kind: 'agent' };
   initial.transcript = [{ kind: 'user', text: 'Alpha history' }];
   return { ...client, node };
 }
@@ -99,7 +101,18 @@ function json(body: unknown, status = 200) {
 }
 
 function detail(text: string) {
-  return { header: { cwd: '/workspace' }, permission: { preset: 'workspace-write' }, messages: [{ role: 'user', content: [{ type: 'text', text }] }], events: [], audit: [] };
+  return {
+    header: { cwd: '/workspace' },
+    permission: { preset: 'workspace-write' },
+    agent: { id: 'default', name: 'Default', description: '', role: 'default', usage: 'both', profile: 'default', valid: true, warnings: [] },
+    model: { version: 2, kind: 'agent' },
+    resolvedModel: null,
+    agentError: null,
+    agentWarnings: [],
+    messages: [{ role: 'user', content: [{ type: 'text', text }] }],
+    events: [],
+    audit: [],
+  };
 }
 
 const tick = () => new Promise((resolve) => setTimeout(resolve, 0));
@@ -111,8 +124,16 @@ function clientFetcher(input: Parameters<typeof fetch>[0]) {
   if (url === '/api/workspaces') return json({ workspaces: [{ id: 'a', name: 'Alpha', path: '/a' }] });
   if (url === '/api/settings/permissions') return json({ settings: { defaultPreset: 'workspace-write', requiresSelection: false } });
   if (url === '/api/models') return json({ models: [
-    { provider: 'provider-a', model: 'model-1', name: 'Model One' },
-    { provider: 'provider-a', model: 'model-2', name: 'Model Two', reasoning: true },
+    { provider: 'provider-a', model: 'model-1', name: 'Model One', capabilities: { imageInput: false }, reasoningEfforts: [] },
+    { provider: 'provider-a', model: 'model-2', name: 'Model Two', capabilities: { imageInput: false }, reasoningEfforts: ['low', 'high'] },
+  ] });
+  if (url === '/api/agents') return json({ agents: [
+    { id: 'default', name: 'Default', description: '', role: 'default', usage: 'both', profile: 'default', valid: true, warnings: [] },
+    { id: 'writer', name: 'Writer', description: 'Writes code', role: 'default', usage: 'primary', profile: 'default', valid: true, warnings: [] },
+    { id: 'explorer', name: 'Explorer', description: '', role: 'default', usage: 'subagent', profile: 'default', valid: true, warnings: [] },
+  ] });
+  if (url === '/api/roles') return json({ roles: [
+    { id: 'default', name: 'Default', provider: 'provider-a', model: 'model-1' },
   ] });
   throw new Error('Unexpected request: ' + url);
 }
@@ -135,7 +156,7 @@ describe('workbench interaction state', () => {
       if (url === '/api/workspaces/a/sessions/shared/model' && init?.method === 'POST') {
         const body = JSON.parse(String(init.body));
         switches.push(body);
-        return json({ model: { version: 1, provider: body.provider, model: body.model } });
+        return json({ model: body, resolvedModel: { provider: body.provider, model: body.model, name: 'Model Two', capabilities: { imageInput: false } } });
       }
       return clientFetcher(input);
     };
@@ -143,28 +164,65 @@ describe('workbench interaction state', () => {
     client.boot();
     await tick();
     const entry = client.getEntry('a', 'shared');
-    entry.model = { version: 1, provider: 'provider-a', model: 'model-1' };
+    entry.binding = { version: 2, kind: 'model', provider: 'provider-a', model: 'model-1' };
     client.renderComposer();
 
     const select = client.node('model-select');
     expect(select.disabled).toBe(false);
-    expect(select.childNodes.map((option) => [option.value, option.textContent])).toContainEqual([
-      JSON.stringify(['provider-a', 'model-1']), 'provider-a · Model One',
+    const options = select.childNodes.flatMap((node) => node.tag === 'optgroup' ? node.childNodes : [node]);
+    expect(options.map((option) => [option.value, option.textContent])).toContainEqual([
+      JSON.stringify({ version: 2, kind: 'model', provider: 'provider-a', model: 'model-1' }), 'provider-a · Model One',
     ]);
 
-    select.value = JSON.stringify(['provider-a', 'model-1']);
+    select.value = JSON.stringify({ version: 2, kind: 'model', provider: 'provider-a', model: 'model-1' });
     select.dispatch('change');
+    await tick();
     expect(switches).toHaveLength(0);
     expect(entry.modelSaving).toBe(false);
 
-    select.value = JSON.stringify(['provider-a', 'model-2']);
+    select.value = JSON.stringify({ version: 2, kind: 'model', provider: 'provider-a', model: 'model-2' });
     select.dispatch('change');
     await tick();
     await tick();
-    expect(switches).toEqual([{ provider: 'provider-a', model: 'model-2' }]);
-    expect(entry.model).toEqual({ version: 1, provider: 'provider-a', model: 'model-2' });
+    expect(switches).toEqual([{ version: 2, kind: 'model', provider: 'provider-a', model: 'model-2' }]);
+    expect(entry.binding).toEqual({ version: 2, kind: 'model', provider: 'provider-a', model: 'model-2' });
     expect(entry.modelSaving).toBe(false);
     expect(entry.modelError).toBe('');
+  });
+
+  it('filters subagent-only agents and persists a session agent switch', async () => {
+    const switches: unknown[] = [];
+    const writer = { id: 'writer', name: 'Writer', description: 'Writes code', role: 'default', usage: 'primary', profile: 'default', valid: true, warnings: [] };
+    const fetcher: typeof fetch = async (input, init) => {
+      const url = String(input);
+      if (url === '/api/workspaces/a/sessions/shared/agent' && init?.method === 'POST') {
+        const body = JSON.parse(String(init.body));
+        switches.push(body);
+        return json({ agent: writer });
+      }
+      if (url === '/api/workspaces/a/sessions/shared' && init?.method === undefined) {
+        return json({ ...detail('Writer'), agent: writer });
+      }
+      return clientFetcher(input);
+    };
+    const client = harness(fetcher);
+    client.boot();
+    await tick();
+    client.renderComposer();
+
+    const select = client.node('agent-select');
+    expect(select.disabled).toBe(false);
+    const options = select.childNodes.filter((node) => node.tag === 'option');
+    expect(options.map((option) => option.value)).toEqual(['default', 'writer']);
+
+    select.value = 'writer';
+    select.dispatch('change');
+    await tick();
+    await tick();
+    expect(switches).toEqual([{ agent: 'writer' }]);
+    expect(client.getEntry('a', 'shared').agent).toMatchObject({ id: 'writer', role: 'default' });
+    expect(client.getEntry('a', 'shared').agentSaving).toBe(false);
+    expect(client.getEntry('a', 'shared').agentError).toBe('');
   });
 
   it('switches between independent record and event inspection without losing the timeline', async () => {

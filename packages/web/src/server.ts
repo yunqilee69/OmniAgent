@@ -2,14 +2,30 @@ import { createServer, type IncomingMessage, type Server, type ServerResponse } 
 import { stat } from 'node:fs/promises';
 import { isAbsolute } from 'node:path';
 import { projectMessages } from '@omniagent/core';
-import type { AgentEvent, ModelChoice, SessionHandle, SessionModelSelection, SessionStore, SessionSummary } from '@omniagent/core';
-import { MessageSchema } from '../../core/src/domain/message';
+import type {
+  AgentEvent,
+  AgentUsage,
+  ModelBinding,
+  ModelCapabilities,
+  ResolvedSessionRuntime,
+  RuntimeResolver,
+  SessionHandle,
+  SessionStore,
+  SessionSummary,
+} from '@omniagent/core';
 import {
-  SessionModelSelectionSchema,
+  createAgentSelectionEvent,
+  createAgentSwitch,
   createModelSelectionEvent,
   createModelSwitch,
+  defaultModelBinding,
+  ModelBindingSchema,
+  projectAgentSelection,
   projectModelSelection,
-} from '../../core/src/session/model-selection';
+  usageAllowsRoot,
+} from '@omniagent/core';
+import type { ReasoningEffort } from '@omniagent/core';
+import { MessageSchema } from '../../core/src/domain/message';
 import {
   createDshPresetSwitch, createInitialDshPermissionEvent, isDshPermissionPreset,
   projectDshPermissions, resolveDshDefaultPreset, snapshotDshPermissions,
@@ -33,22 +49,60 @@ export interface WebSession {
   interrupt(): void;
 }
 
+export interface AgentSummary {
+  id: string;
+  name: string;
+  description: string;
+  role: string;
+  usage: AgentUsage;
+  profile: string;
+  valid: boolean;
+  warnings: string[];
+}
+
+export interface RoleSummary {
+  id: string;
+  name: string;
+  provider: string;
+  model: string;
+  reasoningEffort?: string;
+}
+
+export interface ModelSummary {
+  provider: string;
+  model: string;
+  name: string;
+  contextWindow?: number;
+  maxTokens?: number;
+  capabilities: ModelCapabilities;
+  reasoningEfforts: ReasoningEffort[];
+  defaultReasoningEffort?: ReasoningEffort;
+}
+
 export interface WebHostOptions {
   workspaces: Pick<WorkspaceRegistry, 'list' | 'get' | 'add' | 'remove' | 'touch'>;
   store: Pick<SessionStore, 'list' | 'create' | 'open'>;
-  createSession: (
+  /** Unconfigured composition seam; configured hosts use createRuntimeSession. */
+  createSession?: (
     workspace: Workspace,
     handle: SessionHandle,
     permissions: DshPermissionSnapshot,
-    model: SessionModelSelection | undefined,
   ) => WebSession | Promise<WebSession>;
+  /** Configured-agent runtime; enables agent/role/model binding APIs. */
+  runtime?: RuntimeResolver;
+  createRuntimeSession?: (
+    workspace: Workspace,
+    handle: SessionHandle,
+    permissions: DshPermissionSnapshot,
+    runtime: ResolvedSessionRuntime,
+  ) => WebSession | Promise<WebSession>;
+  listAgents?: () => AgentSummary[] | Promise<AgentSummary[]>;
+  listRoles?: () => RoleSummary[] | Promise<RoleSummary[]>;
   readAudit?: (workspace: Workspace, sessionId: string) => Promise<unknown[]>;
   permissionSettings?: Pick<PermissionSettings, 'read' | 'update' | 'snapshot'>;
   approvalBroker?: ApprovalBroker;
-  /** Model choices the current config can construct; credentials stay out of this list. */
-  modelCatalog?: () => ModelChoice[];
-  /** Selection used for a new or pre-selection session. */
-  defaultModelSelection?: () => SessionModelSelection | undefined;
+  /** Credential-free model metadata for the configured catalog. */
+  modelCatalog?: () => ModelSummary[] | Promise<ModelSummary[]>;
 }
 
 export interface WebHost {
@@ -86,6 +140,7 @@ interface RunningTurn {
 interface CachedSession {
   preset: DshPermissionSnapshot['preset'];
   modelKey: string;
+  runtimeKey?: string;
   pending: Promise<WebSession>;
 }
 
@@ -171,7 +226,13 @@ async function route(
   }
   if (request.method === 'GET' && url.pathname === '/health') return json(response, 200, { ok: true });
   if (request.method === 'GET' && url.pathname === '/api/models') {
-    return json(response, 200, { models: options.modelCatalog?.() ?? [] });
+    return json(response, 200, { models: await options.modelCatalog?.() ?? [] });
+  }
+  if (request.method === 'GET' && url.pathname === '/api/agents') {
+    return json(response, 200, { agents: await options.listAgents?.() ?? [] });
+  }
+  if (request.method === 'GET' && url.pathname === '/api/roles') {
+    return json(response, 200, { roles: await options.listRoles?.() ?? [] });
   }
   if (url.pathname === '/api/settings/permissions' && options.permissionSettings) {
     if (request.method === 'GET') return json(response, 200, { settings: await options.permissionSettings.read() });
@@ -236,19 +297,59 @@ async function route(
   }
   if (parts[3] !== 'sessions') throw new HttpError(404, 'Not found');
   if (request.method === 'GET' && parts.length === 4) {
-    const summaries = (await options.store.list())
+    const summaries = await Promise.all((await options.store.list())
       .filter((item) => item.workspace === workspace.path)
-      .sort((left, right) => right.updatedAt - left.updatedAt);
-    return json(response, 200, { sessions: summaries });
+      .map(async (item) => {
+        try {
+          const handle = await options.store.open(item.workspace, item.id);
+          const agent = projectAgentSelection(handle.events);
+          return { ...item, ...(agent.status === 'selected' ? { agent: agent.agent } : {}) };
+        } catch {
+          return item;
+        }
+      }));
+    return json(response, 200, {
+      sessions: summaries.sort((left, right) => right.updatedAt - left.updatedAt),
+    });
   }
   if (request.method === 'POST' && parts.length === 4) {
-    await readJson(request);
+    const body = await readJson(request);
     if (running.size > 0 || creating.size > 0 || getPermissionDefaultUpdates() > 0) throw new HttpError(409, 'Cannot create a session while a turn or session creation is active');
     if (removing.has(workspace.id)) throw new HttpError(409, 'Workspace is being unregistered');
     creating.set(workspace.id, (creating.get(workspace.id) ?? 0) + 1);
     try {
       const registered = await options.workspaces.get(workspace.id);
       if (!registered || registered.path !== workspace.path) throw new HttpError(404, 'Workspace not found');
+      let runtime: ResolvedSessionRuntime | undefined;
+      let agentId: string | undefined;
+      let binding: ModelBinding | undefined;
+      if (options.runtime) {
+        if (Object.keys(body).some((name) => name !== 'agent' && name !== 'model')) {
+          throw new HttpError(400, 'Invalid session configuration');
+        }
+        if (body.agent !== undefined && (typeof body.agent !== 'string' || body.agent.length === 0)) {
+          throw new HttpError(400, 'A valid agent id is required');
+        }
+        const parsedBinding = body.model === undefined
+          ? { success: true as const, data: defaultModelBinding() }
+          : ModelBindingSchema.safeParse(body.model);
+        if (!parsedBinding.success) throw new HttpError(400, 'A valid model binding is required');
+        if (!options.createRuntimeSession) throw new HttpError(500, 'Runtime session composition is unavailable');
+        agentId = typeof body.agent === 'string' ? body.agent : 'default';
+        binding = parsedBinding.data;
+        try {
+          runtime = await options.runtime.resolve({
+            cwd: workspace.path,
+            agentId,
+            binding,
+            isRoot: true,
+          });
+        } catch (error) {
+          throw new HttpError(409, error instanceof Error ? error.message : 'The selected agent is unavailable');
+        }
+      } else if (Object.keys(body).length > 0) {
+        throw new HttpError(400, 'Agent and model selection require a configured runtime');
+      }
       const handle = await options.store.create({ workspace: workspace.path, cwd: workspace.path });
       const key = `${workspace.path}\0${handle.id}`;
       await withPermissionLock(permissionLocks, key, async () => {
@@ -261,9 +362,9 @@ async function route(
             throw error;
           }
         }
-        const model = options.defaultModelSelection?.();
-        if (model && projectModelSelection(handle.events).status !== 'selected') {
-          await handle.append(createModelSelectionEvent(model));
+        if (runtime !== undefined && agentId !== undefined && binding !== undefined) {
+          await handle.append(createAgentSelectionEvent(agentId));
+          await handle.append(createModelSelectionEvent(binding));
         }
       });
       await options.workspaces.touch(workspace.id);
@@ -282,12 +383,12 @@ async function route(
     const handle = await openSession(options.store, workspace, sessionId);
     const audit = await options.readAudit?.(workspace, sessionId) ?? [];
     await options.workspaces.touch(workspace.id);
-    const model = projectModelSelection(handle.events);
+    const selection = await describeSelection(options, workspace, handle);
     return json(response, 200, {
       header: handle.header,
       messages: safePublicMessages(projectMessages(handle.events)),
       permission: { preset: permissionProjection(handle, key, failedPermissions).preset },
-      model: model.status === 'selected' ? model.selection : null,
+      ...selection,
       plan: projectPlanMode(handle.events),
       todos: projectTodos(handle.events),
       events: projectTraceEvents(handle.events),
@@ -328,34 +429,76 @@ async function route(
     });
     return json(response, 200, { permission });
   }
-  if (request.method === 'POST' && parts.length === 6 && parts[5] === 'model') {
+  if (request.method === 'POST' && parts.length === 6 && parts[5] === 'agent') {
+    if (!options.runtime) throw new HttpError(409, 'Agent selection is not available without a configured runtime');
     const body = await readJson(request);
-    if (Object.keys(body).some((name) => name !== 'provider' && name !== 'model' && name !== 'reasoningEffort')) {
-      throw new HttpError(400, 'Invalid model selection');
+    if (Object.keys(body).length !== 1 || typeof body.agent !== 'string' ||
+        body.agent.trim().length === 0 || body.agent.length > 128) {
+      throw new HttpError(400, 'A valid agent id is required');
     }
-    const parsed = SessionModelSelectionSchema.safeParse({
-      version: 1,
-      provider: body.provider,
-      model: body.model,
-      ...(body.reasoningEffort === undefined ? {} : { reasoningEffort: body.reasoningEffort }),
+    const agent = body.agent;
+    const result = await withPermissionLock(permissionLocks, key, async () => {
+      if (running.size > 0 || running.has(key)) throw new HttpError(409, 'Cannot change the agent while a turn is active');
+      if (removing.has(workspace.id)) throw new HttpError(409, 'Workspace is being unregistered');
+      const registered = await options.workspaces.get(workspace.id);
+      if (!registered || registered.path !== workspace.path) throw new HttpError(404, 'Workspace not found');
+      const handle = await openSession(options.store, workspace, sessionId);
+      const binding = projectModelSelection(handle.events);
+      if (binding.status === 'invalid') throw new HttpError(409, 'The session model binding is invalid; select a model again');
+      let resolved: ResolvedSessionRuntime;
+      try {
+        resolved = await options.runtime!.resolve({
+          cwd: handle.header.cwd,
+          agentId: agent,
+          binding: binding.status === 'selected' ? binding.binding : defaultModelBinding(),
+          isRoot: true,
+        });
+      } catch (error) {
+        throw new HttpError(409, error instanceof Error ? error.message : 'The selected agent is unavailable');
+      }
+      if (!resolved.agent) throw new HttpError(409, 'The selected agent is unavailable');
+      const current = projectAgentSelection(handle.events);
+      const event = createAgentSwitch(current, { version: 1, agent });
+      if (event) await handle.append(event);
+      sessions.delete(key);
+      return agentSummary(resolved);
     });
-    if (!parsed.success) throw new HttpError(400, 'A valid model selection is required');
-    const selection = parsed.data;
-    const choices = options.modelCatalog?.() ?? [];
-    if (!choices.some((choice) => choice.provider === selection.provider && choice.model === selection.model)) {
-      throw new HttpError(409, 'The selected model is not available in the current configuration');
-    }
-    await withPermissionLock(permissionLocks, key, async () => {
+    return json(response, 200, { agent: result });
+  }
+  if (request.method === 'POST' && parts.length === 6 && parts[5] === 'model') {
+    if (!options.runtime) throw new HttpError(409, 'Model selection is not available without a configured runtime');
+    const body = await readJson(request);
+    const parsed = ModelBindingSchema.safeParse(body);
+    if (!parsed.success) throw new HttpError(400, 'A valid model binding is required');
+    const binding = parsed.data;
+    const result = await withPermissionLock(permissionLocks, key, async () => {
       if (running.size > 0 || running.has(key)) throw new HttpError(409, 'Cannot change the model while a turn is active');
       if (removing.has(workspace.id)) throw new HttpError(409, 'Workspace is being unregistered');
       const registered = await options.workspaces.get(workspace.id);
       if (!registered || registered.path !== workspace.path) throw new HttpError(404, 'Workspace not found');
       const handle = await openSession(options.store, workspace, sessionId);
-      const event = createModelSwitch(projectModelSelection(handle.events), selection);
+      const agent = projectAgentSelection(handle.events);
+      if (agent.status !== 'selected') throw new HttpError(409, 'Select an agent before selecting a model');
+      let resolved: ResolvedSessionRuntime;
+      try {
+        resolved = await options.runtime!.resolve({
+          cwd: handle.header.cwd,
+          agentId: agent.agent,
+          binding,
+          isRoot: true,
+        });
+      } catch (error) {
+        throw new HttpError(409, error instanceof Error ? error.message : 'The selected model is unavailable');
+      }
+      const event = createModelSwitch(projectModelSelection(handle.events), binding);
       if (event) await handle.append(event);
       sessions.delete(key);
+      return {
+        model: binding,
+        resolvedModel: resolvedModelSummary(resolved),
+      };
     });
-    return json(response, 200, { model: selection });
+    return json(response, 200, result);
   }
   if (request.method === 'POST' && parts.length === 6 && parts[5] === 'plan') {
     const body = await readJson(request);
@@ -458,23 +601,37 @@ async function route(
       const registered = await options.workspaces.get(workspace.id);
       if (!registered || registered.path !== workspace.path) throw new HttpError(404, 'Workspace not found');
       if (response.destroyed) return;
-      const { handle, permissions, model } = await withPermissionLock(permissionLocks, key, async () => {
+      const { handle, permissions, runtime } = await withPermissionLock(permissionLocks, key, async () => {
         const handle = await openSession(options.store, workspace, sessionId);
         const projection = permissionProjection(handle, key, failedPermissions);
         if (projection.status !== 'ready') throw new HttpError(409, 'A permission preset must be selected');
-        const modelProjection = projectModelSelection(handle.events);
-        if (modelProjection.status === 'invalid') throw new HttpError(409, 'A valid model selection must be selected');
-        const selectedModel = modelProjection.status === 'selected' ? modelProjection.selection : options.defaultModelSelection?.();
-        const choices = options.modelCatalog?.() ?? [];
-        if (selectedModel && choices.length > 0 &&
-            !choices.some((choice) => choice.provider === selectedModel.provider && choice.model === selectedModel.model)) {
-          throw new HttpError(409, 'The selected model is not available in the current configuration');
+        const permissions = snapshotDshPermissions(projection);
+        if (!options.runtime) return { handle, permissions, runtime: undefined };
+        if (!options.createRuntimeSession) throw new HttpError(409, 'Runtime session composition is unavailable');
+        const agent = projectAgentSelection(handle.events);
+        if (agent.status !== 'selected') {
+          throw new HttpError(409, agent.status === 'invalid'
+            ? 'The session agent selection is invalid; select an agent again'
+            : 'An agent must be selected before sending a message');
         }
-        return {
-          handle,
-          permissions: snapshotDshPermissions(projection),
-          model: selectedModel,
-        };
+        const binding = projectModelSelection(handle.events);
+        if (binding.status !== 'selected') {
+          throw new HttpError(409, binding.status === 'invalid'
+            ? 'The session model binding is invalid; select a model again'
+            : 'A model binding must be selected before sending a message');
+        }
+        let resolved: ResolvedSessionRuntime;
+        try {
+          resolved = await options.runtime.resolve({
+            cwd: handle.header.cwd,
+            agentId: agent.agent,
+            binding: binding.binding,
+            isRoot: true,
+          });
+        } catch (error) {
+          throw new HttpError(409, error instanceof Error ? error.message : 'The selected agent is unavailable');
+        }
+        return { handle, permissions, runtime: resolved };
       });
       if (response.destroyed) return;
       if (turn.cancelled) {
@@ -488,7 +645,7 @@ async function route(
         response.write(`data: ${JSON.stringify({ type: 'turn.end', reason: 'interrupted' })}\n\n`);
         return;
       }
-      const session = await getSession(options, sessions, running, workspace, handle, key, permissions, model);
+      const session = await getSession(options, sessions, running, workspace, handle, key, permissions, runtime);
       if (response.destroyed) return;
       if (turn.cancelled) {
         response.writeHead(200, {
@@ -597,17 +754,25 @@ async function getSession(
   handle: SessionHandle,
   key: string,
   permissions: DshPermissionSnapshot,
-  model: SessionModelSelection | undefined,
+  runtime: ResolvedSessionRuntime | undefined,
 ): Promise<WebSession> {
-  const modelKey = model === undefined ? '' : JSON.stringify(model);
+  const modelKey = runtime === undefined ? '' : JSON.stringify(runtime.modelBinding);
+  const runtimeKey = runtime?.revision;
   let cached = sessions.get(key);
-  if (cached && cached.preset === permissions.preset && cached.modelKey === modelKey) {
+  if (cached && cached.preset === permissions.preset && cached.modelKey === modelKey && cached.runtimeKey === runtimeKey) {
     sessions.delete(key);
     sessions.set(key, cached);
     return cached.pending;
   }
-  const pending = Promise.resolve(options.createSession(workspace, handle, permissions, model));
-  cached = { preset: permissions.preset, modelKey, pending };
+  let pending: Promise<WebSession>;
+  if (runtime === undefined) {
+    if (!options.createSession) throw new HttpError(500, 'Session composition is unavailable');
+    pending = Promise.resolve(options.createSession(workspace, handle, permissions));
+  } else {
+    if (!options.createRuntimeSession) throw new HttpError(500, 'Runtime session composition is unavailable');
+    pending = Promise.resolve(options.createRuntimeSession(workspace, handle, permissions, runtime));
+  }
+  cached = { preset: permissions.preset, modelKey, ...(runtimeKey === undefined ? {} : { runtimeKey }), pending };
   sessions.set(key, cached);
   const current = cached;
   void pending.catch(() => { if (sessions.get(key) === current) sessions.delete(key); });
@@ -624,6 +789,97 @@ async function getSession(
   return pending;
 }
 
+function agentSummary(runtime: ResolvedSessionRuntime): AgentSummary {
+  return {
+    id: runtime.agent.id,
+    name: runtime.agent.name,
+    description: runtime.agent.description,
+    role: runtime.agent.role,
+    usage: runtime.agent.usage,
+    profile: runtime.agent.profile,
+    valid: true,
+    warnings: [],
+  };
+}
+
+function resolvedModelSummary(runtime: ResolvedSessionRuntime): Record<string, unknown> | null {
+  const model = runtime.modelDescriptor;
+  if (!model) return null;
+  return {
+    provider: model.provider,
+    model: model.id,
+    name: model.name,
+    ...(runtime.reasoningEffort === undefined ? {} : { reasoningEffort: runtime.reasoningEffort }),
+    ...(model.contextWindow === undefined ? {} : { contextWindow: model.contextWindow }),
+    ...(model.maxTokens === undefined ? {} : { maxTokens: model.maxTokens }),
+    capabilities: model.capabilities,
+  };
+}
+
+async function describeSelection(
+  options: WebHostOptions,
+  workspace: Workspace,
+  handle: SessionHandle,
+): Promise<{
+  agent: AgentSummary | null;
+  model: ModelBinding | null;
+  resolvedModel: Record<string, unknown> | null;
+  agentError: string | null;
+  agentWarnings: string[];
+}> {
+  if (!options.runtime) {
+    return { agent: null, model: null, resolvedModel: null, agentError: null, agentWarnings: [] };
+  }
+  const agent = projectAgentSelection(handle.events);
+  const binding = projectModelSelection(handle.events);
+  const model = binding.status === 'selected' ? binding.binding : null;
+  if (agent.status !== 'selected') {
+    return {
+      agent: null,
+      model,
+      resolvedModel: null,
+      agentError: agent.status === 'invalid'
+        ? 'The session agent selection is invalid; select an agent again.'
+        : 'An agent must be selected before this session can run.',
+      agentWarnings: [],
+    };
+  }
+  if (binding.status !== 'selected') {
+    return {
+      agent: null,
+      model: null,
+      resolvedModel: null,
+      agentError: binding.status === 'invalid'
+        ? 'The session model binding is invalid; select a model again.'
+        : 'A model binding must be selected before this session can run.',
+      agentWarnings: [],
+    };
+  }
+  try {
+    const runtime = await options.runtime.resolve({
+      cwd: handle.header.cwd ?? workspace.path,
+      agentId: agent.agent,
+      binding: binding.binding,
+      isRoot: true,
+    });
+    return {
+      agent: agentSummary(runtime),
+      model,
+      resolvedModel: resolvedModelSummary(runtime),
+      agentError: null,
+      agentWarnings: runtime.warnings,
+    };
+  } catch (error) {
+    return {
+      agent: null,
+      model,
+      resolvedModel: null,
+      agentError: error instanceof Error ? error.message : 'The session agent is unavailable.',
+      agentWarnings: [],
+    };
+  }
+}
+
 async function openSession(store: WebHostOptions['store'], workspace: Workspace, sessionId: string): Promise<SessionHandle> {
   try {
     return await store.open(workspace.path, sessionId);
@@ -636,8 +892,10 @@ async function openSession(store: WebHostOptions['store'], workspace: Workspace,
 }
 
 function summarize(handle: SessionHandle): SessionSummary {
+  const agent = projectAgentSelection(handle.events);
   return {
     id: handle.id,
+    ...(agent.status === 'selected' ? { agent: agent.agent } : {}),
     ...(handle.header.agentId === undefined ? {} : { agentId: handle.header.agentId }),
     ...(handle.header.parentSessionId === undefined ? {} : { parentSessionId: handle.header.parentSessionId }),
     ...(handle.header.depth === undefined ? {} : { depth: handle.header.depth }),

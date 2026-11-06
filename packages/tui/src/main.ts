@@ -2,37 +2,38 @@ import { readFile } from 'node:fs/promises';
 import { join } from 'node:path';
 import { createInterface } from 'node:readline/promises';
 import {
+  AgentCatalog,
   AuditLog,
-  DEFAULT_SYSTEM_PROMPT,
+  ConfigStore,
   FakeModel,
+  RuntimeResolver,
   Session,
   SessionStore,
   SubagentManager,
+  createAgentSelectionEvent,
+  createAgentSwitch,
   createModelSelectionEvent,
   createModelSwitch,
   createPlanModeEvent,
+  defaultConfigDir,
+  defaultModelBinding,
+  listCatalogModels,
+  projectAgentSelection,
+  projectModelSelection,
   projectPlanMode,
   projectTodos,
-  createSelectedModel,
-  defaultModelSelection,
-  discoverSkills,
-  listConfiguredModels,
-  loadConfig,
-  projectModelSelection,
-  renderSkillCatalog,
-  resolveContextWindowTokens,
   textResponse,
   toolCallResponse,
+  usageAllowsRoot,
 } from '@omniagent/core';
 import type {
   AgentEvent,
   ApprovalResponse,
-  ModelChoice,
-  ModelClient,
+  ModelBinding,
   PermissionRequest,
   PlanReviewResponse,
+  ResolvedSessionRuntime,
   SessionHandle,
-  SessionModelSelection,
   TodoItem,
 } from '@omniagent/core';
 import {
@@ -41,14 +42,25 @@ import {
 } from '../../core/src/permissions/dsh-permissions';
 import type { DshPermissionProjection, DshPermissionSettings, DshPermissionSnapshot } from '../../core/src/permissions/dsh-permissions';
 import { createTheme } from './ansi';
-import { renderMarkdown } from './markdown';
-import { TuiRenderer, renderBanner, renderHelp, sanitizeTerminal } from './render';
+import { GLYPH } from './blocks';
+import { createRoles } from './palette';
+import {
+  TuiRenderer,
+  renderBanner,
+  renderBodyMarkdown,
+  renderHelp,
+  renderPrompt,
+  renderStatus,
+  sanitizeTerminal,
+  todoMark,
+} from './render';
 import type { ThinkingMode } from './render';
 import { describeToolCall, describeToolResult } from './tools';
 
 const cwd = process.cwd();
 const rl = createInterface({ input: process.stdin, output: process.stdout });
 const theme = createTheme();
+const roles = createRoles(theme);
 const renderer = new TuiRenderer({ theme });
 
 function createDemoModel(): FakeModel {
@@ -86,33 +98,28 @@ async function approve(request: PermissionRequest): Promise<ApprovalResponse> {
 async function reviewPlan(plan: string, signal: AbortSignal): Promise<PlanReviewResponse> {
   signal.throwIfAborted();
   renderer.beforePrompt();
-  renderer.print(`\n  ${theme.paint('计划', { fg: 'brightCyan', bold: true })}\n\n`);
-  renderer.print(renderMarkdown(sanitizeTerminal(plan), {
-    theme,
-    width: () => process.stdout.columns || 100,
-    linePrefix: '  ',
-  }));
+  renderer.print(`\n${sayIndent(roles.accentBold('计划'))}\n\n`);
+  renderer.print(renderBodyMarkdown(sanitizeTerminal(plan), theme, process.stdout.columns || 100));
   renderer.print('\n');
-  const answer = await rl.question(`  ${theme.paint('批准并退出 plan 模式？(y/N)', { bold: true })} `);
+  const answer = await rl.question(`${sayIndent(roles.accentBold('批准并退出 plan 模式？(y/N)'))} `);
   signal.throwIfAborted();
   if (answer.trim().toLowerCase() === 'y') return { approved: true };
-  const feedback = (await rl.question(`  ${theme.paint('继续规划，补充意见（可空）：', { dim: true })} `)).trim();
+  const feedback = (await rl.question(`${sayIndent(roles.dim('继续规划，补充意见（可空）：'))} `)).trim();
   signal.throwIfAborted();
   return { approved: false, ...(feedback ? { feedback } : {}) };
 }
 
 function printTodos(todos: readonly TodoItem[] | null): void {
   if (!todos || todos.length === 0) {
-    renderer.print(`  ${theme.paint('当前没有任务清单。', { dim: true })}\n`);
+    renderer.print(`${sayIndent(roles.dim('当前没有任务清单。'))}\n`);
     return;
   }
   for (const item of todos) {
-    const mark = item.status === 'completed'
-      ? theme.paint('✓', { fg: 'green' })
-      : item.status === 'in_progress'
-        ? theme.paint('▸', { fg: 'brightCyan' })
-        : theme.paint('○', { dim: true, fg: 'gray' });
-    renderer.print(`  ${mark} ${sanitizeTerminal(item.content)}\n`);
+    const mark = todoMark(item.status, theme);
+    const text = item.status === 'completed'
+      ? roles.dim(sanitizeTerminal(item.content))
+      : sanitizeTerminal(item.content);
+    renderer.print(`${sayIndent(`${mark} ${text}`)}\n`);
   }
 }
 
@@ -143,99 +150,86 @@ async function readDefaultPreset(configDir: string): Promise<DshPermissionSettin
   return resolveDshDefaultPreset(Object.hasOwn(config, 'mode') || Object.hasOwn(config, 'permissions') ? null : undefined);
 }
 
-function modelKey(selection: SessionModelSelection | undefined): string {
-  return selection ? `${selection.provider}\0${selection.model}\0${selection.reasoningEffort ?? ''}` : '\0demo\0';
-}
-
-function describeModel(selection: SessionModelSelection | undefined): string {
-  return selection ? `${sanitizeTerminal(selection.provider)}/${sanitizeTerminal(selection.model)}` : 'demo';
-}
-
-function describeChoice(choice: ModelChoice): string {
-  return `${sanitizeTerminal(choice.provider)}/${sanitizeTerminal(choice.model)} — ${sanitizeTerminal(choice.name)}`;
+/** 命令输出沿用与正文相同的两空格缩进，保证「终端里所有内容同一列起」。 */
+function sayIndent(text: string): string {
+  return `${GLYPH.indent}${text}`;
 }
 
 function paintDim(text: string): string {
-  return theme.paint(text, { dim: true, fg: 'gray' });
+  return roles.dim(text);
 }
 
 function paintError(text: string): string {
-  return `${theme.paint('✗', { fg: 'red' })} ${theme.paint(text, { fg: 'red' })}`;
+  return `${roles.error(GLYPH.fail)} ${roles.error(text)}`;
 }
 
 function paintOk(text: string): string {
-  return `${theme.paint('✓', { fg: 'green' })} ${text}`;
+  return `${roles.success(GLYPH.ok)} ${text}`;
 }
 
 function paintWarn(text: string): string {
-  return `${theme.paint('⚠', { fg: 'brightYellow' })} ${text}`;
+  return `${roles.attention(GLYPH.warn)} ${text}`;
+}
+
+function errorMessage(error: unknown): string {
+  return sanitizeTerminal(error instanceof Error ? error.message : String(error));
 }
 
 /** Keep async subagent output from corrupting the main transcript. */
 function backgroundNotice(label: string, event: AgentEvent): void {
+  const tag = roles.dim(`[${label}]`);
   let text: string | undefined;
   if (event.type === 'tool.call') {
     const info = describeToolCall(event.call);
-    text = `${theme.paint('⚙', { fg: 'cyan' })} ${info.title}${info.summary.length > 0 ? ` · ${sanitizeTerminal(info.summary)}` : ''}`;
+    const detail = info.summary.length > 0 ? ` ${roles.dim('·')} ${roles.dim(sanitizeTerminal(info.summary))}` : '';
+    text = `${roles.accent(GLYPH.notice)} ${roles.dim(info.title)}${detail}`;
   } else if (event.type === 'tool.result') {
     const outcome = describeToolResult({ id: event.result.callId, name: event.result.name, arguments: {} }, event.result, { verbose: false });
-    const mark = event.result.ok ? theme.paint('✓', { fg: 'green' }) : theme.paint('✗', { fg: 'red' });
-    text = `${mark} ${sanitizeTerminal(event.result.name)}${outcome.meta.length > 0 ? ` · ${sanitizeTerminal(outcome.meta.join(' · '))}` : ''}`;
+    const mark = event.result.ok ? roles.success(GLYPH.ok) : roles.error(GLYPH.fail);
+    const meta = outcome.meta.length > 0 ? ` ${roles.dim('·')} ${roles.dim(sanitizeTerminal(outcome.meta.join(' · ')))}` : '';
+    text = `${mark} ${roles.dim(sanitizeTerminal(event.result.name))}${meta}`;
   } else if (event.type === 'error') {
-    text = `${theme.paint('✗', { fg: 'red' })} ${sanitizeTerminal(event.error.message)}`;
+    text = `${roles.error(GLYPH.fail)} ${roles.error(sanitizeTerminal(event.error.message))}`;
   } else if (event.type === 'turn.end' && event.reason !== 'end_turn' && event.reason !== 'tool_use') {
-    text = `${theme.paint('■', { fg: 'brightYellow' })} ${sanitizeTerminal(event.reason)}`;
+    text = `${roles.attention(GLYPH.stop)} ${roles.attention(sanitizeTerminal(event.reason))}`;
   } else if (event.type === 'context.compacted') {
-    text = paintDim(`上下文压缩 · ${event.beforeTokens} → ${event.afterTokens} tokens`);
+    text = `${roles.dim(GLYPH.notice)} ${roles.dim(`上下文压缩 · ${event.beforeTokens} → ${event.afterTokens} tokens`)}`;
   }
   if (text !== undefined) {
-    renderer.print(`\n  ${paintDim(`[${label}]`)} ${text}\n`);
+    renderer.print(`\n${sayIndent(tag)} ${text}\n`);
   }
 }
 
+function bindingLabel(binding: ModelBinding | undefined): string {
+  if (!binding) return '未选择';
+  if (binding.kind === 'agent') return '跟随智能体';
+  if (binding.kind === 'role') return `角色 ${sanitizeTerminal(binding.role)}`;
+  return `${sanitizeTerminal(binding.provider)}/${sanitizeTerminal(binding.model)}${binding.reasoningEffort ? ` (${binding.reasoningEffort})` : ''}`;
+}
+
+function resolvedModelLabel(runtime: ResolvedSessionRuntime): string {
+  if (!runtime.modelDescriptor) return 'demo';
+  return `${sanitizeTerminal(runtime.modelDescriptor.provider)}/${sanitizeTerminal(runtime.modelDescriptor.id)}`
+    + (runtime.reasoningEffort ? ` (${runtime.reasoningEffort})` : '');
+}
+
 async function main(): Promise<void> {
-  const { config, configDir } = await loadConfig();
-  const initialSelection = defaultModelSelection(config);
-  const modelCatalog = listConfiguredModels(config);
+  const configDir = defaultConfigDir();
+  const configStore = await ConfigStore.open(join(configDir, 'config.json'));
+  const agents = new AgentCatalog(join(configDir, 'agents'));
+  const runtime = new RuntimeResolver({ configStore, agents });
   const store = new SessionStore(join(configDir, 'sessions'));
   const audit = new AuditLog(join(cwd, '.omniagent', 'audit.jsonl'));
   const failedPermissions = new Set<string>();
-  const modelCache = new Map<string, ModelClient>();
   let demoModel: FakeModel | undefined;
-  let catalog: string;
-  try {
-    catalog = renderSkillCatalog(await discoverSkills({ workspace: cwd }));
-  } catch {
-    catalog = 'Skill discovery failed; do not infer a skill catalog this session.';
-  }
-  const system = [config.system ?? DEFAULT_SYSTEM_PROMPT, catalog].filter(Boolean).join('\n\n');
-
-  function selectedModel(selection: SessionModelSelection | undefined): ModelClient {
-    if (!selection) {
-      demoModel ??= createDemoModel();
-      return demoModel;
-    }
-    const key = modelKey(selection);
-    let client = modelCache.get(key);
-    if (!client) {
-      client = createSelectedModel(config, selection);
-      modelCache.set(key, client);
-    }
-    return client;
-  }
-
-  // Fail at startup when the configured default cannot be constructed.
-  selectedModel(initialSelection);
+  const demo = (): FakeModel => (demoModel ??= createDemoModel());
+  const config = configStore.snapshot.config;
 
   const subagents = new SubagentManager({
     store,
-    createModel: selectedModel,
-    modelIdFor: (selection) => selection?.model ?? config.model,
-    modelCatalog,
-    defaultModelSelection: initialSelection,
-    systemForChild: () => system,
+    createModel: () => demo(),
+    runtime,
     maxSteps: config.maxSteps,
-    contextWindowTokens: (selection) => resolveContextWindowTokens(config, selection),
     ...(config.retainContextTokens === undefined ? {} : { retainContextTokens: config.retainContextTokens }),
     approve,
     audit: (entry) => audit.record(entry),
@@ -247,8 +241,36 @@ async function main(): Promise<void> {
     },
   });
 
-  async function createHandle(): Promise<SessionHandle> {
+  function projection(current: SessionHandle): DshPermissionProjection {
+    return failedPermissions.has(current.id) ? { status: 'invalid', preset: null } : projectDshPermissions(current.events);
+  }
+
+  function currentAgentId(current: SessionHandle): string {
+    const agent = projectAgentSelection(current.events);
+    return agent.status === 'selected' ? agent.agent : 'default';
+  }
+
+  async function resolveSessionRuntime(current: SessionHandle): Promise<ResolvedSessionRuntime> {
+    const agent = projectAgentSelection(current.events);
+    if (agent.status !== 'selected') {
+      throw new Error(agent.status === 'invalid'
+        ? '会话的智能体选择无效；请使用 /agent 重新选择。'
+        : '会话尚未选择智能体；请使用 /agent 选择。');
+    }
+    const binding = projectModelSelection(current.events);
+    if (binding.status !== 'selected') {
+      throw new Error(binding.status === 'invalid'
+        ? '会话的模型选择无效；请使用 /model 重新选择。'
+        : '会话尚未选择模型；请使用 /model 选择。');
+    }
+    return runtime.resolve({ cwd, agentId: agent.agent, binding: binding.binding, isRoot: true });
+  }
+
+  async function createHandle(previous?: SessionHandle): Promise<SessionHandle> {
     const settings = await readDefaultPreset(configDir);
+    const agentId = previous ? currentAgentId(previous) : 'default';
+    // Validate before writing a new session: fail closed instead of creating one that cannot run.
+    await runtime.resolve({ cwd, agentId, binding: defaultModelBinding(), isRoot: true });
     const created = await store.create({ workspace: cwd, cwd });
     if (!settings.requiresSelection && created.events.length === 0) {
       try {
@@ -258,68 +280,84 @@ async function main(): Promise<void> {
         throw error;
       }
     }
-    if (initialSelection) await created.append(createModelSelectionEvent(initialSelection));
+    await created.append(createAgentSelectionEvent(agentId));
+    await created.append(createModelSelectionEvent(defaultModelBinding()));
     return created;
-  }
-
-  function projection(current: SessionHandle): DshPermissionProjection {
-    return failedPermissions.has(current.id) ? { status: 'invalid', preset: null } : projectDshPermissions(current.events);
-  }
-
-  function modelSelectionFor(current: SessionHandle): { selection?: SessionModelSelection; error?: string } {
-    const projection = projectModelSelection(current.events);
-    if (projection.status === 'invalid') return { error: '会话的模型选择无效，请使用 /model 重新选择。' };
-    return { selection: projection.status === 'selected' ? projection.selection : initialSelection };
-  }
-
-  function modelLabel(current: SessionHandle): string {
-    const resolved = modelSelectionFor(current);
-    return resolved.error ? 'invalid model' : describeModel(resolved.selection);
   }
 
   let handle = await createHandle();
   let session: Session | undefined;
   let sessionSettings = '';
+  let statusAgent = 'default';
+  let statusModel = 'demo';
+  let statusError = '';
 
   function resetSession(): void {
     session = undefined;
     sessionSettings = '';
   }
 
+  async function refreshStatus(): Promise<void> {
+    const agent = projectAgentSelection(handle.events);
+    const binding = projectModelSelection(handle.events);
+    if (agent.status !== 'selected') {
+      statusAgent = '未选择智能体';
+      statusModel = bindingLabel(binding.status === 'selected' ? binding.binding : undefined);
+      statusError = '';
+      return;
+    }
+    if (binding.status !== 'selected') {
+      statusAgent = sanitizeTerminal(agent.agent);
+      statusModel = binding.status === 'invalid' ? '模型无效' : '未选择模型';
+      statusError = '';
+      return;
+    }
+    try {
+      const resolved = await runtime.resolve({ cwd, agentId: agent.agent, binding: binding.binding, isRoot: true });
+      statusAgent = `${sanitizeTerminal(resolved.agent.name)} · ${sanitizeTerminal(resolved.agent.role)}`;
+      statusModel = resolvedModelLabel(resolved);
+      statusError = '';
+    } catch (error) {
+      statusAgent = sanitizeTerminal(agent.agent);
+      statusModel = '不可用';
+      statusError = errorMessage(error);
+    }
+  }
+
   function makeSession(
     nextHandle: SessionHandle,
     permissions: DshPermissionSnapshot,
-    selection: SessionModelSelection | undefined,
-    model: ModelClient,
+    resolved: ResolvedSessionRuntime,
   ): Session {
-    const contextWindowTokens = resolveContextWindowTokens(config, selection);
+    const latest = configStore.snapshot.config;
     return new Session({
       cwd,
       workspace: cwd,
-      model,
-      modelId: selection?.model ?? config.model,
-      ...(selection === undefined ? {} : { modelSelection: selection }),
+      model: resolved.model ?? demo(),
+      ...(resolved.modelId === undefined ? {} : { modelId: resolved.modelId }),
+      agent: resolved.sessionAgent,
+      modelCapabilities: resolved.capabilities,
       dshPermissions: permissions,
-      maxSteps: config.maxSteps,
+      maxSteps: latest.maxSteps,
       approve,
       reviewPlan,
       audit: (entry) => audit.record(entry),
       session: nextHandle,
-      system,
+      system: resolved.system,
       subagents,
       onBackgroundEvent: (event) => {
         if (event.type === 'assistant.delta' || event.type === 'assistant.reasoning.delta' || event.type === 'assistant.message') return;
         backgroundNotice('background', event);
       },
-      ...(contextWindowTokens === undefined ? {} : { contextWindowTokens }),
-      ...(config.retainContextTokens === undefined ? {} : { retainContextTokens: config.retainContextTokens }),
+      ...(resolved.contextWindowTokens === undefined ? {} : { contextWindowTokens: resolved.contextWindowTokens }),
+      ...(latest.retainContextTokens === undefined ? {} : { retainContextTokens: latest.retainContextTokens }),
     });
   }
 
   function showBanner(): void {
     const permission = projection(handle);
     renderer.print(renderBanner({
-      model: modelLabel(handle),
+      model: `${statusAgent} · ${statusModel}`,
       workspace: cwd,
       permission: permission.status === 'ready' ? permission.preset : 'permission required',
       sessionId: handle.id,
@@ -331,28 +369,68 @@ async function main(): Promise<void> {
   }
 
   function sayIndented(text: string): void {
-    say(`  ${text}`);
+    say(sayIndent(text));
   }
 
+  /**
+   * 打印状态行 + 输入提示。
+   *
+   * 状态行单独成行、由渲染器写出，`rl.question` 只拿到一行提示符：readline 用
+   * 提示符的显示宽度算光标列，多行 prompt 会让编辑和回显错位，所以这里不合并。
+   */
+  function promptLine(): string {
+    const current = projection(handle);
+    const todos = projectTodos(handle.events);
+    const done = todos?.filter((item) => item.status === 'completed').length ?? 0;
+    renderer.print(`${renderStatus({
+      sessionId: handle.id,
+      permission: current.status === 'ready' ? current.preset : null,
+      model: `${statusAgent} · ${statusModel}`,
+      plan: projectPlanMode(handle.events).active,
+      todos: todos && todos.length > 0 ? { done, total: todos.length } : null,
+    }, theme, process.stdout.columns || 100)}\n`);
+    return renderPrompt(theme);
+  }
+
+  await refreshStatus();
   showBanner();
 
   for (;;) {
+    try {
+      await refreshStatus();
+    } catch (error) {
+      statusError = errorMessage(error);
+    }
     const current = projection(handle);
-    const model = modelLabel(handle);
-    const plan = projectPlanMode(handle.events).active;
-    const todos = projectTodos(handle.events);
-    const todoLabel = todos && todos.length > 0
-      ? ` | ${todos.filter((item) => item.status === 'completed').length}/${todos.length} todos`
-      : '';
-    const status = `[${sanitizeTerminal(handle.id.slice(0, 8))} | ${current.preset ?? 'permission required'} | ${model} | ${plan ? 'plan' : 'chat'}${todoLabel}]`;
-    const line = (await rl.question(`${paintDim(status)} ${theme.paint('❯', { fg: 'brightCyan', bold: true })} `)).trim();
+    const line = (await rl.question(promptLine())).trim();
     if (line.length === 0) continue;
+    if (statusError && line !== '/help' && line !== '/clear' && line !== 'exit' && line !== 'q') {
+      sayIndented(paintError(`配置不可用：${statusError}`));
+      continue;
+    }
     if (line === 'exit' || line === 'q') {
       await subagents.close();
       break;
     }
     if (line === '/help') {
       renderer.print(renderHelp(theme));
+      continue;
+    }
+    if (line === '/color' || line.startsWith('/color ')) {
+      const argument = line.slice('/color'.length).trim();
+      if (argument.length === 0) {
+        sayIndented(`颜色：${renderer.color ? roles.accent('on') : roles.dim('off')}`);
+        sayIndented(roles.dim('用法：/color on | /color off（NO_COLOR / TERM=dumb 会让默认值为 off）'));
+        continue;
+      }
+      if (argument !== 'on' && argument !== 'off') {
+        sayIndented(paintWarn('请选择 on 或 off。'));
+        continue;
+      }
+      renderer.setColor(argument === 'on');
+      sayIndented(argument === 'on'
+        ? paintOk('颜色已开启（只影响之后输出的内容）')
+        : paintOk('颜色已关闭（只影响之后输出的内容）'));
       continue;
     }
     if (line === '/clear') {
@@ -364,7 +442,7 @@ async function main(): Promise<void> {
     if (line === '/think' || line.startsWith('/think ')) {
       const argument = line.slice('/think'.length).trim();
       if (argument.length === 0) {
-        sayIndented(`思考内容显示：${theme.paint(renderer.thinking, { fg: 'brightCyan' })}`);
+        sayIndented(`思考内容显示：${roles.accent(renderer.thinking)}`);
         sayIndented(paintDim('用法：/think full | compact | off'));
         continue;
       }
@@ -387,13 +465,26 @@ async function main(): Promise<void> {
         sayIndented(paintDim('还没有会话。'));
         continue;
       }
-      sayIndented(theme.paint('会话', { bold: true }));
+      sayIndented(roles.dim('会话'));
       for (const item of items) {
         const relation = item.parentSessionId
           ? `child of ${sanitizeTerminal(item.parentSessionId)} (depth ${item.depth ?? 1})`
           : 'root';
-        const marker = item.id === handle.id ? theme.paint('*', { fg: 'brightCyan' }) : ' ';
-        say(`  ${marker} ${theme.paint(sanitizeTerminal(item.id), { fg: 'brightCyan' })}  ${paintDim(`${item.eventCount} events`)}  ${paintDim(relation)}  ${paintDim(sanitizeTerminal(item.workspace))}`);
+        let agent: string | undefined;
+        try {
+          agent = currentAgentId(await store.open(item.workspace, item.id));
+        } catch {
+          agent = undefined;
+        }
+        const marker = item.id === handle.id ? roles.accent('*') : ' ';
+        const id = item.id === handle.id ? roles.accent(sanitizeTerminal(item.id)) : sanitizeTerminal(item.id);
+        const detail = [
+          ...(agent === undefined ? [] : [roles.dim(`agent ${sanitizeTerminal(agent)}`)]),
+          roles.dim(`${item.eventCount} events`),
+          roles.dim(relation),
+          roles.dim(sanitizeTerminal(item.workspace)),
+        ];
+        say(sayIndent(`${marker} ${id}  ${detail.join(roles.dim('  '))}`));
       }
       continue;
     }
@@ -421,25 +512,26 @@ async function main(): Promise<void> {
           ? paintOk('计划模式已开启；模型将先调研并通过 exit_plan_mode 提交计划。')
           : paintOk('计划模式已关闭。'));
       } catch (error) {
-        sayIndented(paintError(`计划模式切换失败：${sanitizeTerminal(error instanceof Error ? error.message : String(error))}`));
+        sayIndented(paintError(`计划模式切换失败：${errorMessage(error)}`));
       }
       continue;
     }
     if (line === '/new') {
       await handle.flush();
       try {
-        handle = await createHandle();
+        handle = await createHandle(handle);
         resetSession();
-        sayIndented(paintOk(`新建会话 ${theme.paint(sanitizeTerminal(handle.id), { fg: 'brightCyan' })}`));
+        await refreshStatus();
+        sayIndented(paintOk(`新建会话 ${roles.accent(sanitizeTerminal(handle.id))} · 智能体 ${roles.accent(statusAgent)}`));
       } catch (error) {
-        sayIndented(paintError(`新建失败：${sanitizeTerminal(error instanceof Error ? error.message : String(error))}`));
+        sayIndented(paintError(`新建失败：${errorMessage(error)}`));
       }
       continue;
     }
     if (line === '/permission' || line.startsWith('/permission ')) {
       const preset = line.slice('/permission'.length).trim();
       if (preset.length === 0) {
-        sayIndented(`当前权限：${theme.paint(current.preset ?? '未选择', { fg: 'brightYellow' })}`);
+        sayIndented(`当前权限：${roles.warning(current.preset ?? '未选择')}`);
         sayIndented(paintDim('用法：/permission read-only | workspace-write | danger-full-access'));
         continue;
       }
@@ -457,58 +549,166 @@ async function main(): Promise<void> {
         } catch (error) {
           failedPermissions.add(handle.id);
           resetSession();
-          sayIndented(paintError(`权限保存失败：${sanitizeTerminal(error instanceof Error ? error.message : String(error))}`));
+          sayIndented(paintError(`权限保存失败：${errorMessage(error)}`));
           continue;
         }
       }
-      sayIndented(paintOk(`当前权限：${theme.paint(preset, { fg: 'brightYellow' })}`));
+      sayIndented(paintOk(`当前权限：${roles.warning(preset)}`));
+      continue;
+    }
+    if (line === '/agent' || line.startsWith('/agent ')) {
+      handle = await store.open(cwd, handle.id);
+      try {
+        const snapshot = await configStore.refresh();
+        const catalog = await agents.refresh(snapshot.catalog);
+        const argument = line.slice('/agent'.length).trim();
+        const rootAgents = catalog.agents.filter((agent) => usageAllowsRoot(agent.usage));
+        const selected = projectAgentSelection(handle.events);
+        if (argument.length === 0) {
+          if (rootAgents.length === 0) {
+            sayIndented(paintDim('当前配置没有可作为主智能体的 agent。'));
+            continue;
+          }
+          sayIndented(roles.dim('智能体'));
+          for (const agent of rootAgents) {
+            const active = selected.status === 'selected' && selected.agent === agent.id;
+            const mark = active ? roles.accent('*') : ' ';
+            const label = active ? roles.accent(sanitizeTerminal(agent.id)) : sanitizeTerminal(agent.id);
+            const detail = [agent.name, agent.role, agent.usage, agent.profile].map((value) => sanitizeTerminal(value));
+            say(sayIndent(`${mark} ${label}  ${roles.dim(detail.join(' · '))}`));
+          }
+          sayIndented(paintDim('使用 /agent <id> 切换智能体。'));
+          continue;
+        }
+        const target = catalog.agents.find((agent) => agent.id === argument);
+        if (!target) {
+          sayIndented(paintWarn('该智能体不存在或无效。'));
+          continue;
+        }
+        if (!usageAllowsRoot(target.usage)) {
+          sayIndented(paintWarn('该智能体只能作为子智能体使用。'));
+          continue;
+        }
+        const binding = projectModelSelection(handle.events);
+        if (binding.status === 'invalid') {
+          sayIndented(paintWarn('当前模型选择无效；请先使用 /model 重新选择。'));
+          continue;
+        }
+        await runtime.resolve({
+          cwd,
+          agentId: target.id,
+          binding: binding.status === 'selected' ? binding.binding : defaultModelBinding(),
+          isRoot: true,
+        });
+        const event = createAgentSwitch(selected, { version: 1, agent: target.id });
+        if (event) await handle.append(event);
+        resetSession();
+        await refreshStatus();
+        sayIndented(paintOk(`当前智能体：${roles.accent(statusAgent)}`));
+      } catch (error) {
+        sayIndented(paintError(`切换智能体失败：${errorMessage(error)}`));
+      }
       continue;
     }
     if (line === '/model' || line.startsWith('/model ')) {
       handle = await store.open(cwd, handle.id);
-      const modelProjection = projectModelSelection(handle.events);
-      const activeSelection = modelProjection.status === 'selected' ? modelProjection.selection : initialSelection;
-      const argument = line.slice('/model'.length).trim();
-      if (modelProjection.status === 'invalid') sayIndented(paintWarn('当前会话的模型选择无效；请重新选择。'));
-      if (argument.length === 0) {
-        if (!modelCatalog.length) {
-          sayIndented(paintDim('当前配置没有可选择的模型；未配置 provider 时使用 FakeModel 演示。'));
+      try {
+        const snapshot = await configStore.refresh();
+        const roleList = [...snapshot.catalog.roles.values()].sort((left, right) => left.id.localeCompare(right.id));
+        const modelList = listCatalogModels(snapshot.catalog)
+          .sort((left, right) => `${left.provider}/${left.id}`.localeCompare(`${right.provider}/${right.id}`));
+        const bindingProjection = projectModelSelection(handle.events);
+        const activeBinding = bindingProjection.status === 'selected' ? bindingProjection.binding : undefined;
+        const argument = line.slice('/model'.length).trim();
+        if (bindingProjection.status === 'invalid') sayIndented(paintWarn('当前会话的模型选择无效；请重新选择。'));
+        if (argument.length === 0) {
+          sayIndented(roles.dim('模型'));
+          const follow = activeBinding?.kind === 'agent' ? roles.accent('*') : ' ';
+          say(sayIndent(`${follow} 1. ${roles.dim('跟随智能体')}${roles.dim(' — 使用智能体角色对应的模型')}`));
+          let index = 2;
+          for (const role of roleList) {
+            const active = activeBinding?.kind === 'role' && activeBinding.role === role.id;
+            const mark = active ? roles.accent('*') : ' ';
+            const label = `${role.id} — ${role.provider}/${role.model}${role.reasoningEffort ? ` (${role.reasoningEffort})` : ''}`;
+            say(sayIndent(`${mark} ${index++}. ${roles.dim('角色')} ${active ? roles.accent(sanitizeTerminal(label)) : sanitizeTerminal(label)}`));
+          }
+          for (const model of modelList) {
+            const active = activeBinding?.kind === 'model' && activeBinding.provider === model.provider && activeBinding.model === model.id;
+            const mark = active ? roles.accent('*') : ' ';
+            const reasoning = model.reasoning?.default ? ` (${model.reasoning.default})` : '';
+            const label = `${model.provider}/${model.id} — ${model.name}${reasoning}`;
+            say(sayIndent(`${mark} ${index++}. ${roles.dim('模型')} ${active ? roles.accent(sanitizeTerminal(label)) : sanitizeTerminal(label)}`));
+          }
+          sayIndented(paintDim('使用 /model <序号>、/model agent、/model role <id> 或 /model <provider> <model> 切换。'));
           continue;
         }
-        sayIndented(theme.paint('模型', { bold: true }));
-        for (const [index, choice] of modelCatalog.entries()) {
-          const active = !!activeSelection && activeSelection.provider === choice.provider && activeSelection.model === choice.model;
-          const reasoning = active && activeSelection.reasoningEffort ? ` (${activeSelection.reasoningEffort})` : '';
-          say(`  ${active ? theme.paint('*', { fg: 'brightCyan' }) : ' '} ${index + 1}. ${describeChoice(choice)}${paintDim(reasoning)}`);
+
+        let binding: ModelBinding | undefined;
+        if (argument === 'agent') {
+          binding = defaultModelBinding();
+        } else if (argument.startsWith('role ')) {
+          const role = argument.slice('role '.length).trim();
+          if (!roleList.some((entry) => entry.id === role)) {
+            sayIndented(paintWarn('该角色不在当前配置中。'));
+            continue;
+          }
+          binding = { version: 2, kind: 'role', role };
+        } else if (/^\d+$/.test(argument)) {
+          const numeric = Number(argument);
+          if (numeric === 1) binding = defaultModelBinding();
+          else if (numeric >= 2 && numeric <= roleList.length + 1) {
+            binding = { version: 2, kind: 'role', role: roleList[numeric - 2]!.id };
+          } else {
+            const model = modelList[numeric - roleList.length - 2];
+            if (model) {
+              binding = {
+                version: 2,
+                kind: 'model',
+                provider: model.provider,
+                model: model.id,
+                ...(model.reasoning?.default === undefined ? {} : { reasoningEffort: model.reasoning.default }),
+              };
+            }
+          }
+          if (!binding) {
+            sayIndented(paintWarn('序号超出范围。'));
+            continue;
+          }
+        } else {
+          const [provider, ...rest] = argument.split(/\s+/);
+          const modelId = rest.join(' ');
+          if (!provider || !modelId) {
+            sayIndented(paintDim('用法：/model <序号>、/model agent、/model role <id> 或 /model <provider> <model>'));
+            continue;
+          }
+          const model = modelList.find((entry) => entry.provider === provider && entry.id === modelId);
+          if (!model) {
+            sayIndented(paintWarn('该模型不在当前配置的模型目录中。'));
+            continue;
+          }
+          binding = {
+            version: 2,
+            kind: 'model',
+            provider,
+            model: modelId,
+            ...(model.reasoning?.default === undefined ? {} : { reasoningEffort: model.reasoning.default }),
+          };
         }
-        sayIndented(paintDim('使用 /model <序号> 或 /model <provider> <model> 切换。'));
-        continue;
-      }
-      let target: ModelChoice | undefined;
-      if (/^\d+$/.test(argument)) {
-        target = modelCatalog[Number(argument) - 1];
-      } else {
-        const [provider, ...rest] = argument.split(/\s+/);
-        const model = rest.join(' ');
-        if (provider && model) target = modelCatalog.find((choice) => choice.provider === provider && choice.model === model);
-      }
-      if (!target) {
-        sayIndented(paintWarn('该模型不在当前配置的模型目录中。'));
-        continue;
-      }
-      const selection: SessionModelSelection = { version: 1, provider: target.provider, model: target.model };
-      const event = createModelSwitch(modelProjection, selection);
-      if (event) {
-        try {
-          await handle.append(event);
-          resetSession();
-        } catch (error) {
-          resetSession();
-          sayIndented(paintError(`模型保存失败：${sanitizeTerminal(error instanceof Error ? error.message : String(error))}`));
+
+        const agent = projectAgentSelection(handle.events);
+        if (agent.status !== 'selected') {
+          sayIndented(paintWarn('请先使用 /agent 选择智能体。'));
           continue;
         }
+        await runtime.resolve({ cwd, agentId: agent.agent, binding, isRoot: true });
+        const event = createModelSwitch(bindingProjection, binding);
+        if (event) await handle.append(event);
+        resetSession();
+        await refreshStatus();
+        sayIndented(paintOk(`当前模型：${roles.accent(statusModel)}`));
+      } catch (error) {
+        sayIndented(paintError(`模型切换失败：${errorMessage(error)}`));
       }
-      sayIndented(paintOk(`当前模型：${describeChoice(target)}`));
       continue;
     }
     if (line.startsWith('/resume ')) {
@@ -517,9 +717,14 @@ async function main(): Promise<void> {
       try {
         handle = await store.open(cwd, id);
         resetSession();
-        sayIndented(paintOk(`已恢复 ${theme.paint(sanitizeTerminal(id), { fg: 'brightCyan' })} · 消息数 ${handle.messages.length}`));
+        await refreshStatus();
+        const selection = projectAgentSelection(handle.events);
+        sayIndented(paintOk(`已恢复 ${roles.accent(sanitizeTerminal(id))}${roles.dim(' · ')}消息数 ${handle.messages.length}${roles.dim(' · ')}智能体 ${selection.status === 'selected' ? sanitizeTerminal(selection.agent) : '未选择'}`));
+        if (selection.status !== 'selected') {
+          sayIndented(paintWarn('该会话需要先使用 /agent 选择智能体，并使用 /model 选择模型后才能继续。'));
+        }
       } catch (error) {
-        sayIndented(paintError(`恢复失败：${sanitizeTerminal(error instanceof Error ? error.message : String(error))}`));
+        sayIndented(paintError(`恢复失败：${errorMessage(error)}`));
       }
       continue;
     }
@@ -535,22 +740,17 @@ async function main(): Promise<void> {
       sayIndented(paintWarn('请先使用 /permission <preset> 选择会话权限。'));
       continue;
     }
-    const resolvedModel = modelSelectionFor(handle);
-    if (resolvedModel.error) {
-      sayIndented(paintError(resolvedModel.error));
-      continue;
-    }
-    let modelClient: ModelClient;
+    let resolved: ResolvedSessionRuntime;
     try {
-      modelClient = selectedModel(resolvedModel.selection);
+      resolved = await resolveSessionRuntime(handle);
     } catch (error) {
-      sayIndented(paintError(`模型不可用：${sanitizeTerminal(error instanceof Error ? error.message : String(error))}`));
+      sayIndented(paintError(`无法开始回合：${errorMessage(error)}`));
       continue;
     }
     const snapshot = snapshotDshPermissions(permission);
-    const settingsKey = `${snapshot.preset}\0${modelKey(resolvedModel.selection)}`;
+    const settingsKey = `${snapshot.preset}\0${resolved.revision}`;
     if (!session || sessionSettings !== settingsKey) {
-      session = makeSession(handle, snapshot, resolvedModel.selection, modelClient);
+      session = makeSession(handle, snapshot, resolved);
       sessionSettings = settingsKey;
     }
     try {
@@ -561,7 +761,7 @@ async function main(): Promise<void> {
         }
       }
     } catch (error) {
-      renderer.handle({ type: 'error', error: { message: error instanceof Error ? error.message : String(error) } });
+      renderer.handle({ type: 'error', error: { message: errorMessage(error) } });
     }
     renderer.beforePrompt();
   }
@@ -571,6 +771,6 @@ async function main(): Promise<void> {
 }
 
 main().catch((error: unknown) => {
-  renderer.print(`  ${paintError(`启动失败：${sanitizeTerminal(error instanceof Error ? error.message : String(error))}`)}\n`);
+  renderer.print(`${sayIndent(paintError(`启动失败：${errorMessage(error)}`))}\n`);
   process.exitCode = 1;
 });

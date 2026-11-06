@@ -54,8 +54,20 @@ const FG_CODES: Record<AnsiColor, number> = {
   brightCyan: 96,
 };
 
+/** Color decision shared by the theme and `/color`, kept pure for tests. */
+export function colorEnabled(options: ThemeOptions = {}): boolean {
+  const env = options.env ?? process.env;
+  const forced = env['FORCE_COLOR'];
+  if (options.enabled !== undefined) return options.enabled;
+  return env['NO_COLOR'] === undefined
+    && forced !== '0'
+    && env['TERM'] !== 'dumb'
+    && (options.isTTY === true || (forced !== undefined && forced !== ''));
+}
+
 export interface Theme {
-  readonly enabled: boolean;
+  /** Live switch: `/color` flips this without rebuilding every consumer. */
+  enabled: boolean;
   paint(text: string, style?: Style): string;
   segments(segments: readonly Segment[]): string;
 }
@@ -68,25 +80,18 @@ export interface ThemeOptions {
 
 /** Color only when attached to a terminal, unless NO_COLOR/FORCE_COLOR says otherwise. */
 export function createTheme(options: ThemeOptions = {}): Theme {
-  const env = options.env ?? process.env;
-  const forced = env['FORCE_COLOR'];
-  const enabled = options.enabled ?? (
-    env['NO_COLOR'] === undefined
-    && forced !== '0'
-    && env['TERM'] !== 'dumb'
-    && (options.isTTY === true || (forced !== undefined && forced !== ''))
-  );
-  return {
-    enabled,
+  const theme: Theme = {
+    enabled: colorEnabled(options),
     paint(text, style) {
-      if (!enabled || style === undefined) return text;
+      if (!theme.enabled || style === undefined) return text;
       const codes = styleCodes(style);
       return codes.length === 0 ? text : `\x1b[${codes.join(';')}m${text}\x1b[0m`;
     },
     segments(segments) {
-      return paintSegments(segments, enabled);
+      return paintSegments(segments, theme.enabled);
     },
   };
+  return theme;
 }
 
 export function mergeStyle(base: Style, extra: Style): Style {

@@ -1,5 +1,6 @@
 import { describe, expect, it } from 'vitest';
 import { createTheme, stripAnsi } from './ansi';
+import { roleViolations } from './palette';
 import { MarkdownStream, parseInline, renderMarkdown, wrapSegments } from './markdown';
 import { TuiRenderer, sanitizeTerminal } from './render';
 import { describeToolCall, describeToolResult } from './tools';
@@ -36,7 +37,8 @@ describe('TUI terminal safety', () => {
       type: 'tool.result',
       result: { callId: 'c', name: 'bash', ok: false, content: '\u001b[2Jsecret\u001b[0m', truncated: false },
     });
-    expect(tool.output()).toContain('\x1b[31m✗\x1b[0m');
+    expect(tool.output()).toContain('\x1b[31m●\x1b[0m');
+    expect(tool.output()).toContain('\x1b[31m工具 / 执行命令\x1b[0m');
     expect(tool.output()).not.toContain('\u001b[2J');
 
     const error = renderer();
@@ -111,11 +113,13 @@ describe('TuiRenderer blocks', () => {
   function harness(options: {
     thinking?: 'full' | 'compact' | 'off';
     verbose?: boolean;
+    interactive?: boolean;
+    color?: boolean;
   } = {}): { output: () => string; text: () => string; tui: TuiRenderer } {
     let output = '';
     const tui = new TuiRenderer({
       write: (chunk) => { output += chunk; },
-      theme: createTheme({ enabled: false }),
+      theme: createTheme({ enabled: options.color ?? false }),
       interactive: false,
       width: () => 80,
       ...options,
@@ -141,11 +145,89 @@ describe('TuiRenderer blocks', () => {
 
     const output = text();
     expect(output).toContain('✻ 思考');
-    expect(output).toContain('先分析需求。');
+    expect(output).toContain('┊ 先分析需求。');
+    expect(output).toContain('Assistant');
     expect(output).toContain('结果');
-    expect(output).toContain('✓ 读取文件 · README.md · 2 行 · 12ms');
+    expect(output).toContain('● 工具 / 读取文件 · README.md · 2 行 · 12ms');
     expect(output).toContain('│    1  # Hi');
+    expect(output).toContain('✓ 完成');
     expect(output).not.toContain('```');
+  });
+
+  it('separates reasoning, body, tool, and turn summary by left edge', () => {
+    const { text, tui } = harness();
+    tui.handle({ type: 'turn.start', step: 0 });
+    tui.handle({ type: 'assistant.reasoning.delta', text: '先想一下。\n' });
+    tui.handle({ type: 'assistant.delta', text: '答案。\n' });
+    tui.handle({ type: 'assistant.message', message: { role: 'assistant', content: [{ type: 'text', text: '答案。' }], toolCalls: [] } });
+    tui.handle({ type: 'tool.call', call: { id: 'c1', name: 'list_dir', arguments: { path: '.' } } });
+    tui.handle({ type: 'tool.result', result: { callId: 'c1', name: 'list_dir', ok: true, truncated: false, content: '3 项\na\nb' } });
+    tui.handle({ type: 'turn.end', reason: 'end_turn' });
+    tui.beforePrompt();
+
+    const lines = text().split('\n');
+    const reasoning = lines.find((line) => line.includes('先想一下')) ?? '';
+    const body = lines.find((line) => line.trim() === '答案。') ?? '';
+    const toolBody = lines.find((line) => line.includes('工具 / 浏览目录')) ?? '';
+    const summary = lines.find((line) => line.includes('完成')) ?? '';
+    // 四类内容的左缘互不相同：思考用 ┊，工具体用 │，正文与引导符各自列位。
+    expect(reasoning.trimStart().startsWith('┊')).toBe(true);
+    expect(body.startsWith('  答案。')).toBe(true);
+    expect(toolBody.startsWith('  ● ')).toBe(true);
+    expect(summary.startsWith('  ✓ ')).toBe(true);
+    expect(body.includes('┊')).toBe(false);
+    expect(body.includes('│')).toBe(false);
+    // 同类块之间不留空行，跨类块之间正好一个。
+    expect(text()).not.toContain('\n\n\n');
+  });
+
+  it('paints tool headers by outcome instead of one neutral color', () => {
+    const { output, tui } = harness({ color: true });
+    tui.handle({ type: 'tool.call', call: { id: 'c1', name: 'bash', arguments: { command: 'true' } } });
+    tui.handle({ type: 'tool.result', result: { callId: 'c1', name: 'bash', ok: true, truncated: false, content: 'exit code: 0' } });
+    tui.handle({ type: 'tool.call', call: { id: 'c2', name: 'bash', arguments: { command: 'false' } } });
+    tui.handle({ type: 'tool.result', result: { callId: 'c2', name: 'bash', ok: false, truncated: false, content: 'exit code: 1\nboom' } });
+    expect(output()).toContain('\x1b[32m●\x1b[0m');
+    expect(output()).toContain('\x1b[31m●\x1b[0m');
+    // 失败工具的体部转红，避免只有头部变色。
+    expect(output()).toContain('\x1b[31mboom\x1b[0m');
+  });
+
+  it('keeps every SGR inside the ANSI-16 role palette', () => {
+    const { output, tui } = harness({ color: true });
+    tui.handle({ type: 'turn.start', step: 0 });
+    tui.handle({ type: 'assistant.reasoning.delta', text: '想。\n' });
+    tui.handle({ type: 'assistant.delta', text: '# 标题\n\n`code` 和 [链接](https://example.com)\n' });
+    tui.handle({ type: 'assistant.message', message: { role: 'assistant', content: [{ type: 'text', text: '# 标题\n\n`code` 和 [链接](https://example.com)' }], toolCalls: [] } });
+    tui.handle({ type: 'tool.call', call: { id: 'c1', name: 'read_file', arguments: { path: 'a.txt' } } });
+    tui.handle({ type: 'tool.result', result: { callId: 'c1', name: 'read_file', ok: true, truncated: false, content: '# a.txt（共 1 行）\n    1\tone' } });
+    tui.handle({ type: 'turn.end', reason: 'end_turn' });
+    expect(roleViolations(output())).toEqual([]);
+    // 内收文字走 dim（SGR 2），不再用固定的亮灰 90。
+    expect(output()).toContain('\x1b[2m');
+    expect(output()).not.toContain('\x1b[90m');
+  });
+
+  it('shows a waiting spinner only until content arrives', () => {
+    const { output, tui } = harness({ interactive: true });
+    tui.handle({ type: 'turn.start', step: 0 });
+    expect(output()).toContain('等待模型');
+    tui.handle({ type: 'assistant.delta', text: '答。\n' });
+    // 正文已经有了，就不再需要「还在动」的提示；转圈被原地清掉。
+    expect(output()).toContain('\r\x1b[2K');
+    tui.handle({ type: 'assistant.message', message: { role: 'assistant', content: [{ type: 'text', text: '答。' }], toolCalls: [] } });
+    tui.handle({ type: 'turn.end', reason: 'end_turn' });
+    expect(output()).not.toContain('等待模型 0.0s\r\x1b[2K  ⠋ 等待模型\r');
+  });
+
+  it('ticks the pending tool card so long tools are not silent', () => {
+    const { output, tui } = harness({ interactive: true });
+    tui.handle({ type: 'tool.call', call: { id: 'c1', name: 'bash', arguments: { command: 'sleep 1' } } });
+    expect(output()).toContain('○ 工具 / 执行命令');
+    tui.handle({ type: 'tool.result', result: { callId: 'c1', name: 'bash', ok: true, truncated: false, content: 'exit code: 0' } });
+    // 结果行原地覆写待定行，不留两行相同的卡片。
+    expect(output().match(/工具 \/ 执行命令/g)).toHaveLength(2);
+    expect(output()).toContain('\r\x1b[2K  ● 工具 / 执行命令');
   });
 
   it('renders assistant text when the provider does not stream', () => {

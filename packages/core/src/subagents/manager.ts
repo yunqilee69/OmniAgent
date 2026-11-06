@@ -7,9 +7,11 @@ import type { AgentEvent } from '../protocol/events';
 import type { AuditEntry } from '../store/audit';
 import type { ModelClient } from '../providers/types';
 import type { SessionOptions } from '../session';
-import { DEFAULT_SYSTEM_PROMPT, Session } from '../session';
-import { createModelSelectionEvent, projectModelSelection, SessionModelSelectionSchema } from '../session/model-selection';
-import type { ModelChoice, SessionModelSelection } from '../session/model-selection';
+import { Session } from '../session';
+import { createAgentSelectionEvent, projectAgentSelection } from '../session/agent-selection';
+import { createModelSelectionEvent as createBindingEvent, defaultModelBinding, ModelBindingSchema, projectModelSelection as projectBinding } from '../session/model-binding';
+import type { ModelBinding } from '../session/model-binding';
+import type { ResolvedSessionRuntime, RuntimeResolver } from '../session/runtime';
 import { resolveInsidePhysical } from '../tools/paths';
 import type { SessionHandle, SessionStore } from '../session/store';
 import {
@@ -33,19 +35,17 @@ const MAX_RESULT_CHARS = 8_000;
 
 export interface SubagentManagerOptions {
   store: SessionStore;
-  createModel(selection: SessionModelSelection | undefined): ModelClient;
-  modelIdFor?(selection: SessionModelSelection | undefined): string | undefined;
-  modelCatalog?: ModelChoice[] | (() => ModelChoice[]);
-  defaultModelSelection?: SessionModelSelection;
-  systemForChild?(input: { cwd: string; parent: Session }): string | Promise<string> | undefined;
+  /** Fallback for demo mode when the resolved role has no configured client. */
+  createModel(): ModelClient;
   maxSteps?: number;
-  contextWindowTokens?(selection: SessionModelSelection | undefined): number | undefined;
   retainContextTokens?: number;
   approve?: SessionOptions['approve'];
   audit?: (entry: AuditEntry, workspace: string) => void | Promise<void>;
   maxDepth?: number;
   maxActive?: number;
   onBackgroundEvent?(sessionId: string, event: AgentEvent): void;
+  /** Resolves configured agents, roles, skills, and tool profiles for children. */
+  runtime: RuntimeResolver;
 }
 
 interface ManagedChild {
@@ -55,6 +55,7 @@ interface ManagedChild {
   parent?: Session;
   parentHandle?: SessionHandle;
   status: SubagentStatus;
+  agent: string;
   result?: string;
   queue: Promise<void>;
   started?: Promise<void>;
@@ -143,7 +144,9 @@ export class SubagentManager implements SubagentService {
       const cwd = request.cwd
         ? await resolveInsidePhysical(parent.cwd, request.cwd)
         : parent.cwd;
-      const selection = this.selectModel(parent, request);
+      const agentId = request.agent ?? parent.agent?.id ?? 'default';
+      const binding = this.selectBinding(request);
+      const runtime = await this.options.runtime.resolve({ cwd, agentId, binding, isRoot: false });
 
       const depth = parent.depth + 1;
       const handle = await this.options.store.create({
@@ -154,14 +157,16 @@ export class SubagentManager implements SubagentService {
         description,
       });
       await handle.append(createInitialDshPermissionEvent(permissions.preset));
-      if (selection) await handle.append(createModelSelectionEvent(selection));
+      await handle.append(createAgentSelectionEvent(agentId));
+      await handle.append(createBindingEvent(binding));
 
-      const child = await this.createSession(handle, selection, permissions, depth, parent);
+      const child = await this.createSession(handle, permissions, depth, parent, runtime);
       const info: SubagentInfo = {
         id: handle.id,
         parentId: parent.id,
         depth,
         description,
+        agent: runtime.agent.id,
         status: 'running',
         createdAt: handle.header.createdAt,
         updatedAt: Date.now(),
@@ -173,6 +178,7 @@ export class SubagentManager implements SubagentService {
         parent,
         parentHandle,
         status: 'running',
+        agent: runtime.agent.id,
         queue: Promise.resolve(),
       };
       this.children.set(handle.id, managed);
@@ -304,64 +310,54 @@ export class SubagentManager implements SubagentService {
     await Promise.all(running.map((child) => child.settled?.catch(() => undefined)).filter(Boolean));
   }
 
-  private selectModel(parent: Session, request: SubagentStartRequest): SessionModelSelection | undefined {
-    const hasRoute = request.provider !== undefined || request.model !== undefined;
-    let selection: SessionModelSelection | undefined;
-    if (hasRoute) {
+  private selectBinding(request: SubagentStartRequest): ModelBinding {
+    if (request.role !== undefined && (request.provider !== undefined || request.model !== undefined)) {
+      throw new Error('role cannot be combined with provider/model');
+    }
+    if (request.provider !== undefined || request.model !== undefined) {
       if (!request.provider || !request.model) throw new Error('provider and model must be supplied together');
-      selection = {
-        version: 1,
+      return ModelBindingSchema.parse({
+        version: 2,
+        kind: 'model',
         provider: request.provider,
         model: request.model,
         ...(request.reasoningEffort === undefined ? {} : { reasoningEffort: request.reasoningEffort }),
-      };
-    } else if (request.reasoningEffort !== undefined) {
-      if (!parent.modelSelection) throw new Error('reasoning_effort requires an inherited or explicit model');
-      selection = { ...parent.modelSelection, reasoningEffort: request.reasoningEffort };
-    } else {
-      selection = parent.modelSelection ?? this.options.defaultModelSelection;
+      });
     }
-    if (selection !== undefined) SessionModelSelectionSchema.parse(selection);
-    const catalog = typeof this.options.modelCatalog === 'function'
-      ? this.options.modelCatalog()
-      : this.options.modelCatalog;
-    if (selection && catalog && catalog.length > 0
-      && !catalog.some((choice) => choice.provider === selection!.provider && choice.model === selection!.model)) {
-      throw new Error(`Model ${selection.provider}/${selection.model} is not available in the current configuration`);
+    if (request.reasoningEffort !== undefined) {
+      throw new Error('reasoning_effort requires an explicit provider/model for a configured agent');
     }
-    return selection;
+    if (request.role !== undefined) {
+      return ModelBindingSchema.parse({ version: 2, kind: 'role', role: request.role });
+    }
+    return defaultModelBinding();
   }
 
   private async createSession(
     handle: SessionHandle,
-    selection: SessionModelSelection | undefined,
     permissions: NonNullable<Session['dshPermissions']>,
     depth: number,
-    parent?: Session,
+    parent: Session | undefined,
+    runtime: ResolvedSessionRuntime,
   ): Promise<Session> {
-    const model = this.options.createModel(selection);
+    const model = runtime.model ?? this.options.createModel();
     let session!: Session;
     const creator = parent?.id ?? handle.header.parentSessionId ?? 'unknown';
     const identity = `\n\nYou are a subagent delegated by agent ${JSON.stringify(creator)}. `
       + `Your agent id is ${JSON.stringify(handle.id)}. Work independently on the delegated task, `
       + 'report the result directly, and do not assume the parent can see your files or conversation.';
-    const configuredSystem = parent
-      ? await this.options.systemForChild?.({ cwd: handle.header.cwd, parent })
-      : undefined;
-    const base = configuredSystem ?? parent?.baseSystemPrompt ?? DEFAULT_SYSTEM_PROMPT;
-    const system = `${base}${identity}`;
-    const modelId = this.options.modelIdFor?.(selection) ?? selection?.model;
-    const contextWindowTokens = this.options.contextWindowTokens?.(selection);
+    const system = `${runtime.system}${identity}`;
     session = new Session({
       cwd: handle.header.cwd,
       workspace: handle.header.workspace,
       model,
-      ...(modelId === undefined ? {} : { modelId }),
-      modelSelection: selection,
+      ...(runtime.modelId === undefined ? {} : { modelId: runtime.modelId }),
+      agent: runtime.sessionAgent,
+      modelCapabilities: runtime.capabilities,
       system,
       dshPermissions: snapshotDshPermissions({ status: 'ready', preset: permissions.preset }),
       maxSteps: this.options.maxSteps,
-      ...(contextWindowTokens === undefined ? {} : { contextWindowTokens }),
+      ...(runtime.contextWindowTokens === undefined ? {} : { contextWindowTokens: runtime.contextWindowTokens }),
       ...(this.options.retainContextTokens === undefined ? {} : { retainContextTokens: this.options.retainContextTokens }),
       ...(this.options.approve === undefined ? {} : { approve: this.options.approve }),
       ...(this.options.audit === undefined
@@ -488,11 +484,16 @@ export class SubagentManager implements SubagentService {
     if (!handle.header.parentSessionId) throw new Error(`Agent ${targetId} is not a subagent`);
     const permissions = projectDshPermissions(handle.events);
     if (permissions.status !== 'ready') throw new Error(`Agent ${targetId} has no valid permission preset`);
-    const modelProjection = projectModelSelection(handle.events);
-    if (modelProjection.status === 'invalid') throw new Error(`Agent ${targetId} has an invalid model selection`);
-    const selection = modelProjection.status === 'selected'
-      ? modelProjection.selection
-      : this.options.defaultModelSelection;
+    const agentProjection = projectAgentSelection(handle.events);
+    if (agentProjection.status !== 'selected') throw new Error(`Agent ${targetId} has no valid agent selection`);
+    const bindingProjection = projectBinding(handle.events);
+    if (bindingProjection.status !== 'selected') throw new Error(`Agent ${targetId} has no valid model selection`);
+    const runtime = await this.options.runtime.resolve({
+      cwd: handle.header.cwd,
+      agentId: agentProjection.agent,
+      binding: bindingProjection.binding,
+      isRoot: false,
+    });
     const parent = this.live.get(handle.header.parentSessionId);
     let parentHandle: SessionHandle | undefined;
     try {
@@ -502,10 +503,10 @@ export class SubagentManager implements SubagentService {
     }
     const session = await this.createSession(
       handle,
-      selection,
       snapshotDshPermissions(permissions),
       handle.header.depth ?? summary.depth ?? 1,
       parent,
+      runtime,
     );
     const status = lastTurnState(handle.events);
     const result = clipResult(lastAssistant(handle.events));
@@ -514,6 +515,7 @@ export class SubagentManager implements SubagentService {
       parentId: handle.header.parentSessionId,
       depth: handle.header.depth ?? summary.depth ?? 1,
       ...(handle.header.description === undefined ? {} : { description: handle.header.description }),
+      agent: runtime.agent.id,
       status,
       createdAt: handle.header.createdAt,
       updatedAt: handle.events.at(-1)?.ts ?? handle.header.createdAt,
@@ -526,6 +528,7 @@ export class SubagentManager implements SubagentService {
       ...(parent === undefined ? {} : { parent }),
       ...(parentHandle === undefined ? {} : { parentHandle }),
       status,
+      agent: runtime.agent.id,
       ...(result === undefined ? {} : { result }),
       queue: Promise.resolve(),
     };
@@ -598,11 +601,13 @@ export class SubagentManager implements SubagentService {
     }
     const events = handle?.events ?? [];
     const result = handle ? clipResult(lastAssistant(events)) : undefined;
+    const agentSelection = handle ? projectAgentSelection(events) : { status: 'legacy' as const, agent: null };
     return {
       id: summary.id,
       ...(summary.parentSessionId === undefined ? {} : { parentId: summary.parentSessionId }),
       depth: summary.depth ?? 0,
       ...(summary.description === undefined ? {} : { description: summary.description }),
+      ...(agentSelection.status === 'selected' ? { agent: agentSelection.agent } : {}),
       status: handle ? lastTurnState(events) : 'idle',
       createdAt: summary.createdAt,
       updatedAt: handle?.events.at(-1)?.ts ?? summary.createdAt,

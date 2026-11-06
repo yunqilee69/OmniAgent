@@ -1,4 +1,4 @@
-import type { ReasoningEffort } from '../session/model-selection';
+import type { ReasoningEffort } from '../protocol/reasoning';
 import type { Session } from '../session';
 
 export const SUBAGENT_START_EVENT = 'subagent/start';
@@ -11,6 +11,10 @@ export interface SubagentStartRequest {
   description: string;
   prompt: string;
   cwd?: string;
+  /** Target configured agent. Defaults to the parent's agent. */
+  agent?: string;
+  /** Optional role override for the child model. */
+  role?: string;
   provider?: string;
   model?: string;
   reasoningEffort?: ReasoningEffort;
@@ -26,6 +30,7 @@ export interface SubagentInfo {
   parentId?: string;
   depth: number;
   description?: string;
+  agent?: string;
   status: SubagentStatus;
   createdAt: number;
   updatedAt: number;

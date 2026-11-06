@@ -1,4 +1,5 @@
 import type { AssistantMessage, Usage } from '../domain/message';
+import type { ModelReasoning } from '../config/models';
 import type { ModelResponse } from './types';
 
 export const DEFAULT_DSH_MODEL = 'deepseek-flash';
@@ -31,6 +32,7 @@ export type DshStreamDelta =
 export interface DshRequestOptions {
   maxTokens?: number;
   reasoningEffort?: DshReasoningEffort;
+  reasoning?: ModelReasoning;
   systemPromptUpdate?: 'in-history' | 'latest';
 }
 export interface DeepSeekMessagesOptions extends DshRequestOptions {

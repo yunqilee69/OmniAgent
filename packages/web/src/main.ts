@@ -1,11 +1,19 @@
 import { homedir } from 'node:os';
 import { join } from 'node:path';
 import {
-  DEFAULT_SYSTEM_PROMPT, FakeModel, Session, SessionStore, SubagentManager, createConfiguredModel,
-  createSelectedModel, defaultConfigDir, defaultModelSelection, discoverSkills, listConfiguredModels,
-  renderSkillCatalog, resolveContextWindowTokens, textResponse,
+  AgentCatalog,
+  ConfigStore,
+  FakeModel,
+  RuntimeResolver,
+  Session,
+  SessionStore,
+  SubagentManager,
+  defaultConfigDir,
+  listCatalogModels,
+  supportedReasoningEfforts,
+  textResponse,
 } from '@omniagent/core';
-import type { ModelClient, SessionModelSelection } from '@omniagent/core';
+import type { AgentSummary, RoleSummary } from './server';
 import { readWorkspaceAudit, recordWorkspaceAudit } from './audit';
 import { ApprovalBroker } from './approval';
 import { PermissionSettings } from './permissions';
@@ -15,10 +23,9 @@ import { WorkspaceRegistry } from './workspaces';
 async function main(): Promise<void> {
   const configDir = defaultConfigDir();
   const permissionSettings = await PermissionSettings.open(join(configDir, 'config.json'), { trustedHome: homedir() });
-  const config = permissionSettings.configSnapshot();
-  const configured = createConfiguredModel(config);
-  const modelCatalog = listConfiguredModels(config);
-  const initialModel = defaultModelSelection(config);
+  const configStore = await ConfigStore.open(join(configDir, 'config.json'));
+  const agents = new AgentCatalog(join(configDir, 'agents'));
+  const runtime = new RuntimeResolver({ configStore, agents });
   const store = new SessionStore(join(configDir, 'sessions'));
   const workspaces = new WorkspaceRegistry(join(configDir, 'workspaces.json'));
   const approvals = new ApprovalBroker();
@@ -26,63 +33,98 @@ async function main(): Promise<void> {
     [textResponse('当前未配置模型服务。请在 ~/.omniagent/config.json 配置 provider。')],
     { onExhausted: textResponse('当前未配置模型服务。') },
   );
-  const modelFor = (selection: SessionModelSelection | undefined): ModelClient =>
-    selection ? createSelectedModel(config, selection) : configured ?? demo;
-  const skillsFor = new Map<string, string>();
-  async function skillCatalog(cwd: string): Promise<string> {
-    const cached = skillsFor.get(cwd);
-    if (cached !== undefined) return cached;
-    let catalog: string;
-    try {
-      catalog = renderSkillCatalog(await discoverSkills({ workspace: cwd }));
-    } catch {
-      catalog = 'Skill discovery failed; do not infer a skill catalog this session.';
-    }
-    skillsFor.set(cwd, catalog);
-    return catalog;
-  }
+  const initialConfig = configStore.snapshot.config;
   const subagents = new SubagentManager({
     store,
-    createModel: modelFor,
-    modelIdFor: (selection) => selection?.model ?? config.model,
-    modelCatalog,
-    defaultModelSelection: initialModel,
-    systemForChild: async ({ cwd }) => [config.system ?? DEFAULT_SYSTEM_PROMPT, await skillCatalog(cwd)].filter(Boolean).join('\n\n'),
-    maxSteps: config.maxSteps,
-    contextWindowTokens: (selection) => resolveContextWindowTokens(config, selection),
-    ...(config.retainContextTokens === undefined ? {} : { retainContextTokens: config.retainContextTokens }),
+    createModel: () => demo,
+    runtime,
+    maxSteps: initialConfig.maxSteps,
+    ...(initialConfig.retainContextTokens === undefined ? {} : { retainContextTokens: initialConfig.retainContextTokens }),
     audit: (entry, workspacePath) => recordWorkspaceAudit(configDir, workspacePath, entry),
-    maxDepth: config.subagents?.maxDepth ?? 1,
-    maxActive: config.subagents?.maxActive ?? 8,
+    maxDepth: initialConfig.subagents?.maxDepth ?? 1,
+    maxActive: initialConfig.subagents?.maxActive ?? 8,
   });
+
+  async function listAgents(): Promise<AgentSummary[]> {
+    const snapshot = await configStore.refresh();
+    const catalog = await agents.refresh(snapshot.catalog);
+    const valid: AgentSummary[] = catalog.agents.map((agent) => ({
+      id: agent.id,
+      name: agent.name,
+      description: agent.description,
+      role: agent.role,
+      usage: agent.usage,
+      profile: agent.profile,
+      valid: true,
+      warnings: [],
+    }));
+    const invalid: AgentSummary[] = catalog.errors.map((error) => ({
+      id: error.id,
+      name: error.id,
+      description: '',
+      role: '',
+      usage: 'both',
+      profile: '',
+      valid: false,
+      warnings: [error.error],
+    }));
+    return [...valid, ...invalid].sort((left, right) => left.id.localeCompare(right.id));
+  }
+
+  async function listRoles(): Promise<RoleSummary[]> {
+    const snapshot = await configStore.refresh();
+    return [...snapshot.catalog.roles.values()]
+      .map((role) => ({
+        id: role.id,
+        name: role.name,
+        provider: role.provider,
+        model: role.model,
+        ...(role.reasoningEffort === undefined ? {} : { reasoningEffort: role.reasoningEffort }),
+      }))
+      .sort((left, right) => left.id.localeCompare(right.id));
+  }
+
   await workspaces.add(process.cwd());
   const host = await startWebHost({
     workspaces,
     store,
     permissionSettings,
     approvalBroker: approvals,
-    modelCatalog: () => modelCatalog,
-    defaultModelSelection: () => initialModel,
+    runtime,
+    modelCatalog: async () => {
+      const snapshot = await configStore.refresh();
+      return listCatalogModels(snapshot.catalog).map((model) => ({
+        provider: model.provider,
+        model: model.id,
+        name: model.name,
+        ...(model.contextWindow === undefined ? {} : { contextWindow: model.contextWindow }),
+        ...(model.maxTokens === undefined ? {} : { maxTokens: model.maxTokens }),
+        capabilities: model.capabilities,
+        reasoningEfforts: supportedReasoningEfforts(model),
+        ...(model.reasoning?.default === undefined ? {} : { defaultReasoningEffort: model.reasoning.default }),
+      }));
+    },
+    listAgents,
+    listRoles,
     readAudit: (workspace, sessionId) => readWorkspaceAudit(configDir, workspace.path, sessionId),
-    createSession: async (workspace, handle, permissions, selection) => {
-      const model = modelFor(selection);
-      const contextWindowTokens = resolveContextWindowTokens(config, selection);
-      const system = [config.system ?? DEFAULT_SYSTEM_PROMPT, await skillCatalog(workspace.path)].filter(Boolean).join('\n\n');
+    createRuntimeSession: async (workspace, handle, permissions, resolved) => {
+      const config = configStore.snapshot.config;
       return new Session({
         cwd: workspace.path,
         workspace: workspace.path,
-        model,
-        modelId: selection?.model ?? config.model,
-        ...(selection === undefined ? {} : { modelSelection: selection }),
+        model: resolved.model ?? demo,
+        ...(resolved.modelId === undefined ? {} : { modelId: resolved.modelId }),
+        agent: resolved.sessionAgent,
+        modelCapabilities: resolved.capabilities,
         dshPermissions: permissions,
         maxSteps: config.maxSteps,
-        ...(contextWindowTokens === undefined ? {} : { contextWindowTokens }),
+        ...(resolved.contextWindowTokens === undefined ? {} : { contextWindowTokens: resolved.contextWindowTokens }),
         ...(config.retainContextTokens === undefined ? {} : { retainContextTokens: config.retainContextTokens }),
         approve: approvals.handler(workspace.path, handle.id),
         reviewPlan: approvals.planHandler(workspace.path, handle.id),
         audit: (entry) => recordWorkspaceAudit(configDir, workspace.path, entry),
         session: handle,
-        system,
+        system: resolved.system,
         subagents,
       });
     },

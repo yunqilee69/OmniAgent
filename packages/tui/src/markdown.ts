@@ -118,13 +118,13 @@ export class MarkdownStream {
     }
 
     if (HR_PATTERN.test(line)) {
-      this.emitPlain(this.theme.paint('─'.repeat(Math.max(8, Math.min(this.width - this.prefixWidth - 2, 48))), { dim: true, fg: 'gray' }));
+      this.emitPlain(this.theme.paint('─'.repeat(Math.max(8, Math.min(this.width - this.prefixWidth - 2, 48))), { dim: true }));
       return;
     }
 
     const quote = QUOTE_PATTERN.exec(line);
     if (quote !== null) {
-      const rail = [{ text: '  │ ', style: { dim: true, fg: 'gray' } satisfies Style }];
+      const rail = [{ text: '  │ ', style: { dim: true } satisfies Style }];
       this.emitWrapped(addStyle(this.inline(quote[1] ?? ''), { dim: true, italic: true }), rail, rail);
       return;
     }
@@ -138,8 +138,8 @@ export class MarkdownStream {
     // Indented code blocks: keep the text but make it visually distinct.
     if (/^(?: {4}|\t)/.test(line)) {
       const body = line.replace(/^(?: {4}|\t)/, '');
-      const border = this.theme.paint('  │ ', { dim: true, fg: 'gray' });
-      this.write(`${this.prefix}${border}${this.theme.paint(body, { fg: 'gray' })}\n`);
+      const border = this.theme.paint('  │ ', { dim: true });
+      this.write(`${this.prefix}${border}${this.theme.paint(body, { dim: true })}\n`);
       return;
     }
 
@@ -164,7 +164,7 @@ export class MarkdownStream {
       bullet = task[1]?.toLowerCase() === 'x' ? '☑ ' : '☐ ';
       body = task[2] ?? '';
     }
-    const markerStyle: Style = { fg: 'gray' };
+    const markerStyle: Style = { dim: true };
     const first = [
       { text: indent, style: {} },
       { text: bullet, style: markerStyle },
@@ -204,15 +204,15 @@ export class MarkdownStream {
     const available = Math.max(12, this.width - this.prefixWidth - 4);
     const rule = Math.max(8, Math.min(contentWidth + 2, available));
     const heading = `  ╭─ ${label} ${'─'.repeat(Math.max(0, rule - label.length - 4))}`;
-    this.emitPlain(this.theme.paint(heading, { dim: true, fg: 'gray' }));
+    this.emitPlain(this.theme.paint(heading, { dim: true }));
     for (const line of fence.lines) {
       if (this.options.baseStyle === undefined) {
-        this.write(`${this.prefix}${this.theme.paint('  │ ', { dim: true, fg: 'gray' })}${highlightCode(line, language, this.theme)}\n`);
+        this.write(`${this.prefix}${this.theme.paint('  │ ', { dim: true })}${highlightCode(line, language, this.theme)}\n`);
       } else {
-        this.write(`${this.prefix}${this.theme.paint('  │ ', { dim: true, fg: 'gray' })}${this.theme.paint(line, { ...this.options.baseStyle, fg: 'gray' })}\n`);
+        this.write(`${this.prefix}${this.theme.paint('  │ ', { dim: true })}${this.theme.paint(line, { ...this.options.baseStyle, dim: true })}\n`);
       }
     }
-    this.emitPlain(this.theme.paint(`  ╰${'─'.repeat(rule)}`, { dim: true, fg: 'gray' }));
+    this.emitPlain(this.theme.paint(`  ╰${'─'.repeat(rule)}`, { dim: true }));
   }
 
   private flushTable(): void {
@@ -250,7 +250,7 @@ export class MarkdownStream {
       return;
     }
 
-    const dim = (text: string): string => this.theme.paint(text, { dim: true, fg: 'gray' });
+    const dim = (text: string): string => this.theme.paint(text, { dim: true });
     for (const [rowIndex, row] of cells.entries()) {
       const parts: string[] = [];
       for (const [column, width] of widths.entries()) {
@@ -317,9 +317,9 @@ export function parseInline(text: string): Segment[] {
     if (char === '!' && text[index + 1] === '[') {
       const link = parseLinkAt(text, index + 1);
       if (link !== undefined) {
-        push('🖼 ', { fg: 'gray' });
+        push('🖼 ', { dim: true });
         push(link.label.length > 0 ? link.label : '图片', { fg: 'brightCyan', underline: true });
-        if (link.destination.length > 0) push(` (${link.destination})`, { dim: true, fg: 'gray' });
+        if (link.destination.length > 0) push(` (${link.destination})`, { dim: true });
         index = link.end;
         continue;
       }
@@ -330,7 +330,7 @@ export function parseInline(text: string): Segment[] {
       if (link !== undefined) {
         push(link.label, { fg: 'brightCyan', underline: true });
         if (link.destination.length > 0 && link.destination !== link.label) {
-          push(` (${link.destination})`, { dim: true, fg: 'gray' });
+          push(` (${link.destination})`, { dim: true });
         }
         index = link.end;
         continue;

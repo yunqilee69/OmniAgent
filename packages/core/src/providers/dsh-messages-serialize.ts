@@ -23,6 +23,7 @@ import { isDeepStrictEqual } from 'node:util';
 import type { AssistantMessage, ContentPart, ToolCall } from '../domain/message';
 import type { ModelRequest } from './types';
 import { DeepSeekMessagesError, DSH_BASE_URL, DSH_MAX_TOKENS } from './dsh-messages-types';
+import { setWireField } from './wire';
 import { replayEndpointHash } from './replay-identity';
 import type { DshReplayBlock, DshRequestOptions, DshWireBlock, DshWireInput, DshWireMessage, DshWireRequest } from './dsh-messages-types';
 
@@ -98,8 +99,12 @@ export function serializeDshRequest(
 ): DshWireRequest {
   const maxTokens = options.maxTokens ?? DSH_MAX_TOKENS;
   if (!Number.isSafeInteger(maxTokens) || maxTokens <= 0) return invalid('DeepSeek Messages maxTokens must be a positive safe integer');
-  const effort = options.reasoningEffort ?? 'high';
-  if (!['off', 'low', 'high', 'max'].includes(effort)) return invalid('DeepSeek Messages unsupported reasoning effort');
+  const reasoning = options.reasoning;
+  const effort = options.reasoningEffort ?? reasoning?.default ?? 'high';
+  const allowedEfforts = reasoning?.efforts === undefined
+    ? ['off', 'low', 'high', 'max']
+    : Object.keys(reasoning.efforts);
+  if (!allowedEfforts.includes(effort)) return invalid('DeepSeek Messages unsupported reasoning effort');
   if (!request.model) return invalid('DeepSeek Messages model must be non-empty');
   const inHistory = (options.systemPromptUpdate ?? (request.model === 'deepseek-flash' ? 'in-history' : 'latest')) === 'in-history';
   const messages: DshWireMessage[] = [];
@@ -149,11 +154,29 @@ export function serializeDshRequest(
   }
   if (pending.size) return invalid('DeepSeek Messages history ends with unresolved tool calls');
   const system = [request.system, historySystem].filter(Boolean).join('\n\n');
-  return {
+  const nativeEffort = ['off', 'low', 'high', 'max'].includes(effort);
+  const body: DshWireRequest = {
     model: request.model, stream: true, max_tokens: maxTokens, messages,
     thinking: { type: effort === 'off' ? 'disabled' : 'enabled' },
-    ...(effort === 'off' ? {} : { output_config: { effort } }),
+    ...(effort === 'off' || !nativeEffort ? {} : { output_config: { effort: effort as 'low' | 'high' | 'max' } }),
     ...(system ? { system } : {}),
     ...(request.tools.length ? { tools: request.tools.map((tool) => ({ name: tool.name, description: tool.description, input_schema: tool.parameters })) } : {}),
   };
+  if (reasoning?.wire !== undefined) {
+    const wire = reasoning.wire;
+    const payload = body as unknown as Record<string, unknown>;
+    if (effort === 'off') {
+      if (wire.disableField !== undefined) setWireField(payload, wire.disableField, wire.disableValue ?? null);
+    } else {
+      if (wire.enableField !== undefined) setWireField(payload, wire.enableField, wire.enableValue ?? true);
+      const budget = reasoning.budgets?.[effort];
+      if (budget !== undefined && wire.budgetField !== undefined) {
+        setWireField(payload, wire.budgetField, budget);
+      } else if (wire.effortField !== undefined) {
+        const value = reasoning.efforts[effort];
+        if (value !== null && value !== undefined) setWireField(payload, wire.effortField, value);
+      }
+    }
+  }
+  return body;
 }

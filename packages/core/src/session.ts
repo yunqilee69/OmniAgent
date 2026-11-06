@@ -18,7 +18,7 @@ import type { AuditSink } from './store/audit';
 import { createDefaultRegistry, ToolRegistry } from './tools';
 import { listDirTool } from './tools/builtin/list-dir';
 import { readFileTool } from './tools/builtin/read-file';
-import { skillTool } from './tools/builtin/skill';
+import { skillTool, createSkillTool } from './tools/builtin/skill';
 import { writeFileTool } from './tools/builtin/write-file';
 import { createDshShellTool } from './tools/builtin/dsh-shell';
 import { createTodoWriteTool } from './tools/builtin/todo-write';
@@ -42,7 +42,9 @@ import { AgentLoop, DEFAULT_MAX_STEPS } from './loop/agent-loop';
 import type { PreparedToolCall } from './loop/agent-loop';
 import type { SessionHandle } from './session/store';
 import { projectMessages } from './session/projection';
-import type { SessionModelSelection } from './session/model-selection';
+import type { SessionAgent } from './session/runtime';
+import type { ModelCapabilities } from './config/models';
+import { DEFAULT_SYSTEM_PROMPT } from './prompts';
 
 /**
  * 组合根（composition root）。
@@ -51,23 +53,17 @@ import type { SessionModelSelection } from './session/model-selection';
  * 其他模块互相之间只认接口，不认具体实现。
  */
 
-export const DEFAULT_SYSTEM_PROMPT = `你是一个运行在用户本机的个人智能体。
-
-工作方式：
-- 需要了解文件时先列目录或读取，不要凭空猜测内容。
-- 修改文件用 write_file，写入前先读一遍确认当前内容。
-- 需要执行命令时使用 bash；它受当前会话的沙盒策略限制。
-- 多步骤任务先使用 todo_write 建立任务清单，并在推进过程中更新状态。
-- 复杂或可并行的调查可以交给 subagent；它会继承你的工作区、模型和权限预设。
-- 每次工具调用都会经过权限检查，被拒绝时不要重复同样的调用，换一种做法或直接说明。
-- 回答保持简洁，说明你做了什么、结果如何。`;
+export { DEFAULT_SYSTEM_PROMPT } from './prompts';
 
 export interface SessionOptions {
   cwd: string;
   workspace?: string;
   model: ModelClient;
   modelId?: string;
-  modelSelection?: SessionModelSelection;
+  /** Resolved agent profile; absent keeps the unrestricted default tool set. */
+  agent?: SessionAgent;
+  /** Known capabilities of the selected model. */
+  modelCapabilities?: ModelCapabilities;
   system?: string;
   /** Legacy fields are retained for source compatibility and never authorize calls. */
   mode?: PermissionMode;
@@ -107,7 +103,8 @@ export class Session {
   private readonly baseSystem: string;
   private readonly cwdValue: string;
   private readonly workspacePath?: string;
-  private readonly modelSelectionValue?: SessionModelSelection;
+  private readonly agentValue?: SessionAgent;
+  private readonly modelCapabilities?: ModelCapabilities;
   private readonly subagents?: SubagentService;
   private readonly reviewPlanHandler?: SessionOptions['reviewPlan'];
   private readonly onBackgroundEvent?: SessionOptions['onBackgroundEvent'];
@@ -120,7 +117,8 @@ export class Session {
     this.id = options.session?.id ?? options.sessionId ?? `s_${Date.now().toString(36)}`;
     this.#dshPermissions = copyDshPermissions(options.dshPermissions);
     this.workspacePath = options.workspace ?? options.session?.header.workspace;
-    this.modelSelectionValue = options.modelSelection;
+    this.agentValue = options.agent;
+    this.modelCapabilities = options.modelCapabilities;
     this.subagents = options.subagents;
     this.reviewPlanHandler = options.reviewPlan;
     this.onBackgroundEvent = options.onBackgroundEvent;
@@ -133,12 +131,18 @@ export class Session {
 
     const cwd = options.cwd;
     const approve = options.approve;
+    const allows = (name: string): boolean => this.allowsTool(name);
     this.tools = new ToolRegistry();
     for (const tool of (options.tools ?? createDefaultRegistry()).list()) {
+      if (!allows(tool.name)) continue;
       if (tool === writeFileTool) {
         this.dshWrite = dshWriteFileTool({ mode: 'read-only', workspaceRoot: options.cwd });
         this.tools.register(this.dshWrite);
         this.trusted.add(this.dshWrite);
+      } else if (tool === skillTool && options.agent !== undefined) {
+        const restricted = createSkillTool({ allowed: options.agent.skills });
+        this.tools.register(restricted);
+        this.trusted.add(restricted);
       } else {
         this.tools.register(tool);
         // Confined modes have no sandbox policy for arbitrary extension tools,
@@ -147,27 +151,29 @@ export class Session {
         if (this.#dshPermissions?.sandbox === 'danger-full-access') this.trusted.add(tool);
       }
     }
-    if (!this.tools.has('bash')) {
+    if (allows('bash') && !this.tools.has('bash')) {
       this.dshShell = createDshShellTool({
         policy: { mode: this.#dshPermissions?.sandbox ?? 'read-only', workspaceRoot: options.cwd },
       });
       this.tools.register(this.dshShell);
       this.trusted.add(this.dshShell);
     }
-    this.trusted.add(readFileTool);
-    this.trusted.add(listDirTool);
-    this.trusted.add(skillTool);
+    if (allows('read_file')) this.trusted.add(readFileTool);
+    if (allows('list_dir')) this.trusted.add(listDirTool);
+    if (allows('skill')) this.trusted.add(skillTool);
 
-    const todoTool = createTodoWriteTool({
-      append: async (todos: TodoItem[]) => {
-        if (!this.session) throw new Error('todo_write requires an owning session');
-        await this.session.append({ type: TODO_WRITE_EVENT, data: { todos } });
-      },
-    });
-    this.tools.register(todoTool);
-    this.trusted.add(todoTool);
+    if (allows('todo_write')) {
+      const todoTool = createTodoWriteTool({
+        append: async (todos: TodoItem[]) => {
+          if (!this.session) throw new Error('todo_write requires an owning session');
+          await this.session.append({ type: TODO_WRITE_EVENT, data: { todos } });
+        },
+      });
+      this.tools.register(todoTool);
+      this.trusted.add(todoTool);
+    }
 
-    if (this.reviewPlanHandler) {
+    if (allows('exit_plan_mode') && this.reviewPlanHandler) {
       const exitPlanTool = createExitPlanModeTool({
         review: (plan, signal) => this.reviewPlanHandler!(plan, signal),
         onApproved: async () => {
@@ -180,6 +186,7 @@ export class Session {
 
     if (this.subagents) {
       for (const tool of createSubagentTools(this, this.subagents)) {
+        if (!allows(tool.name)) continue;
         this.tools.register(tool);
         this.trusted.add(tool);
       }
@@ -229,8 +236,13 @@ export class Session {
     return this.session?.header.parentSessionId;
   }
 
-  get modelSelection(): SessionModelSelection | undefined {
-    return this.modelSelectionValue;
+  get agent(): SessionAgent | undefined {
+    return this.agentValue;
+  }
+
+  private allowsTool(name: string): boolean {
+    const tools = this.agentValue?.tools;
+    return tools === undefined || tools === '*' || tools.has(name);
   }
 
   get planMode(): boolean {
@@ -239,10 +251,6 @@ export class Session {
 
   get systemPrompt(): string {
     return this.planActive ? `${this.baseSystem}\n\n${PLAN_MODE_GUIDANCE}` : this.baseSystem;
-  }
-
-  get baseSystemPrompt(): string {
-    return this.baseSystem;
   }
 
   get sessionHandle(): SessionHandle | undefined {
@@ -311,6 +319,12 @@ export class Session {
 
   private async *runTurn(background: boolean): AsyncGenerator<AgentEvent> {
     if (this.controller) throw new Error('A turn is already active in this session');
+    if (this.planActive && !this.allowsTool(EXIT_PLAN_MODE_TOOL_NAME)) {
+      throw new Error('The current agent profile must allow exit_plan_mode while plan mode is active');
+    }
+    if (this.modelCapabilities !== undefined && !this.modelCapabilities.imageInput && containsImage(this.history)) {
+      throw new Error('The selected model does not support image input');
+    }
     const controller = new AbortController();
     this.controller = controller;
     let generator: AsyncGenerator<AgentEvent, Message[]> | undefined;
@@ -455,6 +469,7 @@ export class Session {
     signal.throwIfAborted();
 
     const tool = tools.get(call.name);
+    if (tool && !this.allowsTool(tool.name)) return deny('Tool is not available to this agent');
     let cleanCall: ToolCall = call;
     let mode = snapshot.sandbox;
     const args = call.arguments;
@@ -577,8 +592,12 @@ export class Session {
   }
 }
 
-function formatSubagentNotice(notice: SubagentNotice): string {
-  const title = `[Subagent ${notice.childId} ${notice.status}]`;
+function containsImage(history: readonly Message[]): boolean {
+  return history.some((message) =>
+    message.role === 'user' && message.content.some((part) => part.type === 'image'));
+}
+
+function formatSubagentNotice(notice: SubagentNotice): string {  const title = `[Subagent ${notice.childId} ${notice.status}]`;
   const description = notice.description ? `\n${notice.description}` : '';
   const result = notice.result?.trim() ? `\n\n${notice.result.trim()}` : '';
   return `${title}${description}${result}\n\nReview the result before relying on it; open the child session for full details.`;

@@ -2,7 +2,7 @@ import { z } from 'zod';
 import type { Tool } from '../../domain/tool';
 import type { SubagentService } from '../../domain/subagent';
 import type { Session } from '../../session';
-import { ReasoningEffortSchema } from '../../session/model-selection';
+import { ReasoningEffortSchema } from '../../protocol/reasoning';
 
 export const SUBAGENT_TOOL_NAME = 'subagent';
 export const SEND_MESSAGE_TOOL_NAME = 'send_message';
@@ -14,6 +14,8 @@ const StartParams = z.object({
   description: z.string().trim().min(1).max(200),
   prompt: z.string().trim().min(1),
   cwd: z.string().min(1).optional(),
+  agent: z.string().trim().min(1).max(128).optional(),
+  role: z.string().trim().min(1).max(128).optional(),
   provider: z.string().trim().min(1).max(256).optional(),
   model: z.string().trim().min(1).max(256).optional(),
   reasoning_effort: ReasoningEffortSchema.optional(),
@@ -42,6 +44,7 @@ export function createSubagentTools(session: Session, service: SubagentService):
       description:
         'Start an independently managed subagent and immediately return its id. '
         + 'The child has its own session, conversation, and tools, and inherits your workspace and permission preset. '
+        + 'Pass `agent` to choose a configured subagent; omit it to inherit your agent. '
         + 'Continue useful work after starting it; a completion notice starts a new turn when it finishes. '
         + 'Use send_message to steer a running child or continue an idle child, wait_agent to wait for a result, '
         + 'and list_agents to inspect the collaboration tree.',
@@ -54,6 +57,8 @@ export function createSubagentTools(session: Session, service: SubagentService):
           description: parsed.description,
           prompt: parsed.prompt,
           ...(parsed.cwd === undefined ? {} : { cwd: parsed.cwd }),
+          ...(parsed.agent === undefined ? {} : { agent: parsed.agent }),
+          ...(parsed.role === undefined ? {} : { role: parsed.role }),
           ...(parsed.provider === undefined ? {} : { provider: parsed.provider }),
           ...(parsed.model === undefined ? {} : { model: parsed.model }),
           ...(parsed.reasoning_effort === undefined ? {} : { reasoningEffort: parsed.reasoning_effort }),
@@ -87,6 +92,7 @@ export function createSubagentTools(session: Session, service: SubagentService):
         if (agents.length === 0) return { content: 'No other agents in this collaboration tree.' };
         const lines = agents.map((agent) =>
           `${agent.id} · ${agent.status} · depth ${agent.depth}`
+          + (agent.agent ? ` · agent ${agent.agent}` : '')
           + (agent.parentId ? ` · parent ${agent.parentId}` : '')
           + (agent.description ? ` · ${agent.description}` : '')
           + (agent.result ? `\n  result: ${agent.result.slice(0, 500)}` : ''));

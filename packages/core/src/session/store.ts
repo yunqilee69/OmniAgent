@@ -127,6 +127,7 @@ function cachedSession(key: string): ActiveSession | undefined {
 
 export interface SessionSummary {
   id: string;
+  agent?: string;
   agentId?: string;
   parentSessionId?: string;
   depth?: number;

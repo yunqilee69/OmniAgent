@@ -1,11 +1,19 @@
-import { mkdir, mkdtemp } from 'node:fs/promises';
+import { mkdir, mkdtemp, writeFile } from 'node:fs/promises';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { afterEach, describe, expect, it } from 'vitest';
-import { SessionStore, createInitialDshPermissionEvent, projectModelSelection } from '@omniagent/core';
-import type { ModelChoice, SessionModelSelection } from '@omniagent/core';
+import {
+  AgentCatalog,
+  ConfigStore,
+  RuntimeResolver,
+  SessionStore,
+  createInitialDshPermissionEvent,
+  projectAgentSelection,
+  projectModelSelection,
+} from '@omniagent/core';
+import type { ResolvedSessionRuntime, SessionHandle } from '@omniagent/core';
 import { startWebHost } from './server';
-import type { WebHost, WebHostOptions } from './server';
+import type { WebHost, WebHostOptions, ModelSummary } from './server';
 import { WorkspaceRegistry } from './workspaces';
 
 const hosts: WebHost[] = [];
@@ -15,31 +23,108 @@ function post(body: unknown): RequestInit {
   return { method: 'POST', headers: { 'content-type': 'application/json' }, body: JSON.stringify(body) };
 }
 
-const catalog: ModelChoice[] = [
-  { provider: 'provider-a', model: 'model-1', name: 'Model One' },
-  { provider: 'provider-a', model: 'model-2', name: 'Model Two', reasoning: true },
-];
-const initial: SessionModelSelection = { version: 1, provider: 'provider-a', model: 'model-1' };
+const CONFIG = {
+  model: 'deepseek-flash',
+  provider: 'deepseek-official',
+  providers: {
+    'deepseek-official': { apiKey: 'test-secret-never-public' },
+  },
+  roles: {
+    quick: {
+      name: 'Quick',
+      provider: 'deepseek-official',
+      model: 'deepseek-v4-pro',
+      reasoningEffort: 'low',
+    },
+  },
+  agentProfiles: {
+    default: { tools: '*', skills: '*' },
+    search: { tools: ['read_file'], skills: [] },
+  },
+};
 
 async function setup() {
-  const root = await mkdtemp(join(tmpdir(), 'omniagent-model-route-'));
+  const root = await mkdtemp(join(tmpdir(), 'omniagent-runtime-route-'));
+  const configDir = join(root, 'config');
   const path = join(root, 'workspace');
+  await mkdir(configDir);
   await mkdir(path);
+  await writeFile(join(configDir, 'config.json'), JSON.stringify(CONFIG));
+  await mkdir(join(configDir, 'agents'));
+  await writeFile(join(configDir, 'agents', 'writer.md'), [
+    '---',
+    'name: Writer',
+    'description: Writes code',
+    'role: quick',
+    'usage: primary',
+    'profile: default',
+    '---',
+    'You write code.',
+  ].join('\n'));
+  await writeFile(join(configDir, 'agents', 'explorer.md'), [
+    '---',
+    'name: Explorer',
+    'description: Searches only',
+    'usage: subagent',
+    'profile: search',
+    '---',
+    'You search.',
+  ].join('\n'));
   const workspaces = new WorkspaceRegistry(join(root, 'workspaces.json'));
   const workspace = await workspaces.add(path);
   const store = new SessionStore(join(root, 'sessions'));
-  const captured: Array<SessionModelSelection | undefined> = [];
+  const configStore = await ConfigStore.open(join(configDir, 'config.json'));
+  const agents = new AgentCatalog(join(configDir, 'agents'));
+  const runtime = new RuntimeResolver({ configStore, agents });
+  const captured: ResolvedSessionRuntime[] = [];
   const host = await startWebHost({
-    workspaces, store,
-    modelCatalog: () => catalog,
-    defaultModelSelection: () => initial,
+    workspaces,
+    store,
+    runtime,
     permissionSettings: {
       async read() { return { defaultPreset: 'workspace-write', requiresSelection: false }; },
       async update(value: { defaultPreset: 'workspace-write' }) { return value; },
       snapshot() { return { defaultPreset: 'workspace-write', requiresSelection: false, revision: 0 }; },
     } as unknown as WebHostOptions['permissionSettings'],
-    createSession(_workspace, handle, _permissions, model) {
-      captured.push(model);
+    listAgents: async () => {
+      const snapshot = await configStore.refresh();
+      const catalog = await agents.refresh(snapshot.catalog);
+      return catalog.agents.map((agent) => ({
+        id: agent.id,
+        name: agent.name,
+        description: agent.description,
+        role: agent.role,
+        usage: agent.usage,
+        profile: agent.profile,
+        valid: true,
+        warnings: [],
+      }));
+    },
+    listRoles: async () => {
+      const snapshot = await configStore.refresh();
+      return [...snapshot.catalog.roles.values()].map((role) => ({
+        id: role.id,
+        name: role.name,
+        provider: role.provider,
+        model: role.model,
+        ...(role.reasoningEffort === undefined ? {} : { reasoningEffort: role.reasoningEffort }),
+      }));
+    },
+    modelCatalog: () => {
+      const snapshot = configStore.snapshot;
+      return [...snapshot.catalog.providers.values()].flat().map((model) => ({
+        provider: model.provider,
+        model: model.id,
+        name: model.name,
+        ...(model.contextWindow === undefined ? {} : { contextWindow: model.contextWindow }),
+        ...(model.maxTokens === undefined ? {} : { maxTokens: model.maxTokens }),
+        capabilities: model.capabilities,
+        reasoningEfforts: model.reasoning ? Object.keys(model.reasoning.efforts) as ModelSummary['reasoningEfforts'] : [],
+        ...(model.reasoning?.default === undefined ? {} : { defaultReasoningEffort: model.reasoning.default }),
+      }));
+    },
+    createRuntimeSession(_workspace, handle, _permissions, resolved) {
+      captured.push(resolved);
       return {
         id: handle.id,
         async *send() { yield { type: 'turn.end', reason: 'end_turn' }; },
@@ -49,65 +134,170 @@ async function setup() {
   });
   hosts.push(host);
   const url = `${host.address()}/api/workspaces/${workspace.id}/sessions`;
-  return { host, url, workspace, store, captured };
+  return { host, url, workspace, store, configStore, agents, runtime, captured, configDir, path };
 }
 
-async function create(url: string): Promise<{ sessionUrl: string; id: string }> {
-  const response = await fetch(url, post({}));
+async function create(url: string, body: unknown = {}): Promise<{ sessionUrl: string; id: string }> {
+  const response = await fetch(url, post(body));
   expect(response.status).toBe(201);
-  const { session } = await response.json() as { session: { id: string } };
+  const { session } = await response.json() as { session: { id: string; agent?: string } };
   return { sessionUrl: `${url}/${session.id}`, id: session.id };
 }
 
-describe('session model API', () => {
-  it('exposes the credential-free catalog', async () => {
+describe('configured session API', () => {
+  it('exposes agents, roles, and credential-free model capabilities', async () => {
     const { host } = await setup();
-    const response = await fetch(`${host.address()}/api/models`);
-    expect(response.status).toBe(200);
-    expect(await response.json()).toEqual({ models: catalog });
+    const base = host.address()!;
+    const agents = await (await fetch(`${base}/api/agents`)).json() as { agents: Array<{ id: string; usage: string }> };
+    expect(agents.agents).toContainEqual(expect.objectContaining({ id: 'explorer', usage: 'subagent' }));
+    expect(agents.agents).toContainEqual(expect.objectContaining({ id: 'default' }));
+
+    const roles = await (await fetch(`${base}/api/roles`)).json() as { roles: Array<{ id: string }> };
+    expect(roles.roles.map((role) => role.id).sort()).toEqual(['default', 'quick']);
+
+    const models = await (await fetch(`${base}/api/models`)).json() as { models: unknown[] };
+    expect(JSON.stringify(models)).not.toContain('test-secret-never-public');
+    expect(models.models).toContainEqual(expect.objectContaining({
+      provider: 'deepseek-official',
+      model: 'deepseek-flash',
+      capabilities: { imageInput: true },
+      reasoningEfforts: ['off', 'low', 'high', 'max'],
+    }));
+    expect(models.models).toContainEqual(expect.objectContaining({
+      provider: 'deepseek-official',
+      model: 'deepseek-v4-pro',
+      capabilities: { imageInput: false },
+    }));
   });
 
-  it('pins the default selection, reports it, and uses it for a turn', async () => {
+  it('pins the default agent and model binding and resolves the agent role', async () => {
     const { url, store, workspace, captured } = await setup();
     const { sessionUrl, id } = await create(url);
 
-    const detail = await (await fetch(sessionUrl)).json() as { model: unknown };
-    expect(detail.model).toEqual(initial);
-    expect(projectModelSelection((await store.open(workspace.path, id)).events))
-      .toEqual({ status: 'selected', selection: initial });
+    const events = (await store.open(workspace.path, id)).events;
+    expect(projectAgentSelection(events)).toEqual({ status: 'selected', agent: 'default' });
+    expect(projectModelSelection(events)).toEqual({
+      status: 'selected',
+      binding: { version: 2, kind: 'agent' },
+    });
+
+    const detail = await (await fetch(sessionUrl)).json() as {
+      agent: { id: string; role: string } | null;
+      model: unknown;
+      resolvedModel: { model: string; reasoningEffort?: string } | null;
+      agentError: string | null;
+    };
+    expect(detail.agent).toMatchObject({ id: 'default', role: 'default' });
+    expect(detail.model).toEqual({ version: 2, kind: 'agent' });
+    expect(detail.resolvedModel).toMatchObject({ model: 'deepseek-flash', reasoningEffort: 'high' });
+    expect(detail.agentError).toBeNull();
 
     expect((await fetch(`${sessionUrl}/messages`, post({ text: 'go' }))).status).toBe(200);
-    expect(captured).toEqual([initial]);
+    expect(captured).toHaveLength(1);
+    expect(captured[0]!.agent.id).toBe('default');
+    expect(captured[0]!.modelId).toBe('deepseek-flash');
   });
 
-  it('persists an explicit switch and rejects unknown or malformed selections', async () => {
-    const { url, store, workspace, captured } = await setup();
+  it('creates sessions with an explicit agent and role binding', async () => {
+    const { url } = await setup();
+    const { sessionUrl } = await create(url, {
+      agent: 'writer',
+      model: { version: 2, kind: 'role', role: 'quick' },
+    });
+    const detail = await (await fetch(sessionUrl)).json() as {
+      agent: { id: string };
+      resolvedModel: { model: string; reasoningEffort?: string };
+    };
+    expect(detail.agent.id).toBe('writer');
+    expect(detail.resolvedModel).toMatchObject({ model: 'deepseek-v4-pro', reasoningEffort: 'low' });
+  });
+
+  it('rejects malformed creation bodies, subagent-only agents, and unknown models', async () => {
+    const { url } = await setup();
+    expect((await fetch(url, post({ extra: true }))).status).toBe(400);
+    expect((await fetch(url, post({ agent: 3 }))).status).toBe(400);
+    expect((await fetch(url, post({ model: { version: 1, provider: 'deepseek-official', model: 'deepseek-flash' } }))).status).toBe(400);
+    expect((await fetch(url, post({ agent: 'explorer' }))).status).toBe(409);
+    expect((await fetch(url, post({ model: { version: 2, kind: 'role', role: 'missing' } }))).status).toBe(409);
+    expect((await fetch(url, post({ model: { version: 2, kind: 'model', provider: 'deepseek-official', model: 'missing' } }))).status).toBe(409);
+  });
+
+  it('persists agent and model switches and rejects subagent-only agents as root', async () => {
+    const { url, store, workspace } = await setup();
     const { sessionUrl, id } = await create(url);
-    const switchTo = { version: 1, provider: 'provider-a', model: 'model-2' };
 
-    expect((await fetch(`${sessionUrl}/model`, post({ provider: 'provider-a', model: 'missing' }))).status).toBe(409);
-    expect((await fetch(`${sessionUrl}/model`, post({ provider: 'provider-a', model: 'model-2', extra: true }))).status).toBe(400);
-    const changed = await fetch(`${sessionUrl}/model`, post({ provider: 'provider-a', model: 'model-2' }));
-    expect(changed.status).toBe(200);
-    expect(await changed.json()).toEqual({ model: switchTo });
-    expect((await fetch(`${sessionUrl}/model`, post({ provider: 'provider-a', model: 'model-2' }))).status).toBe(200);
-    expect(projectModelSelection((await store.open(workspace.path, id)).events))
-      .toEqual({ status: 'selected', selection: switchTo });
-    expect((await store.open(workspace.path, id)).events.filter((event) => event.type === 'model/selected'))
-      .toHaveLength(2);
+    expect((await fetch(`${sessionUrl}/agent`, post({ agent: 'explorer' }))).status).toBe(409);
+    const switchedAgent = await fetch(`${sessionUrl}/agent`, post({ agent: 'writer' }));
+    expect(switchedAgent.status).toBe(200);
+    expect(await switchedAgent.json()).toEqual({
+      agent: expect.objectContaining({ id: 'writer', role: 'quick', usage: 'primary', profile: 'default' }),
+    });
 
-    expect((await fetch(`${sessionUrl}/messages`, post({ text: 'go' }))).status).toBe(200);
-    expect(captured).toEqual([switchTo]);
+    const switchedModel = await fetch(`${sessionUrl}/model`, post({
+      version: 2,
+      kind: 'model',
+      provider: 'deepseek-official',
+      model: 'deepseek-flash',
+    }));
+    expect(switchedModel.status).toBe(200);
+    expect(await switchedModel.json()).toEqual({
+      model: { version: 2, kind: 'model', provider: 'deepseek-official', model: 'deepseek-flash' },
+      resolvedModel: expect.objectContaining({ model: 'deepseek-flash', reasoningEffort: 'high' }),
+    });
+
+    const events = (await store.open(workspace.path, id)).events;
+    expect(projectAgentSelection(events)).toEqual({ status: 'selected', agent: 'writer' });
+    expect(projectModelSelection(events)).toEqual({
+      status: 'selected',
+      binding: { version: 2, kind: 'model', provider: 'deepseek-official', model: 'deepseek-flash' },
+    });
+    expect((await fetch(`${sessionUrl}/model`, post({ version: 1, provider: 'x', model: 'y' }))).status).toBe(400);
   });
 
-  it('uses the configured default for a legacy session without a selection event', async () => {
-    const { url, workspace, store, captured } = await setup();
+  it('requires explicit agent and model selection for legacy sessions', async () => {
+    const { url, store, workspace } = await setup();
     const legacy = await store.create({ id: 'legacy', workspace: workspace.path, cwd: workspace.path });
     await legacy.append(createInitialDshPermissionEvent('workspace-write'));
     const sessionUrl = `${url}/legacy`;
 
-    expect((await (await fetch(sessionUrl)).json() as { model: unknown }).model).toBeNull();
+    const detail = await (await fetch(sessionUrl)).json() as { agent: unknown; model: unknown; agentError: string | null };
+    expect(detail.agent).toBeNull();
+    expect(detail.model).toBeNull();
+    expect(detail.agentError).toMatch(/agent must be selected/i);
+    expect((await fetch(`${sessionUrl}/messages`, post({ text: 'go' }))).status).toBe(409);
+
+    expect((await fetch(`${sessionUrl}/model`, post({ version: 2, kind: 'agent' }))).status).toBe(409);
+    expect((await fetch(`${sessionUrl}/agent`, post({ agent: 'default' }))).status).toBe(200);
+    expect((await fetch(`${sessionUrl}/model`, post({ version: 2, kind: 'agent' }))).status).toBe(200);
     expect((await fetch(`${sessionUrl}/messages`, post({ text: 'go' }))).status).toBe(200);
-    expect(captured).toEqual([initial]);
+  });
+
+  it('reloads config and agent files for the next turn', async () => {
+    const { url, configStore, runtime, configDir, captured } = await setup();
+    const { sessionUrl } = await create(url, { agent: 'writer' });
+
+    await writeFile(join(configDir, 'config.json'), JSON.stringify({
+      ...CONFIG,
+      roles: {
+        quick: {
+          name: 'Quick',
+          provider: 'deepseek-official',
+          model: 'deepseek-flash',
+          reasoningEffort: 'max',
+        },
+      },
+    }));
+    await configStore.refresh();
+    const resolved = await runtime.resolve({
+      cwd: process.cwd(),
+      agentId: 'writer',
+      binding: { version: 2, kind: 'agent' },
+      isRoot: true,
+    });
+    expect(resolved.modelId).toBe('deepseek-flash');
+
+    expect((await fetch(`${sessionUrl}/messages`, post({ text: 'go' }))).status).toBe(200);
+    expect(captured.at(-1)!.modelId).toBe('deepseek-flash');
+    expect(captured.at(-1)!.reasoningEffort).toBe('max');
   });
 });

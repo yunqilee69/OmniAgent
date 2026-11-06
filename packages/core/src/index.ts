@@ -177,26 +177,6 @@ export {
 } from './session/plan';
 export type { PlanProjection } from './session/plan';
 export {
-  MODEL_SELECTION_EVENT,
-  MODEL_SELECTION_VERSION,
-  ReasoningEffortSchema,
-  SessionModelSelectionSchema,
-  createModelSelectionEvent,
-  createModelSwitch,
-  createSelectedModel,
-  defaultModelSelection,
-  listConfiguredModels,
-  modelChoiceFor,
-  projectModelSelection,
-  resolveContextWindowTokens,
-} from './session/model-selection';
-export type {
-  ModelChoice,
-  ModelSelectionProjection,
-  ReasoningEffort,
-  SessionModelSelection,
-} from './session/model-selection';
-export {
   DSH_DEFAULT_PRESET,
   DSH_PERMISSION_EVENT,
   DSH_PERMISSION_PRESETS,
@@ -272,8 +252,25 @@ export { SubagentManager } from './subagents/manager';
 export type { SubagentManagerOptions } from './subagents/manager';
 export { SandboxUnavailableError, createSandboxRunner, sandboxCommand } from './sandbox/runner';
 export type { SandboxCommand, SandboxPlatform, SandboxProfile } from './sandbox/runner';
-export { discoverSkills, loadSkill, loadSkillByName, renderSkillCatalog } from './skills/filesystem';
+export { discoverSkills, filterSkills, loadSkill, loadSkillByName, renderSkillCatalog } from './skills/filesystem';
 export type { LoadedSkill, SkillSummary } from './skills/filesystem';
+export { AgentCatalog, MAX_AGENT_BYTES, parseMarkdown, renderAgentCatalog } from './agents';
+export type { AgentCatalogSnapshot, AgentDefinition, AgentError as AgentCatalogError } from './agents';
+export { AGENT_SELECTION_EVENT, AGENT_SELECTION_VERSION, AGENT_USAGES, AgentSelectionSchema, AgentUsageSchema, createAgentSelectionEvent, createAgentSwitch, projectAgentSelection, usageAllowsRoot, usageAllowsSubagent } from './session/agent-selection';
+export type { AgentSelection, AgentSelectionProjection, AgentUsage } from './session/agent-selection';
+export { MODEL_SELECTION_EVENT, MODEL_SELECTION_VERSION, ModelBindingSchema, createModelSelectionEvent, createModelSwitch, defaultModelBinding, projectModelSelection, resolveModelBinding } from './session/model-binding';
+export type { ModelBinding, ModelSelectionProjection, ResolvedModelBinding } from './session/model-binding';
+export { RuntimeResolver } from './session/runtime';
+export type { ResolvedSessionRuntime, ResolveSessionInput, RuntimeResolverOptions, SessionAgent } from './session/runtime';
+export { ConfigError, ConfigStore } from './config/store';
+export type { ConfigSnapshot } from './config/store';
+export { buildConfigCatalog, findCatalogModel, listCatalogModels, supportedReasoningEfforts } from './config/models';
+export type { AgentProfileDefinition, ConfigCatalog, ModelCapabilities, ModelDescriptor, ModelProtocol, ModelReasoning, ReasoningWire, RoleDefinition } from './config/models';
+export { REASONING_EFFORTS, ReasoningEffortSchema } from './protocol/reasoning';
+export type { ReasoningEffort } from './protocol/reasoning';
+export { createSkillTool } from './tools/builtin/skill';
+export { createCatalogModel } from './providers/create';
+export { expandToolSelector, KNOWN_TOOL_NAMES, SUBAGENT_TOOL_GROUP } from './tools/names';
 
 // 配置
 export {

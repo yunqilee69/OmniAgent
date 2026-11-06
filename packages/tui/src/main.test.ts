@@ -39,7 +39,8 @@ describe('TUI session permissions', () => {
       expect(child.exitCode, output).toBeNull();
       const [created] = (await store.list()).filter((item) => item.id !== 'legacy');
       expect(created).toBeDefined();
-      expect((await store.open(cwd, created!.id)).events).toHaveLength(0);
+      expect((await store.open(cwd, created!.id)).events.map((event) => event.type))
+        .toEqual(['agent/selected', 'model/selected']);
       child.stdin.write('/resume legacy\n');
       await waitFor(() => prompts() >= 2);
       expect((await store.open(cwd, 'legacy')).events).toHaveLength(1);
@@ -99,17 +100,84 @@ describe('TUI session permissions', () => {
       const [created] = await store.list();
       expect(created).toBeDefined();
       expect((await store.open(cwd, created!.id)).events).toContainEqual(expect.objectContaining({
-        type: 'model/selected', data: { version: 1, provider: 'test-provider', model: 'm1' },
+        type: 'model/selected', data: { version: 2, kind: 'agent' },
       }));
       child.stdin.write('/model\n');
       await waitFor(() => prompts() >= 2);
-      expect(output).toContain('* 1. test-provider/m1');
-      expect(output).toContain('2. test-provider/m2');
-      child.stdin.write('/model 2\n');
+      expect(output).toContain('1. 跟随智能体');
+      expect(output).toContain('3. 模型 test-provider/m1');
+      expect(output).toContain('4. 模型 test-provider/m2');
+      child.stdin.write('/model 4\n');
       await waitFor(() => prompts() >= 3);
       const events = (await store.open(cwd, created!.id)).events;
       expect(events.filter((event) => event.type === 'model/selected').at(-1))
-        .toMatchObject({ data: { version: 1, provider: 'test-provider', model: 'm2' } });
+        .toMatchObject({ data: { version: 2, kind: 'model', provider: 'test-provider', model: 'm2' } });
+      child.stdin.write('exit\n');
+      await waitFor(() => child.exitCode !== null);
+      expect(child.exitCode, output).toBe(0);
+    } finally {
+      child.kill();
+    }
+  }, 15000);
+
+  it('lists root agents and persists an agent switch', async () => {
+    const home = await realpath(await mkdtemp(join(tmpdir(), 'omniagent-tui-agent-')));
+    const cwd = join(home, 'workspace');
+    const configDir = join(home, '.omniagent');
+    await mkdir(cwd);
+    await mkdir(join(configDir, 'agents'), { recursive: true });
+    await writeFile(join(configDir, 'config.json'), JSON.stringify({
+      model: 'm1',
+      provider: 'test-provider',
+      providers: {
+        'test-provider': {
+          api: 'openai-completions',
+          baseURL: 'http://127.0.0.1:9/v1',
+          apiKeyEnv: 'TEST_PROVIDER_KEY',
+          models: [{ id: 'm1', name: 'One' }],
+        },
+      },
+      roles: {
+        quick: { name: 'Quick', provider: 'test-provider', model: 'm1' },
+      },
+      dsh: { permission: { defaultPreset: 'workspace-write' } },
+    }));
+    await writeFile(join(configDir, 'agents', 'writer.md'), '---\nname: Writer\nrole: quick\nusage: primary\n---\nWRITER BODY');
+    await writeFile(join(configDir, 'agents', 'explorer.md'), '---\nname: Explorer\nusage: subagent\n---\nEXPLORER BODY');
+    const store = new SessionStore(join(configDir, 'sessions'));
+    const child = spawn(process.execPath, ['--import', resolve('node_modules/tsx/dist/loader.mjs'), resolve('packages/tui/src/main.ts')], {
+      cwd, env: { ...process.env, HOME: home, TEST_PROVIDER_KEY: 'test-key' }, stdio: ['pipe', 'pipe', 'pipe'],
+    });
+    let output = '';
+    child.stdout.setEncoding('utf8');
+    child.stderr.setEncoding('utf8');
+    child.stdout.on('data', (chunk: string) => { output += chunk; });
+    child.stderr.on('data', (chunk: string) => { output += chunk; });
+    const prompts = () => (output.match(/\u276f /g) ?? []).length;
+    try {
+      await waitFor(() => prompts() >= 1 || child.exitCode !== null);
+      expect(child.exitCode, output).toBeNull();
+      const [created] = await store.list();
+      expect(created).toBeDefined();
+      expect((await store.open(cwd, created!.id)).events).toContainEqual(expect.objectContaining({
+        type: 'agent/selected', data: { version: 1, agent: 'default' },
+      }));
+
+      child.stdin.write('/agent\n');
+      await waitFor(() => prompts() >= 2);
+      expect(output).toContain('writer');
+      expect(output).toContain('quick');
+      expect(output).not.toContain('explorer');
+
+      child.stdin.write('/agent explorer\n');
+      await waitFor(() => prompts() >= 3);
+      expect(output).toContain('只能作为子智能体');
+
+      child.stdin.write('/agent writer\n');
+      await waitFor(() => prompts() >= 4);
+      expect((await store.open(cwd, created!.id)).events.filter((event) => event.type === 'agent/selected').at(-1))
+        .toMatchObject({ data: { version: 1, agent: 'writer' } });
+
       child.stdin.write('exit\n');
       await waitFor(() => child.exitCode !== null);
       expect(child.exitCode, output).toBe(0);

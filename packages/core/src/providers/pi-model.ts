@@ -12,7 +12,8 @@ import type { AssistantMessage } from '../domain/message';
 import type { ModelClient, ModelRequest, ModelResponse, ModelStreamDelta } from './types';
 import { resolvePiAiRoute } from './pi-catalog';
 import { replayEndpointHash } from './replay-identity';
-import type { PiAiConfig, PiAiResolvedRoute } from './pi-catalog';
+import { setWireField } from './wire';
+import type { PiAiConfig, PiAiResolvedRoute, PiAiRouteConfig } from './pi-catalog';
 
 export { listPiAiCatalogProviders, resolvePiAiRoute } from './pi-catalog';
 export type { PiAiConfig, PiAiCustomApi, PiAiModelConfig, PiAiResolvedRoute, PiAiRouteConfig } from './pi-catalog';
@@ -168,6 +169,33 @@ function dispatcher(route: PiAiResolvedRoute) {
   return (model: Model<Api>, context: Context, options: SimpleStreamOptions) => models.streamSimple(model, context, options);
 }
 
+function reasoningPayload(payload: unknown, config: PiAiRouteConfig): unknown {
+  if (typeof payload !== 'object' || payload === null || Array.isArray(payload)) return payload;
+  const wire = config.reasoningWire;
+  if (wire === undefined) return payload;
+  const effort = config.reasoning ?? config.defaultReasoningEffort;
+  if (effort === undefined) return payload;
+  let clone: Record<string, unknown>;
+  try {
+    clone = structuredClone(payload) as Record<string, unknown>;
+  } catch {
+    return payload;
+  }
+  if (effort === 'off') {
+    if (wire.disableField !== undefined) setWireField(clone, wire.disableField, wire.disableValue ?? null);
+    return clone;
+  }
+  if (wire.enableField !== undefined) setWireField(clone, wire.enableField, wire.enableValue ?? true);
+  const budget = config.reasoningBudgets?.[effort];
+  if (budget !== undefined && wire.budgetField !== undefined) {
+    setWireField(clone, wire.budgetField, budget);
+  } else if (wire.effortField !== undefined) {
+    const value = config.reasoningEfforts?.[effort];
+    if (value !== null && value !== undefined) setWireField(clone, wire.effortField, value);
+  }
+  return clone;
+}
+
 export class PiAiModel implements ModelClient {
   readonly name: string;
   private readonly route: PiAiResolvedRoute;
@@ -213,6 +241,9 @@ export class PiAiModel implements ModelClient {
         ...(config.timeoutMs === undefined ? {} : { timeoutMs: config.timeoutMs }),
         ...(config.maxRetries === undefined ? {} : { maxRetries: config.maxRetries }),
         ...(config.reasoning === undefined ? {} : { reasoning: config.reasoning }),
+        ...(config.reasoningWire === undefined ? {} : {
+          onPayload: (payload: unknown) => reasoningPayload(payload, config),
+        }),
       });
       const completed = new Map<number, PiAssistant['content'][number]>();
       for await (const event of events) {

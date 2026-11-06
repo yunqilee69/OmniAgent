@@ -24,7 +24,7 @@ dialog{width:min(440px,calc(100% - 32px));padding:0;border:1px solid var(--line)
 .timeline{display:grid;grid-template-columns:44px minmax(0,1fr);height:50px;flex:none;border-bottom:1px solid var(--line);background:var(--side)}.timeline-labels{display:grid;grid-template-rows:repeat(3,14px);align-content:center;padding-right:4px;border-right:1px solid var(--line);color:var(--soft);text-align:right;font-size:10px;line-height:14px}.timeline-track{position:relative;min-width:0;overflow:hidden}.timeline-span{position:absolute;height:8px;min-width:3px;padding:0;border-radius:1px;background:var(--accent);opacity:.8}.timeline-span.input{top:7px;background:var(--accent)}.timeline-span.model{top:21px;background:#a2678c}.timeline-span.tools{top:35px;background:var(--amber)}.timeline-span.selected{outline:2px solid var(--accent);outline-offset:1px;opacity:1;z-index:1}.timeline-empty{position:absolute;top:16px;left:12px;color:var(--soft);font-size:11px}.event-table{min-width:360px}.event-table th:nth-child(1){width:90px}.event-table th:nth-child(2){width:52px}.event-table th:nth-child(3){width:auto}.event-table th:nth-child(4){width:95px}.event-kind{font-weight:600}.event-kind.input{color:var(--accent)}.event-kind.model{color:#a2678c}.event-kind.tool{color:var(--amber)}
 .trajectory-segments{display:inline-flex;flex:none;padding:2px;border:1px solid var(--line);border-radius:6px;background:var(--side)}.trajectory-segments button{min-height:26px;padding:0 9px;border-radius:4px;background:transparent;color:var(--muted);font-size:12px;font-weight:500}.trajectory-segments button:hover{color:var(--ink)}.trajectory-segments button[aria-pressed="true"]{background:var(--surface);color:var(--ink);box-shadow:0 0 0 1px var(--line-soft)}.event-kind.audit{color:var(--green)}.event-kind.errors{color:var(--red)}.event-info{overflow:hidden;text-overflow:ellipsis;white-space:nowrap;font-size:11px;font-weight:400}
 .settings-dialog{width:min(900px,calc(100% - 32px));height:min(680px,calc(100% - 32px));max-height:calc(100% - 32px)}.settings-shell{display:flex;height:100%;min-height:0}.settings-nav{width:210px;flex:none;padding:24px 12px;background:var(--side);border-right:1px solid var(--line-soft)}.settings-nav h2{margin:0 10px 24px;font-size:16px}.settings-nav button{display:flex;align-items:center;gap:9px;width:100%;padding:9px 10px;border-radius:6px;background:var(--active);text-align:left;font-size:13px;font-weight:600}.settings-content{flex:1;min-width:0;overflow:auto}.settings-head{display:flex;align-items:center;justify-content:space-between;position:sticky;top:0;z-index:2;padding:18px 28px;background:var(--surface);border-bottom:1px solid var(--line-soft)}.settings-head h2{margin:0;font-size:16px}
-.settings-content .permission-settings{max-width:620px;margin:0 auto;padding:24px 28px}.permission-row{display:flex;align-items:center;gap:8px;padding:16px 0;border-bottom:1px solid var(--line-soft)}.permission-row-text{flex:1;min-width:0;padding-right:36px}.permission-row-title{font-size:14px;line-height:22px}.permission-row-description,.permission-explanation{margin:4px 0 0;color:var(--muted);font-size:12px;line-height:18px}.permission-explanation{margin-top:18px}.permission-picker{position:relative;flex:none}.permission-selector{display:inline-flex;align-items:center;gap:12px;min-height:36px;padding:0 12px;border-radius:6px;background:var(--raised);font-size:13px}.permission-selector:hover:not(:disabled){background:var(--active)}.permission-selector .icon{width:14px;height:14px}.permission-menu{position:absolute;z-index:15;right:0;top:calc(100% + 4px);width:220px;padding:4px;border:1px solid var(--line);border-radius:6px;background:var(--surface);box-shadow:var(--shadow)}.permission-menu button{display:flex;align-items:center;gap:8px;width:100%;min-height:34px;padding:6px 9px;border-radius:4px;background:transparent;text-align:left;font-size:12px}.permission-menu button:hover,.permission-menu button:focus-visible{background:var(--hover)}.permission-menu button[aria-checked="true"]{font-weight:600}.permission-menu button[aria-checked="true"]:after{content:'✓';margin-left:auto;color:var(--accent)}.permission-entry{display:inline-flex;align-items:center;gap:4px;min-width:0;max-width:220px;height:28px;padding:0 4px 0 8px;border-radius:4px;background:transparent;color:var(--muted);font-size:13px;font-weight:500}.permission-entry:hover:not(:disabled){background:var(--hover)}.permission-entry .icon{width:14px;height:14px}.permission-entry span{overflow:hidden;text-overflow:ellipsis;white-space:nowrap}.session-permission-menu{top:auto;right:auto;bottom:calc(100% + 4px);left:0}.composer-meta{display:flex;align-items:center;gap:8px;min-width:0}.composer-meta #composer-state{overflow:hidden;text-overflow:ellipsis;white-space:nowrap}.session-permission-error{margin:5px 5px 0;color:var(--red);font-size:11px;overflow-wrap:anywhere}.session-model-error{margin:5px 5px 0;color:var(--red);font-size:11px;overflow-wrap:anywhere}.model-picker{min-width:0}.model-select{max-width:230px;height:28px;padding:0 6px;border:0;border-radius:4px;background:transparent;color:var(--muted);font:11px/1.4 inherit;text-overflow:ellipsis}.model-select:hover:not(:disabled){background:var(--hover)}.risk-ack{display:flex;align-items:flex-start;gap:8px;padding:10px;border-radius:6px;background:var(--amber-soft);color:var(--amber);font-size:12px}.risk-ack input{margin-top:3px}.risk-confirm{margin-top:16px}.permission-status{margin-top:10px;color:var(--green);font-size:12px}.permission-settings .dialog-error{margin-top:10px}
+.settings-content .permission-settings{max-width:620px;margin:0 auto;padding:24px 28px}.permission-row{display:flex;align-items:center;gap:8px;padding:16px 0;border-bottom:1px solid var(--line-soft)}.permission-row-text{flex:1;min-width:0;padding-right:36px}.permission-row-title{font-size:14px;line-height:22px}.permission-row-description,.permission-explanation{margin:4px 0 0;color:var(--muted);font-size:12px;line-height:18px}.permission-explanation{margin-top:18px}.permission-picker{position:relative;flex:none}.permission-selector{display:inline-flex;align-items:center;gap:12px;min-height:36px;padding:0 12px;border-radius:6px;background:var(--raised);font-size:13px}.permission-selector:hover:not(:disabled){background:var(--active)}.permission-selector .icon{width:14px;height:14px}.permission-menu{position:absolute;z-index:15;right:0;top:calc(100% + 4px);width:220px;padding:4px;border:1px solid var(--line);border-radius:6px;background:var(--surface);box-shadow:var(--shadow)}.permission-menu button{display:flex;align-items:center;gap:8px;width:100%;min-height:34px;padding:6px 9px;border-radius:4px;background:transparent;text-align:left;font-size:12px}.permission-menu button:hover,.permission-menu button:focus-visible{background:var(--hover)}.permission-menu button[aria-checked="true"]{font-weight:600}.permission-menu button[aria-checked="true"]:after{content:'✓';margin-left:auto;color:var(--accent)}.permission-entry{display:inline-flex;align-items:center;gap:4px;min-width:0;max-width:220px;height:28px;padding:0 4px 0 8px;border-radius:4px;background:transparent;color:var(--muted);font-size:13px;font-weight:500}.permission-entry:hover:not(:disabled){background:var(--hover)}.permission-entry .icon{width:14px;height:14px}.permission-entry span{overflow:hidden;text-overflow:ellipsis;white-space:nowrap}.session-permission-menu{top:auto;right:auto;bottom:calc(100% + 4px);left:0}.composer-meta{display:flex;align-items:center;gap:8px;min-width:0}.composer-meta #composer-state{overflow:hidden;text-overflow:ellipsis;white-space:nowrap}.session-permission-error{margin:5px 5px 0;color:var(--red);font-size:11px;overflow-wrap:anywhere}.session-agent-error,.session-model-error{margin:5px 5px 0;color:var(--red);font-size:11px;overflow-wrap:anywhere}.agent-picker{min-width:0}.agent-select{max-width:190px;height:28px;padding:0 6px;border:0;border-radius:4px;background:transparent;color:var(--muted);font:11px/1.4 inherit;text-overflow:ellipsis}.agent-select:hover:not(:disabled){background:var(--hover)}.model-picker{min-width:0}.model-select{max-width:230px;height:28px;padding:0 6px;border:0;border-radius:4px;background:transparent;color:var(--muted);font:11px/1.4 inherit;text-overflow:ellipsis}.model-select:hover:not(:disabled){background:var(--hover)}.risk-ack{display:flex;align-items:flex-start;gap:8px;padding:10px;border-radius:6px;background:var(--amber-soft);color:var(--amber);font-size:12px}.risk-ack input{margin-top:3px}.risk-confirm{margin-top:16px}.permission-status{margin-top:10px;color:var(--green);font-size:12px}.permission-settings .dialog-error{margin-top:10px}
 @media(max-width:767px){.settings-content .permission-settings{padding:18px}.permission-row-text{padding-right:8px}.permission-menu{max-width:calc(100vw - 48px)}.composer-meta #composer-state{display:none}}
 @media(min-width:768px) and (max-width:1023px){.app:not(.sidebar-expanded){grid-template-columns:56px minmax(0,1fr)}.app:not(.sidebar-expanded) .sidebar{padding:18px 10px 6px}.app:not(.sidebar-expanded) .brand-row{height:36px;padding:0;margin-bottom:12px}.app:not(.sidebar-expanded) .brand-mark,.app:not(.sidebar-expanded) .brand-name,.app:not(.sidebar-expanded) .new-session span,.app:not(.sidebar-expanded) .sessions-section,.app:not(.sidebar-expanded) .settings-button span,.app:not(.sidebar-expanded) .theme-button{display:none}.app:not(.sidebar-expanded) .sidebar-toggle,.app:not(.sidebar-expanded) .new-session,.app:not(.sidebar-expanded) .settings-button{width:36px;height:36px;min-height:36px;margin:0;padding:0;border:0;background:transparent;justify-content:center}.app:not(.sidebar-expanded) .sidebar-body{padding:0;flex:1}.app:not(.sidebar-expanded) .sidebar-footer{padding:0}.app:not(.sidebar-expanded) .settings-button{flex:none}}
 .approval-seat{order:1}.composer-area{order:2}
@@ -67,7 +67,7 @@ dialog{width:min(440px,calc(100% - 32px));padding:0;border:1px solid var(--line)
     <header class="topbar"><button class="icon-button drawer-button" id="drawer-toggle" type="button" aria-label="Open navigation" aria-controls="sidebar" aria-expanded="false" title="Open navigation"><svg class="icon" aria-hidden="true"><use href="#icon-panel"/></svg></button><div class="breadcrumbs"><span class="crumb-workspace" id="crumb-workspace">Workspace</span><span class="crumb-slash" aria-hidden="true">/</span><span class="crumb-session" id="crumb-session">No session selected</span></div><div class="status" id="status" role="status"><span class="status-dot"></span><span id="status-text">Ready</span></div></header>
     <nav class="tabs" role="tablist" aria-label="Session views"><button class="tab" id="tab-conversation" type="button" role="tab" aria-selected="true" aria-controls="conversation-view">Chat</button><button class="tab" id="tab-observe" type="button" role="tab" aria-selected="false" aria-controls="observe-view" tabindex="-1">Trajectory <span class="tab-count" id="event-count"></span></button><div class="session-menu"><button class="icon-button" id="session-actions" type="button" aria-label="Session actions" aria-haspopup="menu" aria-expanded="false" title="Session actions"><svg class="icon" aria-hidden="true"><use href="#icon-more"/></svg></button><div class="menu-surface" id="session-menu" role="menu" hidden><button id="copy-markdown" type="button" role="menuitem">Copy Session as Markdown</button><button id="download-json" type="button" role="menuitem" aria-describedby="export-disclosure">Download JSON transcript</button><p class="export-disclosure" id="export-disclosure">JSON is a transcript, not a DSH archive. Child sessions and attachment bytes are omitted. Content may include sensitive paths and tool output.</p></div></div></nav>
     <div class="alert" id="alert" role="alert" hidden><span id="alert-text"></span><button class="icon-button" id="dismiss-alert" type="button" aria-label="Dismiss error" title="Dismiss error"><svg class="icon" aria-hidden="true"><use href="#icon-close"/></svg></button></div>
-    <section class="view conversation-view" id="conversation-view" role="tabpanel" aria-labelledby="tab-conversation"><section class="todo-panel" id="todo-panel" aria-label="Task list" hidden><div class="todo-card"><div class="todo-head"><strong>Tasks</strong><span id="todo-counts"></span></div><ol class="todo-list" id="todo-list"></ol></div></section><div class="transcript-scroll" id="transcript-scroll"><div class="transcript" id="transcript" aria-live="polite"></div></div></section><div class="approval-seat"><section class="approval" id="approval" aria-labelledby="approval-title" hidden><div class="approval-head"><strong id="approval-title">Approval required</strong><span id="approval-tool" class="mono"></span></div><p id="approval-reason"></p><div class="approval-label">Arguments</div><pre id="approval-arguments"></pre><div class="approval-actions"><button class="secondary" id="approval-reject" type="button">Reject</button><button class="primary" id="approval-allow" type="button">Allow once</button></div><div class="dialog-error" id="approval-error" role="alert" hidden></div></section><section class="approval plan-review" id="plan-review" aria-labelledby="plan-review-title" hidden><div class="approval-head"><strong id="plan-review-title">Review plan</strong><span>Plan mode</span></div><p>Approve the plan to leave plan mode and start implementing. Keep planning to send guidance back to the agent.</p><pre id="plan-review-content"></pre><label class="sr-only" for="plan-review-feedback">Guidance for continued planning</label><textarea id="plan-review-feedback" placeholder="Optional guidance if you keep planning…"></textarea><div class="approval-actions"><button class="secondary" id="plan-review-keep" type="button">Keep planning</button><button class="primary" id="plan-review-approve" type="button">Approve plan</button></div><div class="dialog-error" id="plan-review-error" role="alert" hidden></div></section></div><form class="composer-area" id="composer"><div class="composer-inner"><div class="composer-box"><label class="sr-only" for="prompt">Message</label><textarea id="prompt" rows="2" placeholder="Message the agent" disabled></textarea><div class="composer-actions"><div class="composer-meta"><button class="plan-toggle" id="plan-toggle" type="button" aria-label="Toggle plan mode" aria-pressed="false" title="Plan mode: investigate first, then submit a plan for review" disabled>Plan</button><div class="permission-picker"><button class="permission-entry" id="permission-entry" type="button" aria-label="Current session permission" aria-haspopup="menu" aria-expanded="false" aria-controls="permission-session-menu" disabled><svg class="icon" aria-hidden="true"><use id="permission-icon" href="#icon-permission-read-only"/></svg><span id="permission-current">Select permission</span><svg class="icon" aria-hidden="true"><use href="#icon-chevron"/></svg></button><div class="permission-menu session-permission-menu" id="permission-session-menu" role="menu" aria-label="Current session permission" hidden><button id="permission-session-read-only" type="button" role="menuitemradio" aria-checked="false" title="File writes are denied in the standing sandbox.">Read Only</button><button id="permission-session-workspace-write" type="button" role="menuitemradio" aria-checked="false" title="Write inside the workspace and permitted temporary directories; wider retries require approval.">Workspace Write</button><button id="permission-session-danger-full-access" type="button" role="menuitemradio" aria-checked="false" title="Full file access without approval prompts.">Full access</button></div><div class="model-picker"><label class="sr-only" for="model-select">Model</label><select class="model-select" id="model-select" aria-label="Current session model" disabled></select></div></div><span id="composer-state">Select a session to begin</span></div><div class="controls"><button class="stop-button" id="stop" type="button" aria-label="Stop current turn" title="Stop current turn" hidden><svg class="icon" aria-hidden="true"><use href="#icon-stop"/></svg></button><button class="send-button" id="send" type="submit" aria-label="Send message" title="Send message" disabled><svg class="icon" aria-hidden="true"><use href="#icon-send"/></svg></button></div></div></div><div class="session-permission-error" id="session-permission-error" role="alert" hidden></div><div class="session-model-error" id="session-model-error" role="alert" hidden></div><div class="session-model-error" id="session-plan-error" role="alert" hidden></div><div class="composer-footer"><span class="composer-note" id="composer-note"></span></div></div></form>
+    <section class="view conversation-view" id="conversation-view" role="tabpanel" aria-labelledby="tab-conversation"><section class="todo-panel" id="todo-panel" aria-label="Task list" hidden><div class="todo-card"><div class="todo-head"><strong>Tasks</strong><span id="todo-counts"></span></div><ol class="todo-list" id="todo-list"></ol></div></section><div class="transcript-scroll" id="transcript-scroll"><div class="transcript" id="transcript" aria-live="polite"></div></div></section><div class="approval-seat"><section class="approval" id="approval" aria-labelledby="approval-title" hidden><div class="approval-head"><strong id="approval-title">Approval required</strong><span id="approval-tool" class="mono"></span></div><p id="approval-reason"></p><div class="approval-label">Arguments</div><pre id="approval-arguments"></pre><div class="approval-actions"><button class="secondary" id="approval-reject" type="button">Reject</button><button class="primary" id="approval-allow" type="button">Allow once</button></div><div class="dialog-error" id="approval-error" role="alert" hidden></div></section><section class="approval plan-review" id="plan-review" aria-labelledby="plan-review-title" hidden><div class="approval-head"><strong id="plan-review-title">Review plan</strong><span>Plan mode</span></div><p>Approve the plan to leave plan mode and start implementing. Keep planning to send guidance back to the agent.</p><pre id="plan-review-content"></pre><label class="sr-only" for="plan-review-feedback">Guidance for continued planning</label><textarea id="plan-review-feedback" placeholder="Optional guidance if you keep planning…"></textarea><div class="approval-actions"><button class="secondary" id="plan-review-keep" type="button">Keep planning</button><button class="primary" id="plan-review-approve" type="button">Approve plan</button></div><div class="dialog-error" id="plan-review-error" role="alert" hidden></div></section></div><form class="composer-area" id="composer"><div class="composer-inner"><div class="composer-box"><label class="sr-only" for="prompt">Message</label><textarea id="prompt" rows="2" placeholder="Message the agent" disabled></textarea><div class="composer-actions"><div class="composer-meta"><button class="plan-toggle" id="plan-toggle" type="button" aria-label="Toggle plan mode" aria-pressed="false" title="Plan mode: investigate first, then submit a plan for review" disabled>Plan</button><div class="permission-picker"><button class="permission-entry" id="permission-entry" type="button" aria-label="Current session permission" aria-haspopup="menu" aria-expanded="false" aria-controls="permission-session-menu" disabled><svg class="icon" aria-hidden="true"><use id="permission-icon" href="#icon-permission-read-only"/></svg><span id="permission-current">Select permission</span><svg class="icon" aria-hidden="true"><use href="#icon-chevron"/></svg></button><div class="permission-menu session-permission-menu" id="permission-session-menu" role="menu" aria-label="Current session permission" hidden><button id="permission-session-read-only" type="button" role="menuitemradio" aria-checked="false" title="File writes are denied in the standing sandbox.">Read Only</button><button id="permission-session-workspace-write" type="button" role="menuitemradio" aria-checked="false" title="Write inside the workspace and permitted temporary directories; wider retries require approval.">Workspace Write</button><button id="permission-session-danger-full-access" type="button" role="menuitemradio" aria-checked="false" title="Full file access without approval prompts.">Full access</button></div><div class="agent-picker"><label class="sr-only" for="agent-select">Agent</label><select class="agent-select" id="agent-select" aria-label="Current session agent" disabled></select></div><div class="model-picker"><label class="sr-only" for="model-select">Model</label><select class="model-select" id="model-select" aria-label="Current session model" disabled></select></div></div><span id="composer-state">Select a session to begin</span></div><div class="controls"><button class="stop-button" id="stop" type="button" aria-label="Stop current turn" title="Stop current turn" hidden><svg class="icon" aria-hidden="true"><use href="#icon-stop"/></svg></button><button class="send-button" id="send" type="submit" aria-label="Send message" title="Send message" disabled><svg class="icon" aria-hidden="true"><use href="#icon-send"/></svg></button></div></div></div><div class="session-permission-error" id="session-permission-error" role="alert" hidden></div><div class="session-agent-error" id="session-agent-error" role="alert" hidden></div><div class="session-model-error" id="session-model-error" role="alert" hidden></div><div class="session-model-error" id="session-plan-error" role="alert" hidden></div><div class="composer-footer"><span class="composer-note" id="composer-note"></span></div></div></form>
     <section class="view observe-view" id="observe-view" role="tabpanel" aria-labelledby="tab-observe" hidden><div class="ledger"><div class="ledger-toolbar"><div class="ledger-title"><strong>Trajectory</strong><span id="ledger-count">No session selected</span></div><div class="trajectory-segments" role="group" aria-label="Trajectory display"><button id="trajectory-records" type="button" aria-pressed="true">Records</button><button id="trajectory-events" type="button" aria-pressed="false">Events</button></div><label class="sr-only" for="timeline-mode">Timeline scale</label><select class="filter-select" id="timeline-mode"><option value="sequence">Sequence</option><option value="time">Recorded time</option></select><label class="sr-only" for="event-filter">Filter records</label><select class="filter-select" id="event-filter"><option value="all">All records</option><option value="input">Input</option><option value="model">Model</option><option value="tools">Tools</option></select><label class="sr-only" for="trace-filter">Filter events</label><select class="filter-select" id="trace-filter" hidden><option value="all">All events</option><option value="lifecycle">Lifecycle</option><option value="tools">Tools</option><option value="errors">Errors</option><option value="audit">Audit</option></select><div class="search-wrap" id="record-search-wrap"><span class="search-icon" aria-hidden="true"><svg class="icon"><use href="#icon-search"/></svg></span><label class="sr-only" for="event-search">Search record metadata</label><input class="search ledger-search" id="event-search" type="search" placeholder="Search records" autocomplete="off" /></div><div class="search-wrap" id="trace-search-wrap" hidden><span class="search-icon" aria-hidden="true"><svg class="icon"><use href="#icon-search"/></svg></span><label class="sr-only" for="trace-search">Search event metadata</label><input class="search ledger-search" id="trace-search" type="search" placeholder="Search events" autocomplete="off" /></div></div><section class="timeline" aria-label="Trajectory timeline"><div class="timeline-labels" aria-hidden="true"><span>Input</span><span>Model</span><span>Tools</span></div><div class="timeline-track" id="timeline-track"></div></section><div class="table-scroll"><table class="event-table"><thead><tr><th scope="col">Kind</th><th scope="col">Seq</th><th scope="col" id="ledger-type-heading">Record</th><th scope="col">Recorded</th></tr></thead><tbody id="event-rows"></tbody></table><div class="ledger-empty" id="ledger-empty"></div></div></div><aside class="inspector" id="inspector" aria-label="Record inspector"><div class="inspector-header"><strong id="inspector-title">Record inspector</strong><span>Recorded metadata</span></div><div class="inspector-body" id="inspector-body"></div></aside></section>
   </main>
 </div>
@@ -272,6 +272,8 @@ const state = {
   creatingSession: false, tab: 'conversation', trajectoryView: 'records', selectedEvent: null, selectedTrace: null, alert: '', renderQueued: false,
   permissions: null, permissionsLoading: false, permissionsSaving: false, permissionsError: '', permissionRequest: 0, permissionConfirmation: null,
   models: [], modelsLoading: true, modelsError: '',
+  agents: [], agentsLoading: true, agentsError: '', roles: [], rolesLoading: true, rolesError: '',
+  creationAgent: 'default', creationBinding: { version: 2, kind: 'agent' },
 };
 function storageGet(key) { try { return localStorage.getItem(key); } catch (_) { return null; } }
 function storageSet(key, value) { try { localStorage.setItem(key, value); } catch (_) {} }
@@ -287,7 +289,7 @@ function getEntry(workspaceId, sessionId) {
   const key = sessionKey(workspaceId, sessionId);
   let entry = state.entries.get(key);
   if (!entry) {
-    entry = { header: null, permission: null, permissionSaving: false, permissionError: '', model: null, modelSaving: false, modelError: '', plan: null, planSaving: false, planError: '', todos: null, transcript: [], events: [], audit: [], trajectory: null, loaded: false, loading: false, error: '', request: 0, outcome: '' };
+    entry = { header: null, permission: null, permissionSaving: false, permissionError: '', agent: null, agentSaving: false, agentError: '', agentWarnings: [], binding: null, resolvedModel: null, modelSaving: false, modelError: '', plan: null, planSaving: false, planError: '', todos: null, transcript: [], events: [], audit: [], trajectory: null, loaded: false, loading: false, error: '', request: 0, outcome: '' };
     state.entries.set(key, entry);
   }
   return entry;
@@ -383,7 +385,7 @@ function renderSidebar() {
   if (state.sessionError) { list.append(element('div', 'side-empty', state.sessionError)); return; }
   if (!state.workspaceId) { list.append(element('div', 'side-empty', 'Add a workspace to get started.')); return; }
   const query = $('session-search').value.trim().toLowerCase();
-  const filtered = state.sessions.filter(item => [item.id, item.agentId, item.cwd, item.description, item.parentSessionId].some(value => String(value || '').toLowerCase().includes(query)));
+  const filtered = state.sessions.filter(item => [item.id, item.agent, item.agentId, item.cwd, item.description, item.parentSessionId].some(value => String(value || '').toLowerCase().includes(query)));
   if (!filtered.length) { list.append(element('div', 'side-empty', query ? 'No matching sessions.' : 'No sessions yet.')); return; }
   for (const item of filtered) {
     const button = element('button', 'session-button' + (item.id === state.sessionId ? ' active' : ''));
@@ -398,7 +400,8 @@ function renderSidebar() {
     content.append(element('span', 'session-name', name));
     const count = typeof item.eventCount === 'number' ? item.eventCount + (item.eventCount === 1 ? ' event' : ' events') : '';
     const relation = child ? 'subagent · depth ' + (item.depth ?? 1) : '';
-    content.append(element('span', 'session-meta', [relativeDate(item.updatedAt || item.createdAt), relation, count].filter(Boolean).join(' · ')));
+    const agent = typeof item.agent === 'string' && item.agent ? 'agent ' + item.agent : '';
+    content.append(element('span', 'session-meta', [relativeDate(item.updatedAt || item.createdAt), agent, relation, count].filter(Boolean).join(' · ')));
     button.append(glyph, content);
     button.addEventListener('click', () => { selectSession(item.id); closeDrawer(); });
     list.append(button);
@@ -411,7 +414,7 @@ function renderHeader() {
   $('crumb-workspace').textContent = workspace?.name || workspace?.path || 'Workspace';
   $('crumb-workspace').title = workspace?.path || '';
   $('crumb-session').textContent = state.sessionId
-    ? description ? 'Subagent · ' + description : 'Session ' + shortId(state.sessionId)
+    ? (description ? 'Subagent · ' + description : entry?.agent ? entry.agent.name + ' · Session ' + shortId(state.sessionId) : 'Session ' + shortId(state.sessionId))
     : 'No session selected';
   $('crumb-session').title = state.sessionId || '';
   $('session-actions').disabled = !state.workspaceId || !state.sessionId;
@@ -474,12 +477,15 @@ function renderTranscript(forceBottom) {
 function stringify(value) { try { const result = JSON.stringify(value, null, 2); return result === undefined ? String(value) : result; } catch (_) { return '[Unable to display value]'; } }
 function renderComposer() {
   const entry = currentEntry(); const run = currentRun(); const available = !!state.workspaceId && !!state.sessionId && !!entry?.loaded && !entry.loading;
+  const creating = !!state.workspaceId && !state.sessionId && !state.creatingSession;
   const preset = entry?.permission?.preset; const selected = isPermissionPreset(preset);
-  const locked = !available || !!run || !!entry?.permissionSaving || !!entry?.modelSaving || !!entry?.planSaving;
+  const saving = !!entry?.permissionSaving || !!entry?.agentSaving || !!entry?.modelSaving || !!entry?.planSaving;
+  const locked = !available || !!run || saving;
+  const pickerLocked = (!available && !creating) || !!run || saving;
   $('prompt').disabled = !available;
-  $('send').disabled = locked || !selected || !$('prompt').value.trim();
+  $('send').disabled = locked || !selected || !entry?.agent || !entry?.binding || !$('prompt').value.trim();
   $('stop').hidden = !run; $('stop').disabled = !!run?.stopping || !!run?.finishing;
-  $('composer-state').textContent = !state.workspaceId ? 'Select a workspace' : !state.sessionId ? 'Select a session to begin' : !entry?.loaded ? 'Loading session' : run ? run.stopping ? 'Stopping…' : run.finishing ? 'Saving session…' : run.planReview ? 'Waiting for plan review' : run.approval ? 'Waiting for approval' : 'Agent is working' : entry.permissionSaving ? 'Saving permission…' : entry.modelSaving ? 'Saving model…' : entry.planSaving ? 'Saving plan mode…' : !selected ? 'Choose permission before sending' : 'Ready to send';
+  $('composer-state').textContent = !state.workspaceId ? 'Select a workspace' : creating ? 'Choose an agent and model, then create a session' : !state.sessionId ? 'Select a session to begin' : !entry?.loaded ? 'Loading session' : run ? run.stopping ? 'Stopping…' : run.finishing ? 'Saving session…' : run.planReview ? 'Waiting for plan review' : run.approval ? 'Waiting for approval' : 'Agent is working' : entry.permissionSaving ? 'Saving permission…' : entry.agentSaving ? 'Saving agent…' : entry.modelSaving ? 'Saving model…' : entry.planSaving ? 'Saving plan mode…' : !entry.agent ? 'Select an agent before sending' : !entry.binding ? 'Select a model source before sending' : !selected ? 'Choose permission before sending' : 'Ready to send';
   $('permission-current').textContent = !available ? 'Select permission' : selected ? permissionPresets[preset].label : 'Select permission';
   $('permission-icon').setAttribute('href', '#icon-permission-' + (selected ? preset : 'read-only'));
   $('permission-entry').disabled = locked;
@@ -496,7 +502,11 @@ function renderComposer() {
   $('plan-toggle').title = run ? 'Plan mode cannot be changed during a turn.' : planActive ? 'Plan mode is on: the agent researches and submits a plan before editing.' : 'Turn on plan mode: research first, then submit a plan for approval.';
   $('session-plan-error').textContent = entry?.planError || '';
   $('session-plan-error').hidden = !entry?.planError;
-  renderModelPicker(entry, locked);
+  renderAgentPicker(entry, pickerLocked, creating);
+  renderModelPicker(entry, pickerLocked, creating);
+  const agentError = entry?.agentError || '';
+  $('session-agent-error').textContent = agentError;
+  $('session-agent-error').hidden = !agentError;
   $('session-model-error').textContent = entry?.modelError || '';
   $('session-model-error').hidden = !entry?.modelError;
   renderTodos();
@@ -695,7 +705,7 @@ function selectSession(id) {
 async function loadDetail(workspaceId, sessionId, reconcile) {
   if (!workspaceId || !sessionId) return false;
   const key = sessionKey(workspaceId, sessionId); const entry = getEntry(workspaceId, sessionId);
-  if (state.runs.has(key) && !reconcile || entry.permissionSaving || entry.modelSaving) return false;
+  if (state.runs.has(key) && !reconcile || entry.permissionSaving || entry.agentSaving || entry.modelSaving) return false;
   const request = ++entry.request; entry.loading = true; entry.error = '';
   if (isCurrent(workspaceId, sessionId)) renderAll();
   try {
@@ -704,7 +714,9 @@ async function loadDetail(workspaceId, sessionId, reconcile) {
     if (!body.permission || !Object.hasOwn(body.permission, 'preset') || body.permission.preset !== null && !isPermissionPreset(body.permission.preset)) throw new Error('Invalid session permission response.');
     entry.header = body.header || null;
     entry.permission = { preset: body.permission.preset }; entry.permissionError = '';
-    entry.model = validateSessionModel(body.model); entry.modelError = '';
+    entry.agent = validateAgentSummary(body.agent); entry.agentError = typeof body.agentError === 'string' ? body.agentError : '';
+    entry.agentWarnings = Array.isArray(body.agentWarnings) ? body.agentWarnings.filter(item => typeof item === 'string') : [];
+    entry.binding = validateModelBinding(body.model); entry.resolvedModel = validateResolvedModel(body.resolvedModel); entry.modelError = '';
     entry.plan = normalizePlan(body.plan); entry.planError = '';
     entry.todos = normalizeTodos(body.todos);
     entry.events = Array.isArray(body.events) ? body.events : [];
@@ -731,7 +743,7 @@ async function createSession() {
   if (!workspaceId || state.creatingSession || state.sessionsLoading) return;
   const selection = state.selectionVersion; state.creatingSession = true; renderAll();
   try {
-    const body = await api(apiPath(workspaceId), jsonOptions('POST', {}));
+    const body = await api(apiPath(workspaceId), jsonOptions('POST', { agent: state.creationAgent || 'default', model: state.creationBinding || { version: 2, kind: 'agent' } }));
     if (!body.session || typeof body.session.id !== 'string') throw new Error('The server did not return a session ID.');
     if (state.workspaceId !== workspaceId) return;
     const session = body.session; state.sessions.unshift(session);
@@ -745,7 +757,7 @@ async function sendMessage(event) {
   const workspaceId = state.workspaceId; const sessionId = state.sessionId; const text = $('prompt').value.trim();
   if (!workspaceId || !sessionId || !text) return;
   const key = sessionKey(workspaceId, sessionId); const entry = getEntry(workspaceId, sessionId);
-  if (!entry.loaded || entry.loading || entry.permissionSaving || entry.modelSaving || !isPermissionPreset(entry.permission?.preset) || state.runs.has(key)) return;
+  if (!entry.loaded || entry.loading || entry.permissionSaving || entry.agentSaving || entry.modelSaving || !isPermissionPreset(entry.permission?.preset) || !entry.agent || !entry.binding || state.runs.has(key)) return;
   const userItem = { kind: 'user', text: text }; entry.transcript.push(userItem); entry.outcome = ''; entry.todos = null;
   const run = { transcript: entry.transcript, streamItem: null, stopping: false, finishing: false, error: '', reason: '', approval: null, planReview: null };
   state.runs.set(key, run); state.drafts.set(key, ''); $('prompt').value = ''; state.alert = ''; renderAll(true);
@@ -975,94 +987,208 @@ async function saveSessionPermission(workspaceId, sessionId, entry, preset) {
   finally { entry.permissionSaving = false; if (isCurrent(workspaceId, sessionId)) renderComposer(); }
 }
 const reasoningEfforts = ['off', 'minimal', 'low', 'medium', 'high', 'xhigh', 'max'];
-function validateSessionModel(value) {
+const agentUsages = ['primary', 'subagent', 'both'];
+function validateAgentSummary(value) {
   if (value === undefined || value === null) return null;
-  if (typeof value !== 'object' || Array.isArray(value) || value.version !== 1
-    || typeof value.provider !== 'string' || !value.provider.trim()
+  if (typeof value !== 'object' || Array.isArray(value)
+    || typeof value.id !== 'string' || !value.id.trim()
+    || typeof value.name !== 'string' || !value.name.trim()
+    || typeof value.description !== 'string'
+    || typeof value.role !== 'string'
+    || !agentUsages.includes(value.usage)
+    || typeof value.profile !== 'string'
+    || typeof value.valid !== 'boolean'
+    || !Array.isArray(value.warnings) || !value.warnings.every(item => typeof item === 'string')) throw new Error('Invalid session agent response.');
+  return { id: value.id, name: value.name, description: value.description, role: value.role, usage: value.usage, profile: value.profile, valid: value.valid, warnings: value.warnings.slice() };
+}
+function validateAgentOption(value) {
+  const agent = validateAgentSummary(value);
+  if (!agent) throw new Error('Invalid agent catalog response.');
+  return agent;
+}
+function validateRole(value) {
+  if (!value || typeof value !== 'object' || typeof value.id !== 'string' || !value.id.trim()
+    || typeof value.name !== 'string' || typeof value.provider !== 'string' || !value.provider.trim()
     || typeof value.model !== 'string' || !value.model.trim()
-    || value.reasoningEffort !== undefined && !reasoningEfforts.includes(value.reasoningEffort)) throw new Error('Invalid session model response.');
-  return { version: 1, provider: value.provider, model: value.model, ...(value.reasoningEffort === undefined ? {} : { reasoningEffort: value.reasoningEffort }) };
+    || value.reasoningEffort !== undefined && !reasoningEfforts.includes(value.reasoningEffort)) throw new Error('Invalid role catalog response.');
+  return { id: value.id, name: value.name, provider: value.provider, model: value.model, ...(value.reasoningEffort === undefined ? {} : { reasoningEffort: value.reasoningEffort }) };
 }
 function validateModelChoice(value) {
   if (!value || typeof value !== 'object' || typeof value.provider !== 'string' || !value.provider.trim() || typeof value.model !== 'string' || !value.model.trim() || typeof value.name !== 'string' || !value.name.trim()) throw new Error('Invalid model catalog response.');
   return {
     provider: value.provider, model: value.model, name: value.name,
     ...(typeof value.contextWindow === 'number' && Number.isFinite(value.contextWindow) && value.contextWindow > 0 ? { contextWindow: value.contextWindow } : {}),
-    ...(typeof value.reasoning === 'boolean' ? { reasoning: value.reasoning } : {}),
+    ...(typeof value.maxTokens === 'number' && Number.isFinite(value.maxTokens) && value.maxTokens > 0 ? { maxTokens: value.maxTokens } : {}),
+    ...(value.capabilities && typeof value.capabilities === 'object' && typeof value.capabilities.imageInput === 'boolean' ? { capabilities: { imageInput: value.capabilities.imageInput } } : {}),
+    ...(Array.isArray(value.reasoningEfforts) && value.reasoningEfforts.every(item => reasoningEfforts.includes(item)) ? { reasoningEfforts: value.reasoningEfforts.slice() } : {}),
+    ...(reasoningEfforts.includes(value.defaultReasoningEffort) ? { defaultReasoningEffort: value.defaultReasoningEffort } : {}),
   };
 }
-function modelValue(model) { return model ? JSON.stringify([model.provider, model.model]) : ''; }
-function modelMatches(model, provider, id) { return !!model && model.provider === provider && model.model === id; }
-function renderModelPicker(entry, disabled) {
-  const select = $('model-select'); select.replaceChildren();
-  if (!entry) {
-    const option = element('option', '', 'No session selected'); option.value = ''; select.append(option);
-    select.disabled = true; select.title = 'Select a session to choose its model.';
-    return;
+function validateModelBinding(value) {
+  if (value === undefined || value === null) return null;
+  if (typeof value !== 'object' || Array.isArray(value) || value.version !== 2) throw new Error('Invalid session model response.');
+  if (value.kind === 'agent') return { version: 2, kind: 'agent' };
+  if (value.kind === 'role' && typeof value.role === 'string' && value.role.trim()) return { version: 2, kind: 'role', role: value.role };
+  if (value.kind === 'model' && typeof value.provider === 'string' && value.provider.trim()
+    && typeof value.model === 'string' && value.model.trim()
+    && (value.reasoningEffort === undefined || reasoningEfforts.includes(value.reasoningEffort))) {
+    return { version: 2, kind: 'model', provider: value.provider, model: value.model, ...(value.reasoningEffort === undefined ? {} : { reasoningEffort: value.reasoningEffort }) };
   }
-  if (state.modelsLoading) {
-    const option = element('option', '', 'Loading models…'); option.value = ''; select.append(option);
-    select.disabled = true; select.title = 'Loading configured models.';
-    return;
+  throw new Error('Invalid session model response.');
+}
+function validateResolvedModel(value) {
+  if (value === undefined || value === null) return null;
+  if (typeof value !== 'object' || Array.isArray(value) || typeof value.provider !== 'string' || typeof value.model !== 'string' || typeof value.name !== 'string') return null;
+  return {
+    provider: value.provider, model: value.model, name: value.name,
+    ...(value.reasoningEffort === undefined ? {} : { reasoningEffort: value.reasoningEffort }),
+    ...(typeof value.contextWindow === 'number' ? { contextWindow: value.contextWindow } : {}),
+    ...(value.capabilities && typeof value.capabilities.imageInput === 'boolean' ? { capabilities: { imageInput: value.capabilities.imageInput } } : {}),
+  };
+}
+function bindingValue(binding) { return binding ? JSON.stringify(binding) : ''; }
+function bindingMatches(left, right) { return !!left && !!right && JSON.stringify(left) === JSON.stringify(right); }
+function modelValue(model) { return model ? model.provider + ' · ' + model.name : ''; }
+function currentAgentId(entry) { return entry?.agent?.id || state.creationAgent || 'default'; }
+function currentBinding(entry) { return entry ? entry.binding : state.creationBinding; }
+function renderAgentPicker(entry, disabled, creating) {
+  const select = $('agent-select'); select.replaceChildren();
+  if (state.agentsLoading) {
+    const option = element('option', '', 'Loading agents…'); option.value = ''; select.append(option);
+    select.disabled = true; return;
   }
-  if (state.modelsError) {
-    const option = element('option', '', 'Models unavailable'); option.value = ''; select.append(option);
-    select.disabled = true; select.title = 'Could not load models: ' + state.modelsError;
-    return;
+  if (state.agentsError) {
+    const option = element('option', '', 'Agents unavailable'); option.value = ''; select.append(option);
+    select.disabled = true; select.title = 'Could not load agents: ' + state.agentsError; return;
   }
-  if (!state.models.length) {
-    const option = element('option', '', 'No configured models'); option.value = ''; select.append(option);
-    select.disabled = true; select.title = 'No models are configured; the configured default may still be usable.';
-    return;
+  const rootAgents = state.agents.filter(agent => agent.usage !== 'subagent');
+  if (entry && !entry.agent) {
+    const option = element('option', '', 'Select an agent'); option.value = ''; option.disabled = true; select.append(option);
   }
-  const current = entry.model;
-  if (!current) {
-    const option = element('option', '', 'Default model'); option.value = ''; select.append(option);
-  }
-  let matched = false;
-  for (const choice of state.models) {
-    if (modelMatches(current, choice.provider, choice.model)) matched = true;
-    const selected = modelMatches(current, choice.provider, choice.model);
-    const reasoning = selected && current.reasoningEffort ? ' · ' + current.reasoningEffort : '';
-    const option = element('option', '', choice.provider + ' · ' + choice.name + reasoning);
-    option.value = JSON.stringify([choice.provider, choice.model]);
-    option.title = choice.provider + ' · ' + choice.model + (choice.contextWindow ? ' · ' + choice.contextWindow + ' context tokens' : '');
+  for (const agent of rootAgents) {
+    const option = element('option', '', agent.name + (agent.role ? ' · ' + agent.role : ''));
+    option.value = agent.id; option.disabled = !agent.valid;
+    option.title = [agent.id, agent.description, agent.valid ? '' : (agent.warnings.join('; '))].filter(Boolean).join(' · ');
     select.append(option);
   }
-  if (current && !matched) {
-    const option = element('option', '', 'Unavailable · ' + current.provider + ' / ' + current.model);
-    option.value = modelValue(current); option.disabled = true; select.append(option);
+  const wanted = entry?.agent?.id || (creating ? state.creationAgent : '');
+  if (wanted && !rootAgents.some(agent => agent.id === wanted)) {
+    const option = element('option', '', 'Unavailable · ' + wanted); option.value = wanted; option.disabled = true; select.append(option);
   }
   select.disabled = disabled;
-  select.value = modelValue(current);
-  select.title = current ? 'Model for this session: ' + current.provider + ' · ' + current.model : 'Use the configured default model for this session.';
+  select.value = wanted && (rootAgents.some(agent => agent.id === wanted) || wanted === entry?.agent?.id) ? wanted : '';
+  select.title = entry?.agent
+    ? 'Agent for this session: ' + entry.agent.name + ' · role ' + entry.agent.role
+    : creating ? 'Agent for the next session' : 'Select an agent for this session';
 }
-async function loadModels() {
-  state.modelsLoading = true; state.modelsError = ''; renderComposer();
+function renderModelPicker(entry, disabled, creating) {
+  const select = $('model-select'); select.replaceChildren();
+  if (state.modelsLoading || state.rolesLoading) {
+    const option = element('option', '', 'Loading models…'); option.value = ''; select.append(option);
+    select.disabled = true; return;
+  }
+  if (state.modelsError || state.rolesError) {
+    const option = element('option', '', 'Models unavailable'); option.value = ''; select.append(option);
+    select.disabled = true; select.title = 'Could not load models: ' + (state.modelsError || state.rolesError); return;
+  }
+  const current = currentBinding(entry);
+  if (entry && !current) {
+    const option = element('option', '', 'Select a model'); option.value = ''; option.disabled = true; select.append(option);
+  }
+  const follow = { version: 2, kind: 'agent' };
+  const followOption = element('option', '', 'Follow agent');
+  followOption.value = bindingValue(follow); select.append(followOption);
+  if (state.roles.length) {
+    const group = element('optgroup'); group.label = 'Roles';
+    for (const role of state.roles) {
+      const option = element('option', '', role.name + ' · ' + role.provider + '/' + role.model + (role.reasoningEffort ? ' · ' + role.reasoningEffort : ''));
+      option.value = bindingValue({ version: 2, kind: 'role', role: role.id });
+      option.title = 'Role ' + role.id;
+      group.append(option);
+    }
+    select.append(group);
+  }
+  if (state.models.length) {
+    const group = element('optgroup'); group.label = 'Models';
+    for (const choice of state.models) {
+      const option = element('option', '', choice.provider + ' · ' + choice.name + (choice.defaultReasoningEffort ? ' · ' + choice.defaultReasoningEffort : ''));
+      option.value = bindingValue({ version: 2, kind: 'model', provider: choice.provider, model: choice.model, ...(choice.defaultReasoningEffort === undefined ? {} : { reasoningEffort: choice.defaultReasoningEffort }) });
+      option.title = choice.provider + ' · ' + choice.model
+        + (choice.contextWindow ? ' · ' + choice.contextWindow + ' context tokens' : '')
+        + (choice.capabilities?.imageInput ? ' · image input' : '');
+      group.append(option);
+    }
+    select.append(group);
+  }
+  if (current && !bindingMatches(current, follow) && !(current.kind === 'role' && state.roles.some(role => role.id === current.role))
+    && !(current.kind === 'model' && state.models.some(choice => choice.provider === current.provider && choice.model === current.model))) {
+    const option = element('option', '', 'Unavailable · ' + (current.kind === 'role' ? current.role : current.provider + '/' + current.model));
+    option.value = bindingValue(current); option.disabled = true; select.append(option);
+  }
+  select.disabled = disabled;
+  select.value = bindingValue(current);
+  select.title = creating ? 'Model source for the next session'
+    : current?.kind === 'agent' ? 'Model follows the selected agent role'
+    : current?.kind === 'role' ? 'Model follows role ' + current.role
+    : current ? 'Explicit model ' + current.provider + '/' + current.model
+    : 'Select a model source for this session';
+}
+async function loadCatalogs() {
+  state.modelsLoading = true; state.agentsLoading = true; state.rolesLoading = true;
+  state.modelsError = ''; state.agentsError = ''; state.rolesError = '';
+  renderComposer();
+  const [models, agents, roles] = await Promise.allSettled([api('/api/models'), api('/api/agents'), api('/api/roles')]);
+  if (models.status === 'fulfilled' && models.value && Array.isArray(models.value.models)) {
+    try { state.models = models.value.models.map(validateModelChoice); } catch (error) { state.models = []; state.modelsError = error.message; }
+  } else { state.models = []; state.modelsError = models.status === 'rejected' ? models.reason.message : 'The server did not return a model catalog.'; }
+  if (agents.status === 'fulfilled' && agents.value && Array.isArray(agents.value.agents)) {
+    try { state.agents = agents.value.agents.map(validateAgentOption); } catch (error) { state.agents = []; state.agentsError = error.message; }
+  } else { state.agents = []; state.agentsError = agents.status === 'rejected' ? agents.reason.message : 'The server did not return an agent catalog.'; }
+  if (roles.status === 'fulfilled' && roles.value && Array.isArray(roles.value.roles)) {
+    try { state.roles = roles.value.roles.map(validateRole); } catch (error) { state.roles = []; state.rolesError = error.message; }
+  } else { state.roles = []; state.rolesError = roles.status === 'rejected' ? roles.reason.message : 'The server did not return a role catalog.'; }
+  state.modelsLoading = false; state.agentsLoading = false; state.rolesLoading = false;
+  renderComposer();
+}
+async function saveSessionAgent(value) {
+  const workspaceId = state.workspaceId; const sessionId = state.sessionId;
+  if (!workspaceId || !sessionId) {
+    if (value) { state.creationAgent = value; renderComposer(); }
+    return;
+  }
+  const key = sessionKey(workspaceId, sessionId); const entry = state.entries.get(key);
+  if (!entry || entry.loading || entry.permissionSaving || entry.agentSaving || entry.modelSaving || state.runs.has(key)) return;
+  if (entry.agent?.id === value) return;
+  if (!state.agents.some(agent => agent.id === value && agent.valid && agent.usage !== 'subagent')) return;
+  entry.agentSaving = true; entry.agentError = ''; entry.request++; if (isCurrent(workspaceId, sessionId)) renderComposer();
+  let reload = false;
   try {
-    const body = await api('/api/models');
-    if (!body || !Array.isArray(body.models)) throw new Error('The server did not return a model catalog.');
-    state.models = body.models.map(validateModelChoice);
-  } catch (error) { state.models = []; state.modelsError = error.message; }
-  finally { state.modelsLoading = false; renderComposer(); }
+    const body = await api(apiPath(workspaceId, sessionId, 'agent'), jsonOptions('POST', { agent: value }));
+    const agent = validateAgentSummary(body.agent);
+    if (!agent || agent.id !== value) throw new Error('The server returned a different agent selection.');
+    entry.agent = agent; entry.agentWarnings = agent.warnings.slice(); reload = true;
+  } catch (error) { entry.agentError = 'Could not change agent: ' + error.message; }
+  finally {
+    entry.agentSaving = false;
+    if (reload) await loadDetail(workspaceId, sessionId, true);
+    if (isCurrent(workspaceId, sessionId)) renderComposer();
+  }
 }
 async function saveSessionModel(value) {
+  let binding;
+  try { binding = validateModelBinding(JSON.parse(value)); } catch (_) { return; }
+  if (!binding) return;
   const workspaceId = state.workspaceId; const sessionId = state.sessionId;
-  if (!workspaceId || !sessionId) return;
+  if (!workspaceId || !sessionId) { state.creationBinding = binding; renderComposer(); return; }
   const key = sessionKey(workspaceId, sessionId); const entry = state.entries.get(key);
-  if (!entry || entry.loading || entry.permissionSaving || entry.modelSaving || state.runs.has(key)) return;
-  let pair;
-  try { pair = JSON.parse(value); } catch (_) { return; }
-  if (!Array.isArray(pair) || pair.length !== 2 || typeof pair[0] !== 'string' || typeof pair[1] !== 'string') return;
-  const [provider, model] = pair;
-  if (!state.models.some(choice => choice.provider === provider && choice.model === model)) return;
-  if (modelMatches(entry.model, provider, model)) return;
+  if (!entry || entry.loading || entry.permissionSaving || entry.agentSaving || entry.modelSaving || state.runs.has(key)) return;
+  if (bindingMatches(entry.binding, binding)) return;
   entry.modelSaving = true; entry.modelError = ''; entry.request++; if (isCurrent(workspaceId, sessionId)) renderComposer();
   try {
-    const body = await api(apiPath(workspaceId, sessionId, 'model'), jsonOptions('POST', { provider: provider, model: model }));
-    const selected = validateSessionModel(body.model);
-    if (!modelMatches(selected, provider, model)) throw new Error('The server returned a different model selection.');
-    entry.model = selected;
+    const body = await api(apiPath(workspaceId, sessionId, 'model'), jsonOptions('POST', binding));
+    const selected = validateModelBinding(body.model);
+    if (!bindingMatches(selected, binding)) throw new Error('The server returned a different model binding.');
+    entry.binding = selected; entry.resolvedModel = validateResolvedModel(body.resolvedModel);
   } catch (error) { entry.modelError = 'Could not change model: ' + error.message; }
   finally { entry.modelSaving = false; if (isCurrent(workspaceId, sessionId)) renderComposer(); }
 }
@@ -1180,6 +1306,7 @@ function boot() {
   $('close-settings').addEventListener('click', () => { closePermissionMenu('default'); $('settings-dialog').close(); });
   $('permission-default-entry').addEventListener('click', () => togglePermissionMenu('default'));
   $('permission-entry').addEventListener('click', () => togglePermissionMenu('session'));
+  $('agent-select').addEventListener('change', event => saveSessionAgent(event.target.value));
   $('model-select').addEventListener('change', event => saveSessionModel(event.target.value));
   for (const scope of ['default', 'session']) for (const preset of Object.keys(permissionPresets)) $('permission-' + scope + '-' + preset).addEventListener('click', () => choosePermission(scope, preset));
   $('permission-risk-ack').addEventListener('change', () => { $('permission-risk-confirm').disabled = !$('permission-risk-ack').checked; });
@@ -1212,7 +1339,7 @@ function boot() {
   for (const id of ['close-workspace-dialog', 'cancel-workspace']) $(id).addEventListener('click', () => $('workspace-dialog').close());
   for (const id of ['close-remove-dialog', 'cancel-remove']) $(id).addEventListener('click', () => $('remove-dialog').close());
   $('confirm-remove').addEventListener('click', removeWorkspace);
-  loadPermissions(); loadModels(); loadWorkspaces();
+  loadPermissions(); loadCatalogs(); loadWorkspaces();
 }
 boot();
 </script>

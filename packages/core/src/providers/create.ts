@@ -1,5 +1,7 @@
 import type { Config, ProviderConfig } from '../config/load';
 import { ConfigSchema } from '../config/load';
+import type { ModelDescriptor } from '../config/models';
+import type { ReasoningEffort } from '../protocol/reasoning';
 import { DeepSeekMessagesModel } from './dsh-deepseek';
 import type { DshReasoningEffort } from './dsh-deepseek';
 import { DSH_OFFICIAL_MODELS } from './dsh-registry';
@@ -9,7 +11,7 @@ import type { PiAiRouteConfig } from './pi-model';
 import type { ModelClient } from './types';
 
 /** Construct the explicitly selected route. No provider leaves fake fallback to the caller. */
-export function createConfiguredModel(input: Config): ModelClient | undefined {
+export function createConfiguredModel(input: Config, descriptor?: ModelDescriptor): ModelClient | undefined {
   // Callers can construct Config programmatically and bypass the loader.
   const config = ConfigSchema.parse(input);
   const provider = config.provider;
@@ -46,7 +48,10 @@ export function createConfiguredModel(input: Config): ModelClient | undefined {
       throw new Error('Unsupported deepseek-official route option');
     }
     const effort = config.reasoningEffort ?? profile?.reasoningEffort;
-    if (effort !== undefined && !['off', 'low', 'high', 'max'].includes(effort)) {
+    const allowedEfforts = descriptor?.reasoning?.efforts
+      ? Object.keys(descriptor.reasoning.efforts)
+      : ['off', 'low', 'high', 'max'];
+    if (effort !== undefined && !allowedEfforts.includes(effort)) {
       throw new Error(`Unsupported DeepSeek reasoning effort "${effort}"`);
     }
     const keyEnv = profile?.apiKeyEnv;
@@ -60,6 +65,7 @@ export function createConfiguredModel(input: Config): ModelClient | undefined {
       ...(profile?.streamIdleTimeoutMs === undefined ? {} : { streamIdleTimeoutMs: profile.streamIdleTimeoutMs }),
       ...(profile?.systemPromptUpdate === undefined ? {} : { systemPromptUpdate: profile.systemPromptUpdate }),
       ...(effort === undefined ? {} : { reasoningEffort: effort as DshReasoningEffort }),
+      ...(descriptor?.reasoning === undefined ? {} : { reasoning: descriptor.reasoning }),
       ...(maxTokens === undefined ? {} : { maxTokens }),
     });
   }
@@ -73,18 +79,28 @@ export function createConfiguredModel(input: Config): ModelClient | undefined {
     throw new Error('Unsupported pi-ai route option');
   }
   const effort = config.reasoningEffort ?? profile?.reasoningEffort ?? profile?.reasoning;
-  if (effort === 'off') throw new Error('pi-ai adapter does not support explicit reasoning effort "off"');
+  if (effort === 'off' && descriptor?.reasoning?.wire === undefined) {
+    throw new Error('pi-ai adapter does not support explicit reasoning effort "off"');
+  }
+  const models = profile?.models?.map((model) => ({
+    ...model,
+    reasoning: typeof model.reasoning === 'boolean' ? model.reasoning : model.reasoning ? true : undefined,
+  }));
   const route: PiAiRouteConfig = {
     ...(profile?.api === undefined ? {} : { api: profile.api }),
     ...(profile?.baseURL === undefined ? {} : { baseURL: profile.baseURL }),
-    ...(profile?.models === undefined ? {} : { models: profile.models }),
+    ...(models === undefined ? {} : { models }),
     ...(profile?.apiKey === undefined ? {} : { apiKey: profile.apiKey }),
     ...(profile?.apiKeyEnv === undefined ? {} : { apiKeyEnv: profile.apiKeyEnv }),
     ...(profile?.auth === undefined ? {} : { auth: profile.auth }),
     ...(profile?.headers === undefined ? {} : { headers: profile.headers }),
     ...(profile?.timeoutMs === undefined ? {} : { timeoutMs: profile.timeoutMs }),
     ...(profile?.maxRetries === undefined ? {} : { maxRetries: profile.maxRetries }),
-    ...(effort === undefined ? {} : { reasoning: effort }),
+    ...(effort === undefined || effort === 'off' ? {} : { reasoning: effort }),
+    ...(descriptor?.reasoning?.efforts === undefined ? {} : { reasoningEfforts: descriptor.reasoning.efforts }),
+    ...(descriptor?.reasoning?.budgets === undefined ? {} : { reasoningBudgets: descriptor.reasoning.budgets }),
+    ...(descriptor?.reasoning?.wire === undefined ? {} : { reasoningWire: descriptor.reasoning.wire }),
+    ...(descriptor?.reasoning?.default === undefined ? {} : { defaultReasoningEffort: descriptor.reasoning.default }),
   };
   const resolved = resolvePiAiRoute(provider, route);
   if (!resolved.models.some((model) => model.id === config.model)) {
@@ -113,4 +129,25 @@ function createLegacyOpenAI(provider: ProviderConfig, config: Config): OpenAIMod
     ...(provider.timeoutMs !== undefined ? { timeoutMs: provider.timeoutMs } : {}),
     ...(provider.maxRetries !== undefined ? { maxRetries: provider.maxRetries } : {}),
   });
+}
+
+/** Construct a model from a validated catalog descriptor. */
+export function createCatalogModel(
+  config: Config,
+  descriptor: ModelDescriptor,
+  reasoningEffort?: ReasoningEffort,
+): ModelClient {
+  if (descriptor.protocol === 'legacy-openai') {
+    const model = createConfiguredModel(config);
+    if (!model) throw new Error('The legacy OpenAI model is not configured');
+    return model;
+  }
+  const model = createConfiguredModel({
+    ...config,
+    provider: descriptor.provider,
+    model: descriptor.id,
+    ...(reasoningEffort === undefined ? {} : { reasoningEffort }),
+  }, descriptor);
+  if (!model) throw new Error(`No model client is configured for provider "${descriptor.provider}"`);
+  return model;
 }

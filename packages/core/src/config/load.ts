@@ -4,6 +4,7 @@ import { dirname, join } from 'node:path';
 import { z } from 'zod';
 import { PERMISSION_MODES } from '../protocol/permission';
 import type { Rule } from '../protocol/permission';
+import { ReasoningEffortSchema } from '../protocol/reasoning';
 import { parseRuleSet } from '../permissions/rules';
 
 /**
@@ -28,15 +29,69 @@ export type ProviderConfig = z.infer<typeof ProviderSchema>;
 
 const nonEmpty = z.string().trim().min(1);
 const positiveInteger = z.number().int().positive().max(Number.MAX_SAFE_INTEGER);
-const reasoningEffort = z.enum(['off', 'minimal', 'low', 'medium', 'high', 'xhigh', 'max']);
+const reasoningEffort = ReasoningEffortSchema;
+
+const safePathSegment = z.string().min(1).max(128).refine(
+  (segment) => !['__proto__', 'constructor', 'prototype'].includes(segment),
+  'unsafe field path segment',
+);
+const wireField = z.string().trim().min(1).max(512).refine((path) => {
+  const segments = path.split('.');
+  if (segments.length === 0 || segments.some((segment) => !safePathSegment.safeParse(segment).success)) return false;
+  return !['model', 'messages', 'stream', 'tools'].includes(segments[0]!);
+}, 'invalid dotted field path');
+const wireValue = z.union([z.string(), z.number(), z.boolean(), z.null()]);
+
+const reasoningWire = z.object({
+  enableField: wireField.optional(),
+  enableValue: wireValue.optional(),
+  disableField: wireField.optional(),
+  disableValue: wireValue.optional(),
+  effortField: wireField.optional(),
+  budgetField: wireField.optional(),
+}).strict();
+
+const modelReasoning = z.object({
+  efforts: z.partialRecord(reasoningEffort, z.union([z.string(), z.number(), z.null()])).optional(),
+  budgets: z.partialRecord(reasoningEffort, positiveInteger).optional(),
+  default: reasoningEffort.optional(),
+  wire: reasoningWire.optional(),
+}).strict().superRefine((value, context) => {
+  if (value.default !== undefined && (value.efforts === undefined || !(value.default in value.efforts))) {
+    context.addIssue({
+      code: 'custom',
+      path: ['default'],
+      message: `default reasoning effort "${value.default}" is not present in efforts`,
+    });
+  }
+});
+
+const modelCapabilities = z.object({
+  imageInput: z.boolean().optional(),
+}).strict();
+
 const routeModel = z.object({
   id: nonEmpty,
   name: nonEmpty.optional(),
   contextWindow: positiveInteger.optional(),
   maxTokens: positiveInteger.optional(),
   input: z.array(z.enum(['text', 'image'])).min(1).optional(),
-  reasoning: z.boolean().optional(),
+  /** Boolean is the historical pi-ai flag; object adds explicit level/wire mapping. */
+  reasoning: z.union([z.boolean(), modelReasoning]).optional(),
+  capabilities: modelCapabilities.optional(),
 }).passthrough();
+
+const role = z.object({
+  name: nonEmpty.optional(),
+  provider: nonEmpty,
+  model: nonEmpty,
+  reasoningEffort: reasoningEffort.optional(),
+}).strict();
+
+const agentProfile = z.object({
+  tools: z.union([z.literal('*'), z.array(nonEmpty)]),
+  skills: z.union([z.literal('*'), z.array(nonEmpty)]).optional(),
+}).strict();
 
 /** Provider profiles use the DSH convention: the map key is the route id. */
 const route = z.object({
@@ -61,6 +116,10 @@ export const ConfigSchema = z.object({
   /** String route for DSH/pi-ai; object is the legacy OpenAI configuration. */
   provider: z.union([nonEmpty, ProviderSchema]).optional(),
   providers: z.record(nonEmpty, route).optional(),
+  /** Additional named model roles. `default` may override the top-level default role. */
+  roles: z.record(nonEmpty, role).optional(),
+  /** Named tool/skill allowlists referenced by agent Markdown files. */
+  agentProfiles: z.record(nonEmpty, agentProfile).optional(),
   reasoningEffort: reasoningEffort.optional(),
   maxTokens: positiveInteger.optional(),
   /** Optional input budget for pre-request compaction; defaults to the model catalog. */

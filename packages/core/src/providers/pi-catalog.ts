@@ -22,6 +22,8 @@
  */
 import type { Api, Model, Provider, SimpleStreamOptions } from '@earendil-works/pi-ai';
 import { builtinProviders } from '@earendil-works/pi-ai/providers/all';
+import type { ModelReasoning } from '../config/models';
+import type { ReasoningEffort } from '../protocol/reasoning';
 
 export type PiAiCustomApi = 'openai-completions' | 'openai-responses' | 'anthropic-messages';
 
@@ -46,6 +48,11 @@ export interface PiAiRouteConfig {
   timeoutMs?: number;
   maxRetries?: number;
   reasoning?: SimpleStreamOptions['reasoning'];
+  /** Optional canonical effort -> wire value mapping applied through onPayload. */
+  reasoningEfforts?: ModelReasoning['efforts'];
+  reasoningBudgets?: ModelReasoning['budgets'];
+  reasoningWire?: ModelReasoning['wire'];
+  defaultReasoningEffort?: ReasoningEffort;
 }
 
 export interface PiAiConfig {
