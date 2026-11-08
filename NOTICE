@@ -20,15 +20,21 @@ references rather than copying source files:
   by DSH sandbox policy and local runner behavior.
 - packages/core/src/skills/: progressive skill discovery/loading, informed by
   DSH filesystem skill behavior.
-- packages/web/: local UI/API boundary and Web client. Its component structure,
-  CSS, and selected generic SVG artwork are adapted from DSH; it does not include
-  the DSH Web runtime or Cordis client integration.
+- packages/web/: local UI/API boundary and React Web client. The Web frontend
+  reuses DSH's presentational layer directly instead of recreating it; it does
+  not include the DSH Web runtime or Cordis client integration.
 
-The Web client in packages/web/src/client.ts adapts component markup and styling
-from DSH's ui-sidebar, ui-workspace, ui-conversation, ui-settings-general,
-ui-approval, ui-trajectory, and session-log-export client packages, as well as
-icon artwork from packages/client/ui-primitives/src/icons/artwork.ts. Adapted
-source is distributed under the DSH MIT license below.
+Copied DSH source is kept under packages/web/ui/vendor/ (ui-theme styles,
+Cordis-free ui-primitives React atoms, icon artwork, and shared UI utilities)
+and packages/web/ui/src/styles/dsh/ (the CSS modules for app frame, sidebar,
+chat view, message items, reasoning rows, turn process/tail/trigger, tool rows,
+tool details/tree, assistant markdown, input bar, hero shell, approval panel,
+model/permission selectors, permission rows, plan mode, plan preview, todo
+panel, and chat groups). These files are copied from DSH's ui-sidebar,
+ui-workspace, ui-conversation, ui-settings-general, ui-approval, ui-trajectory,
+session-log-export, and client/ui-primitives packages, with only import-path and
+runtime-boundary adjustments. Adapted source is distributed under the DSH MIT
+license below.
 
 MIT License
 

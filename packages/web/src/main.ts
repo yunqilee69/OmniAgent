@@ -1,10 +1,14 @@
 import { homedir } from 'node:os';
 import { join } from 'node:path';
 import {
+  AgentAuthoringService,
   AgentCatalog,
   ConfigStore,
   FakeModel,
+  McpService,
+  ModeStore,
   RuntimeResolver,
+  ScheduleService,
   Session,
   SessionStore,
   SubagentManager,
@@ -13,10 +17,16 @@ import {
   supportedReasoningEfforts,
   textResponse,
 } from '@omniagent/core';
+import type { DshPermissionSnapshot, ResolvedSessionRuntime, SessionHandle } from '@omniagent/core';
 import type { AgentSummary, RoleSummary } from './server';
 import { readWorkspaceAudit, recordWorkspaceAudit } from './audit';
 import { ApprovalBroker } from './approval';
+import { RoleSettings } from './catalog-settings';
+import { McpSettings } from './mcp-settings';
+import { ModelSettings } from './model-settings';
+import { LiveSessionRegistry } from './live-sessions';
 import { PermissionSettings } from './permissions';
+import { SessionScheduleHost } from './schedule-host';
 import { startWebHost } from './server';
 import { WorkspaceRegistry } from './workspaces';
 
@@ -24,7 +34,29 @@ async function main(): Promise<void> {
   const configDir = defaultConfigDir();
   const permissionSettings = await PermissionSettings.open(join(configDir, 'config.json'), { trustedHome: homedir() });
   const configStore = await ConfigStore.open(join(configDir, 'config.json'));
+  const roleSettings = await RoleSettings.open(join(configDir, 'config.json'), { trustedHome: homedir() });
+  const modelSettings = await ModelSettings.open(join(configDir, 'config.json'), { trustedHome: homedir() });
+  const mcp = new McpService({
+    loadServers: async () => (await configStore.refresh()).config.mcpServers,
+    log: (message) => console.error(message),
+  });
+  const mcpSettings = await McpSettings.open(join(configDir, 'config.json'), {
+    trustedHome: homedir(),
+    statuses: () => mcp.statuses(),
+    onChange: () => mcp.sync(),
+  });
+  await mcp.sync();
   const agents = new AgentCatalog(join(configDir, 'agents'));
+  const modes = new ModeStore({
+    path: join(configDir, 'modes.json'),
+    configStore,
+    agents,
+  });
+  const agentAuthoring = new AgentAuthoringService({
+    dir: join(configDir, 'agents'),
+    catalog: agents,
+    configStore,
+  });
   const runtime = new RuntimeResolver({ configStore, agents });
   const store = new SessionStore(join(configDir, 'sessions'));
   const workspaces = new WorkspaceRegistry(join(configDir, 'workspaces.json'));
@@ -43,6 +75,7 @@ async function main(): Promise<void> {
     audit: (entry, workspacePath) => recordWorkspaceAudit(configDir, workspacePath, entry),
     maxDepth: initialConfig.subagents?.maxDepth ?? 1,
     maxActive: initialConfig.subagents?.maxActive ?? 8,
+    mcpTools: () => mcp.tools(),
   });
 
   async function listAgents(): Promise<AgentSummary[]> {
@@ -55,6 +88,7 @@ async function main(): Promise<void> {
       role: agent.role,
       usage: agent.usage,
       profile: agent.profile,
+      builtIn: agent.sourcePath.startsWith('builtin:'),
       valid: true,
       warnings: [],
     }));
@@ -84,6 +118,70 @@ async function main(): Promise<void> {
       .sort((left, right) => left.id.localeCompare(right.id));
   }
 
+  const liveSessions = new LiveSessionRegistry();
+  const schedules = new ScheduleService({
+    file: join(configDir, 'schedules.json'),
+    host: new SessionScheduleHost({
+      store,
+      workspaces,
+      runtime,
+      subagents,
+      permissionSettings,
+      modes,
+      liveSessions,
+      compose: (workspacePath, handle, permissions, resolved) =>
+        composeSession(workspacePath, handle, permissions, resolved, false),
+      log: (message) => console.error(message),
+    }),
+    log: (message) => console.error(message),
+  });
+  await schedules.open();
+
+  /**
+   * Compose one Session around an opened handle. Foreground Web turns route
+   * approvals to the browser; unattended scheduled deliveries auto-deny.
+   */
+  function composeSession(
+    workspacePath: string,
+    handle: SessionHandle,
+    permissions: DshPermissionSnapshot,
+    resolved: ResolvedSessionRuntime,
+    interactive: boolean,
+  ): Session {
+    const config = configStore.snapshot.config;
+    return new Session({
+      cwd: handle.header.cwd ?? workspacePath,
+      workspace: workspacePath,
+      model: resolved.model ?? demo,
+      ...(resolved.modelId === undefined ? {} : { modelId: resolved.modelId }),
+      agent: resolved.sessionAgent,
+      modelCapabilities: resolved.capabilities,
+      todoAllowParallelInProgress: resolved.todoAllowParallelInProgress,
+      dshPermissions: permissions,
+      maxSteps: config.maxSteps,
+      ...(resolved.contextWindowTokens === undefined ? {} : { contextWindowTokens: resolved.contextWindowTokens }),
+      ...(config.retainContextTokens === undefined ? {} : { retainContextTokens: config.retainContextTokens }),
+      approve: interactive ? approvals.handler(workspacePath, handle.id) : async () => 'deny',
+      reviewPlan: interactive
+        ? approvals.planHandler(workspacePath, handle.id)
+        : async () => ({ approved: false, feedback: 'Plan review is unavailable in an unattended scheduled session.' }),
+      audit: (entry) => recordWorkspaceAudit(configDir, workspacePath, entry),
+      session: handle,
+      system: resolved.system,
+      title: {
+        ...(resolved.model === undefined || resolved.modelId === undefined ? {} : {
+          model: resolved.model,
+          modelId: resolved.modelId,
+          ...(resolved.modelDescriptor?.provider === undefined ? {} : { provider: resolved.modelDescriptor.provider }),
+        }),
+      },
+      subagents,
+      mcpTools: mcp.tools(),
+      schedule: schedules,
+      ...(interactive && resolved.agent.id === 'creator' ? { agentAuthoring } : {}),
+    });
+  }
+
   await workspaces.add(process.cwd());
   const host = await startWebHost({
     workspaces,
@@ -106,32 +204,22 @@ async function main(): Promise<void> {
     },
     listAgents,
     listRoles,
+    modeStore: modes,
+    roleSettings,
+    modelSettings,
+    mcpSettings,
+    mcpToolNames: () => mcp.toolNames(),
+    agentAuthoring,
     readAudit: (workspace, sessionId) => readWorkspaceAudit(configDir, workspace.path, sessionId),
-    createRuntimeSession: async (workspace, handle, permissions, resolved) => {
-      const config = configStore.snapshot.config;
-      return new Session({
-        cwd: workspace.path,
-        workspace: workspace.path,
-        model: resolved.model ?? demo,
-        ...(resolved.modelId === undefined ? {} : { modelId: resolved.modelId }),
-        agent: resolved.sessionAgent,
-        modelCapabilities: resolved.capabilities,
-        todoAllowParallelInProgress: resolved.todoAllowParallelInProgress,
-        dshPermissions: permissions,
-        maxSteps: config.maxSteps,
-        ...(resolved.contextWindowTokens === undefined ? {} : { contextWindowTokens: resolved.contextWindowTokens }),
-        ...(config.retainContextTokens === undefined ? {} : { retainContextTokens: config.retainContextTokens }),
-        approve: approvals.handler(workspace.path, handle.id),
-        reviewPlan: approvals.planHandler(workspace.path, handle.id),
-        audit: (entry) => recordWorkspaceAudit(configDir, workspace.path, entry),
-        session: handle,
-        system: resolved.system,
-        subagents,
-      });
-    },
+    liveSessions,
+    schedule: schedules,
+    createRuntimeSession: async (workspace, handle, permissions, resolved) =>
+      composeSession(workspace.path, handle, permissions, resolved, true),
   }, Number(process.env.OMNIAGENT_PORT ?? 4317));
   console.log(`OmniAgent Web: ${host.address()}`);
   const shutdown = () => void (async () => {
+    await schedules.close();
+    await mcp.close();
     await subagents.close();
     await host.close();
     process.exit(0);

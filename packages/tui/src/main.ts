@@ -6,6 +6,7 @@ import {
   AuditLog,
   ConfigStore,
   FakeModel,
+  McpService,
   RuntimeResolver,
   Session,
   SessionStore,
@@ -224,6 +225,11 @@ async function main(): Promise<void> {
   let demoModel: FakeModel | undefined;
   const demo = (): FakeModel => (demoModel ??= createDemoModel());
   const config = configStore.snapshot.config;
+  const mcp = new McpService({
+    loadServers: async () => (await configStore.refresh()).config.mcpServers,
+    log: (message) => renderer.print(`${sayIndent(paintWarn(`MCP: ${sanitizeTerminal(message)}`))}\n`),
+  });
+  await mcp.sync();
 
   const subagents = new SubagentManager({
     store,
@@ -235,6 +241,7 @@ async function main(): Promise<void> {
     audit: (entry) => audit.record(entry),
     maxDepth: config.subagents?.maxDepth ?? 1,
     maxActive: config.subagents?.maxActive ?? 8,
+    mcpTools: () => mcp.tools(),
     onBackgroundEvent: (sessionId, event) => {
       if (event.type === 'assistant.delta' || event.type === 'assistant.reasoning.delta' || event.type === 'assistant.message') return;
       backgroundNotice(sanitizeTerminal(sessionId.slice(0, 8)), event);
@@ -314,7 +321,7 @@ async function main(): Promise<void> {
     }
     try {
       const resolved = await runtime.resolve({ cwd, agentId: agent.agent, binding: binding.binding, isRoot: true });
-      statusAgent = `${sanitizeTerminal(resolved.agent.name)} · ${sanitizeTerminal(resolved.agent.role)}`;
+      statusAgent = sanitizeTerminal(resolved.agent.name);
       statusModel = resolvedModelLabel(resolved);
       statusError = '';
     } catch (error) {
@@ -345,7 +352,15 @@ async function main(): Promise<void> {
       audit: (entry) => audit.record(entry),
       session: nextHandle,
       system: resolved.system,
+      title: {
+        ...(resolved.model === undefined || resolved.modelId === undefined ? {} : {
+          model: resolved.model,
+          modelId: resolved.modelId,
+          ...(resolved.modelDescriptor?.provider === undefined ? {} : { provider: resolved.modelDescriptor.provider }),
+        }),
+      },
       subagents,
+      mcpTools: mcp.tools(),
       onBackgroundEvent: (event) => {
         if (event.type === 'assistant.delta' || event.type === 'assistant.reasoning.delta' || event.type === 'assistant.message') return;
         backgroundNotice('background', event);
@@ -479,13 +494,16 @@ async function main(): Promise<void> {
         }
         const marker = item.id === handle.id ? roles.accent('*') : ' ';
         const id = item.id === handle.id ? roles.accent(sanitizeTerminal(item.id)) : sanitizeTerminal(item.id);
+        const title = item.description?.trim()
+          || item.title?.trim()
+          || (item.blank ? '新会话' : '未命名');
         const detail = [
           ...(agent === undefined ? [] : [roles.dim(`agent ${sanitizeTerminal(agent)}`)]),
           roles.dim(`${item.eventCount} events`),
           roles.dim(relation),
           roles.dim(sanitizeTerminal(item.workspace)),
         ];
-        say(sayIndent(`${marker} ${id}  ${detail.join(roles.dim('  '))}`));
+        say(sayIndent(`${marker} ${sanitizeTerminal(title)}  ${id}  ${detail.join(roles.dim('  '))}`));
       }
       continue;
     }
@@ -615,7 +633,6 @@ async function main(): Promise<void> {
       handle = await store.open(cwd, handle.id);
       try {
         const snapshot = await configStore.refresh();
-        const roleList = [...snapshot.catalog.roles.values()].sort((left, right) => left.id.localeCompare(right.id));
         const modelList = listCatalogModels(snapshot.catalog)
           .sort((left, right) => `${left.provider}/${left.id}`.localeCompare(`${right.provider}/${right.id}`));
         const bindingProjection = projectModelSelection(handle.events);
@@ -624,15 +641,9 @@ async function main(): Promise<void> {
         if (bindingProjection.status === 'invalid') sayIndented(paintWarn('当前会话的模型选择无效；请重新选择。'));
         if (argument.length === 0) {
           sayIndented(roles.dim('模型'));
-          const follow = activeBinding?.kind === 'agent' ? roles.accent('*') : ' ';
+          const follow = activeBinding?.kind === 'agent' || activeBinding?.kind === 'role' ? roles.accent('*') : ' ';
           say(sayIndent(`${follow} 1. ${roles.dim('跟随智能体')}${roles.dim(' — 使用智能体角色对应的模型')}`));
           let index = 2;
-          for (const role of roleList) {
-            const active = activeBinding?.kind === 'role' && activeBinding.role === role.id;
-            const mark = active ? roles.accent('*') : ' ';
-            const label = `${role.id} — ${role.provider}/${role.model}${role.reasoningEffort ? ` (${role.reasoningEffort})` : ''}`;
-            say(sayIndent(`${mark} ${index++}. ${roles.dim('角色')} ${active ? roles.accent(sanitizeTerminal(label)) : sanitizeTerminal(label)}`));
-          }
           for (const model of modelList) {
             const active = activeBinding?.kind === 'model' && activeBinding.provider === model.provider && activeBinding.model === model.id;
             const mark = active ? roles.accent('*') : ' ';
@@ -640,27 +651,18 @@ async function main(): Promise<void> {
             const label = `${model.provider}/${model.id} — ${model.name}${reasoning}`;
             say(sayIndent(`${mark} ${index++}. ${roles.dim('模型')} ${active ? roles.accent(sanitizeTerminal(label)) : sanitizeTerminal(label)}`));
           }
-          sayIndented(paintDim('使用 /model <序号>、/model agent、/model role <id> 或 /model <provider> <model> 切换。'));
+          sayIndented(paintDim('使用 /model <序号>、/model agent 或 /model <provider> <model> 切换。'));
           continue;
         }
 
         let binding: ModelBinding | undefined;
         if (argument === 'agent') {
           binding = defaultModelBinding();
-        } else if (argument.startsWith('role ')) {
-          const role = argument.slice('role '.length).trim();
-          if (!roleList.some((entry) => entry.id === role)) {
-            sayIndented(paintWarn('该角色不在当前配置中。'));
-            continue;
-          }
-          binding = { version: 2, kind: 'role', role };
         } else if (/^\d+$/.test(argument)) {
           const numeric = Number(argument);
           if (numeric === 1) binding = defaultModelBinding();
-          else if (numeric >= 2 && numeric <= roleList.length + 1) {
-            binding = { version: 2, kind: 'role', role: roleList[numeric - 2]!.id };
-          } else {
-            const model = modelList[numeric - roleList.length - 2];
+          else {
+            const model = modelList[numeric - 2];
             if (model) {
               binding = {
                 version: 2,
@@ -679,7 +681,7 @@ async function main(): Promise<void> {
           const [provider, ...rest] = argument.split(/\s+/);
           const modelId = rest.join(' ');
           if (!provider || !modelId) {
-            sayIndented(paintDim('用法：/model <序号>、/model agent、/model role <id> 或 /model <provider> <model>'));
+            sayIndented(paintDim('用法：/model <序号>、/model agent 或 /model <provider> <model>'));
             continue;
           }
           const model = modelList.find((entry) => entry.provider === provider && entry.id === modelId);
@@ -767,6 +769,7 @@ async function main(): Promise<void> {
     renderer.beforePrompt();
   }
   await subagents.close();
+  await mcp.close();
   await handle.close();
   rl.close();
 }

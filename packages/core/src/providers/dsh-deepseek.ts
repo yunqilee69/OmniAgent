@@ -38,7 +38,7 @@ export function dshMessagesEndpoint(baseURL: string): string {
   return `${url.pathname.replace(/\/+$/u, '').endsWith('/v1') ? base : `${base}/v1`}/messages`;
 }
 
-/** Direct official DeepSeek Messages client without a Cordis runtime. */
+/** Direct official DeepSeek Messages client. */
 export class DeepSeekMessagesModel implements ModelClient {
   readonly name = 'deepseek-official';
   private readonly options: DeepSeekMessagesOptions;

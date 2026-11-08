@@ -97,7 +97,7 @@ function assistantBlocks(message: AssistantMessage, model: string, endpoint?: st
 export function serializeDshRequest(
   request: ModelRequest, options: DshRequestOptions = {}, endpoint?: string,
 ): DshWireRequest {
-  const maxTokens = options.maxTokens ?? DSH_MAX_TOKENS;
+  const maxTokens = request.maxTokens ?? options.maxTokens ?? DSH_MAX_TOKENS;
   if (!Number.isSafeInteger(maxTokens) || maxTokens <= 0) return invalid('DeepSeek Messages maxTokens must be a positive safe integer');
   const reasoning = options.reasoning;
   const effort = options.reasoningEffort ?? reasoning?.default ?? 'high';

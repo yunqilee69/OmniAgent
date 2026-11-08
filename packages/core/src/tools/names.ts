@@ -1,3 +1,6 @@
+import { LIST_AGENT_DEFINITIONS_TOOL_NAME, WRITE_AGENT_DEFINITION_TOOL_NAME } from '../agents/authoring.ts';
+import { SCHEDULE_TOOL_GROUP } from '../schedule/tools.ts';
+
 export const READ_FILE_TOOL_NAME = 'read_file';
 export const WRITE_FILE_TOOL_NAME = 'write_file';
 export const EDIT_FILE_TOOL_NAME = 'edit_file';
@@ -17,6 +20,13 @@ export const SEND_MESSAGE_TOOL_NAME = 'send_message';
 export const LIST_AGENTS_TOOL_NAME = 'list_agents';
 export const WAIT_AGENT_TOOL_NAME = 'wait_agent';
 export const INTERRUPT_AGENT_TOOL_NAME = 'interrupt_agent';
+export {
+  SCHEDULE_CREATE_TOOL_NAME,
+  SCHEDULE_EDIT_TOOL_NAME,
+  SCHEDULE_LIST_TOOL_NAME,
+  SCHEDULE_VIEW_TOOL_NAME,
+  SCHEDULE_TOOL_GROUP,
+} from '../schedule/tools.ts';
 
 export const SUBAGENT_TOOL_GROUP = [
   SUBAGENT_TOOL_NAME,
@@ -41,7 +51,10 @@ export const KNOWN_TOOL_NAMES = new Set<string>([
   CREATE_GOAL_TOOL_NAME,
   UPDATE_GOAL_TOOL_NAME,
   BASH_TOOL_NAME,
+  LIST_AGENT_DEFINITIONS_TOOL_NAME,
+  WRITE_AGENT_DEFINITION_TOOL_NAME,
   ...SUBAGENT_TOOL_GROUP,
+  ...SCHEDULE_TOOL_GROUP,
 ]);
 
 /** Expand the `subagent` group and dedupe a profile selector. */

@@ -77,6 +77,23 @@
       "skills": "*"
     }
   },
+  "mcpServers": {
+    "filesystem": {
+      "type": "stdio",
+      "command": "npx",
+      "args": ["-y", "@modelcontextprotocol/server-filesystem", "/path/to/workspace"],
+      "env": {},
+      "timeoutMs": 60000
+    },
+    "remote-example": {
+      "type": "http",
+      "url": "https://example.com/mcp",
+      "headers": {
+        "Authorization": "Bearer ${MCP_TOKEN}"
+      },
+      "enabled": false
+    }
+  },
   "dsh": {
     "permission": {
       "defaultPreset": "workspace-write"

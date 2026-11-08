@@ -9,6 +9,7 @@ import type { ModelClient } from '../providers/types';
 import { discoverSkills, filterSkills, renderSkillCatalog } from '../skills/filesystem';
 import type { SkillSummary } from '../skills/filesystem';
 import { DEFAULT_SYSTEM_PROMPT } from '../prompts';
+import { isMcpToolName } from '../mcp/config';
 import { KNOWN_TOOL_NAMES, expandToolSelector } from '../tools/names';
 import type { AgentUsage } from './agent-selection';
 import { usageAllowsRoot, usageAllowsSubagent } from './agent-selection';
@@ -27,6 +28,8 @@ export interface SessionAgent {
 export interface ResolvedSessionRuntime {
   agent: AgentDefinition;
   sessionAgent: SessionAgent;
+  /** Skills discovered, filtered by the agent profile or mode override. */
+  skills: SkillSummary[];
   model?: ModelClient;
   modelId?: string;
   modelBinding: ModelBinding;
@@ -41,11 +44,19 @@ export interface ResolvedSessionRuntime {
   revision: string;
 }
 
+export interface SessionModeOverride {
+  id: string;
+  tools: '*' | readonly string[];
+  skills: '*' | readonly string[];
+}
+
 export interface ResolveSessionInput {
   cwd: string;
   agentId: string;
   binding?: ModelBinding;
   isRoot: boolean;
+  /** Immutable mode composition copied from the session's `mode/selected` event. */
+  mode?: SessionModeOverride;
 }
 
 export interface RuntimeResolverOptions {
@@ -57,16 +68,19 @@ function revisionOf(parts: readonly (string | undefined)[]): string {
   return createHash('sha256').update(parts.filter((part) => part !== undefined).join('\0')).digest('hex');
 }
 
-function toolsFor(profile: AgentProfileDefinition): '*' | string[] {
-  const expanded = expandToolSelector(profile.tools);
+function toolsForSelector(
+  selector: '*' | readonly string[],
+  label: string,
+): '*' | string[] {
+  const expanded = expandToolSelector(selector);
   if (expanded === '*') return '*';
-  const unknown = expanded.filter((name) => !KNOWN_TOOL_NAMES.has(name));
-  if (unknown.length > 0) throw new Error(`Agent profile "${profile.id}" contains unknown tool(s): ${unknown.join(', ')}`);
+  const unknown = expanded.filter((name) => !KNOWN_TOOL_NAMES.has(name) && !isMcpToolName(name));
+  if (unknown.length > 0) throw new Error(`${label} contains unknown tool(s): ${unknown.join(', ')}`);
   return expanded;
 }
 
-function allowedSkills(profile: { skills: '*' | string[] }): '*' | Set<string> {
-  return profile.skills === '*' ? '*' : new Set(profile.skills);
+function skillsForSelector(selector: '*' | readonly string[]): '*' | Set<string> {
+  return selector === '*' ? '*' : new Set(selector);
 }
 
 export class RuntimeResolver {
@@ -94,8 +108,10 @@ export class RuntimeResolver {
 
     const profile = catalog.profiles.get(agent.profile);
     if (!profile) throw new Error(`Agent "${agent.id}" references unknown profile "${agent.profile}"`);
-    const tools = toolsFor(profile);
-    const skills = allowedSkills(profile);
+    const tools = input.mode === undefined
+      ? toolsForSelector(profile.tools, `Agent profile "${profile.id}"`)
+      : toolsForSelector(input.mode.tools, `Mode "${input.mode.id}"`);
+    const skills = skillsForSelector(input.mode?.skills ?? profile.skills);
 
     const warnings = [...configSnapshot.catalog.warnings];
     let availableSkills: SkillSummary[] = [];
@@ -145,6 +161,7 @@ export class RuntimeResolver {
       agent.id,
       agent.role,
       agent.profile,
+      input.mode?.id,
       JSON.stringify(binding),
       resolvedModel.reasoningEffort,
       tools === '*' ? '*' : [...tools].sort().join(','),
@@ -163,6 +180,7 @@ export class RuntimeResolver {
         tools: tools === '*' ? '*' : new Set(tools),
         skills,
       },
+      skills: availableSkills.map((skill) => ({ ...skill })),
       ...(model === undefined ? {} : { model }),
       ...(resolvedModel.model === undefined ? {} : { modelId: resolvedModel.model.id }),
       modelBinding: binding,

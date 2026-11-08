@@ -3,7 +3,17 @@ import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { request as httpRequest, type ServerResponse } from 'node:http';
 import { afterEach, describe, expect, it } from 'vitest';
-import { FakeModel, Session, SessionStore, textResponse, toolCallResponse } from '@omniagent/core';
+import {
+  createAgentSelectionEvent,
+  createModelSelectionEvent,
+  FakeModel,
+  projectAgentSelection,
+  projectMessages,
+  Session,
+  SessionStore,
+  textResponse,
+  toolCallResponse,
+} from '@omniagent/core';
 import type { SessionHandle } from '@omniagent/core';
 import { createInitialDshPermissionEvent, projectDshPermissions } from '../../core/src/permissions/dsh-permissions';
 import type { DshPermissionSnapshot } from '../../core/src/permissions/dsh-permissions';
@@ -65,6 +75,10 @@ function nextResponse(host: WebHost): Promise<ServerResponse> {
 
 function jsonRequest(body: unknown): RequestInit {
   return { method: 'POST', headers: { 'content-type': 'application/json' }, body: JSON.stringify(body) };
+}
+
+function jsonRequestWith(method: string, body: unknown): RequestInit {
+  return { method, headers: { 'content-type': 'application/json' }, body: JSON.stringify(body) };
 }
 
 function flushed(request: ReturnType<typeof httpRequest>): Promise<void> {
@@ -170,6 +184,118 @@ describe('workspace web host', () => {
     expect(events.map((event) => event.data)).toEqual([
       { version: 1, preset: 'workspace-write' }, { version: 1, preset: 'read-only' },
     ]);
+  });
+
+  it('renames a session without treating the rename as conversation activity', async () => {
+    const { base, first, store } = await setup();
+    const url = sessionsUrl(base, first.id);
+    const handle = await store.create({ id: 'rename-me', workspace: first.path, cwd: first.path });
+    await handle.append({ type: 'message/user', data: { text: 'hello' }, ts: 5 });
+    const before = (await jsonResponse<{ sessions: Array<{ id: string; updatedAt: number }> }>(await fetch(url)))
+      .sessions.find((session) => session.id === 'rename-me');
+    expect(before?.updatedAt).toBe(5);
+
+    const renamed = await fetch(`${url}/rename-me`, jsonRequestWith('PATCH', { title: '  My chat  ' }));
+    expect(renamed.status).toBe(200);
+    expect(await renamed.json()).toEqual({ title: 'My chat' });
+    const detail = await jsonResponse<{ title: string; titleSource: { kind: string } }>(await fetch(`${url}/rename-me`));
+    expect(detail.title).toBe('My chat');
+    expect(detail.titleSource).toEqual({ kind: 'user' });
+    const summary = (await jsonResponse<{ sessions: Array<{ id: string; title?: string; updatedAt: number }> }>(await fetch(url)))
+      .sessions.find((session) => session.id === 'rename-me');
+    expect(summary).toMatchObject({ title: 'My chat', updatedAt: 5 });
+
+    for (const body of [{ title: '' }, { title: '   ' }, { title: 5 }, { title: 'x', extra: true }, {}]) {
+      expect((await fetch(`${url}/rename-me`, jsonRequestWith('PATCH', body))).status).toBe(400);
+    }
+    expect((await fetch(`${url}/missing`, jsonRequestWith('PATCH', { title: 'x' }))).status).toBe(404);
+  });
+
+  it('pins sessions ahead of newer activity and unpins them again', async () => {
+    const { base, first, store } = await setup();
+    const url = sessionsUrl(base, first.id);
+    const older = await store.create({ id: 'older', workspace: first.path, cwd: first.path });
+    await older.append({ type: 'message/user', data: { text: 'old' }, ts: 10 });
+    const newer = await store.create({ id: 'newer', workspace: first.path, cwd: first.path });
+    await newer.append({ type: 'message/user', data: { text: 'new' }, ts: 20 });
+
+    type Listed = { sessions: Array<{ id: string; pinned?: boolean; updatedAt: number }> };
+    expect((await jsonResponse<Listed>(await fetch(url))).sessions.map((session) => session.id))
+      .toEqual(['newer', 'older']);
+
+    const pinned = await fetch(`${url}/older/pin`, jsonRequest({ pinned: true }));
+    expect(pinned.status).toBe(200);
+    expect(await pinned.json()).toEqual({ pinned: true });
+    const ordered = (await jsonResponse<Listed>(await fetch(url))).sessions;
+    expect(ordered.map((session) => session.id)).toEqual(['older', 'newer']);
+    expect(ordered[0]).toMatchObject({ pinned: true, updatedAt: 10 });
+
+    const unpinned = await fetch(`${url}/older/pin`, jsonRequest({ pinned: false }));
+    expect(unpinned.status).toBe(200);
+    const restored = (await jsonResponse<Listed>(await fetch(url))).sessions;
+    expect(restored.map((session) => session.id)).toEqual(['newer', 'older']);
+    expect(restored[1]?.pinned).toBeUndefined();
+
+    for (const body of [{ pinned: 'yes' }, { pinned: true, extra: true }, {}]) {
+      expect((await fetch(`${url}/older/pin`, jsonRequest(body))).status).toBe(400);
+    }
+    expect((await fetch(`${url}/missing/pin`, jsonRequest({ pinned: true }))).status).toBe(404);
+  });
+
+  it('deletes one session without touching its siblings', async () => {
+    const { base, first, store } = await setup();
+    const url = sessionsUrl(base, first.id);
+    const keep = await store.create({ id: 'keep', workspace: first.path, cwd: first.path });
+    await keep.append({ type: 'message/user', data: { text: 'keep' }, ts: 10 });
+    const gone = await store.create({ id: 'gone', workspace: first.path, cwd: first.path });
+    await gone.append({ type: 'message/user', data: { text: 'gone' }, ts: 20 });
+
+    const removed = await fetch(`${url}/gone`, { method: 'DELETE' });
+    expect(removed.status).toBe(200);
+    expect(await removed.json()).toEqual({ deleted: true });
+    const list = await jsonResponse<{ sessions: Array<{ id: string }> }>(await fetch(url));
+    expect(list.sessions.map((session) => session.id)).toEqual(['keep']);
+    expect((await fetch(`${url}/gone`)).status).toBe(404);
+    expect((await fetch(`${url}/gone`, { method: 'DELETE' })).status).toBe(404);
+    expect((await store.open(first.path, 'keep')).id).toBe('keep');
+  });
+
+  it('forks a transcript and its configuration into an unlinked root session', async () => {
+    const { base, first, store } = await setup();
+    const url = sessionsUrl(base, first.id);
+    const source = await store.create({ id: 'source', workspace: first.path, cwd: first.path });
+    await source.append(createInitialDshPermissionEvent('workspace-write'));
+    await source.append(createAgentSelectionEvent('default'));
+    await source.append(createModelSelectionEvent({ version: 2, kind: 'agent' }));
+    await source.append({ type: 'message/user', data: { text: 'Fork me' }, ts: 10 });
+    await source.append({ type: 'session/pinned', data: { pinned: true }, ts: 11 });
+    await source.append({
+      type: 'session/title',
+      ts: 12,
+      data: { title: 'Source chat', messageSeqs: [3], source: { kind: 'user' } },
+    });
+    const sourceEvents = source.events.length;
+
+    const response = await fetch(`${url}/source/fork`, jsonRequest({}));
+    expect(response.status).toBe(201);
+    const { session } = await response.json() as {
+      session: { id: string; title?: string; pinned?: boolean; blank: boolean; updatedAt: number };
+    };
+    expect(session.id).not.toBe('source');
+    expect(session).toMatchObject({ title: 'Source chat (fork)', blank: false });
+    expect(session.pinned).toBeUndefined();
+    expect(session.updatedAt).toBeGreaterThan(12);
+
+    const forked = await store.open(first.path, session.id);
+    expect(projectDshPermissions(forked.events)).toEqual({ status: 'ready', preset: 'workspace-write' });
+    expect(projectAgentSelection(forked.events)).toEqual({ status: 'selected', agent: 'default' });
+    expect(projectMessages(forked.events).some((message) => message.role === 'user')).toBe(true);
+    expect(forked.events.some((event) => event.type === 'session/pinned')).toBe(false);
+    expect(forked.events.at(-1)).toMatchObject({
+      type: 'session/fork',
+      data: { sourceSessionId: 'source' },
+    });
+    expect((await store.open(first.path, 'source')).events).toHaveLength(sourceEvents);
   });
 
   it('does not unregister a workspace while a permission change is being persisted', async () => {
@@ -379,6 +505,51 @@ describe('workspace web host', () => {
     const rest = await reader.read();
     expect(new TextDecoder().decode(rest.value)).toContain('interrupted');
     await reader.cancel();
+  });
+
+  it('steers a direct message into the active turn and exposes the running state', async () => {
+    const steered: string[] = [];
+    let release: (() => void) | undefined;
+    let calls = 0;
+    const { base, first } = await setup((id) => ({
+      id,
+      async *send() {
+        const call = calls;
+        calls += 1;
+        yield { type: 'turn.start', step: 0 };
+        if (call === 0) await new Promise<void>((resolve) => { release = resolve; });
+        yield { type: 'turn.end', reason: 'end_turn' };
+      },
+      interrupt() { release?.(); },
+      async deliverUserMessage(input) {
+        steered.push(typeof input === 'string' ? input : 'content');
+        return 'queued' as const;
+      },
+    }));
+    const url = sessionsUrl(base, first.id);
+    const { session } = await (await fetch(url, jsonRequest({}))).json() as { session: { id: string } };
+    const messagesUrl = `${url}/${session.id}/messages`;
+    const active = await fetch(messagesUrl, jsonRequest({ text: 'first' }));
+    const reader = active.body!.getReader();
+    await reader.read();
+    const detail = await (await fetch(`${url}/${session.id}`)).json() as { running: boolean };
+    expect(detail.running).toBe(true);
+
+    const steer = await fetch(messagesUrl, jsonRequest({ text: 'second', mode: 'steer' }));
+    expect(steer.status).toBe(202);
+    expect(await steer.json()).toEqual({ accepted: true, delivery: 'queued' });
+    expect(steered).toEqual(['second']);
+    expect((await fetch(messagesUrl, jsonRequest({ text: 'third', mode: 'queue' }))).status).toBe(400);
+
+    await fetch(`${url}/${session.id}/interrupt`, jsonRequest({}));
+    await reader.read();
+    await reader.cancel();
+    const settled = await (await fetch(`${url}/${session.id}`)).json() as { running: boolean };
+    expect(settled.running).toBe(false);
+
+    const idleSteer = await fetch(messagesUrl, jsonRequest({ text: 'after', mode: 'steer' }));
+    expect(idleSteer.status).toBe(200);
+    await idleSteer.text();
   });
 
   it('uses the permission snapshot captured when a turn is accepted', async () => {
@@ -1203,5 +1374,118 @@ describe('workspace web host', () => {
     expect((await fetch(`${base}/api/workspaces/${first.id}`, { method: 'DELETE' })).status).toBe(200);
     expect((await fetch(sessionsUrl(base, first.id))).status).toBe(404);
     expect((await new SessionStore(join(first.path, '..', 'sessions')).open(first.path, 'keep')).id).toBe('keep');
+  });
+
+  it('searches workspace files for composer references without leaking excluded trees', async () => {
+    const { base, first } = await setup();
+    await mkdir(join(first.path, 'src', 'lib'), { recursive: true });
+    await mkdir(join(first.path, 'node_modules', 'pkg'), { recursive: true });
+    await writeFile(join(first.path, 'src', 'main.ts'), 'export {};\n');
+    await writeFile(join(first.path, 'src', 'lib', 'util.ts'), 'export const x = 1;\n');
+    await writeFile(join(first.path, 'node_modules', 'pkg', 'index.js'), 'module.exports = {};\n');
+    const root = await jsonResponse<{ entries: Array<{ path: string; kind: string }> }>(
+      await fetch(`${base}/api/workspaces/${first.id}/files?query=`),
+    );
+    expect(root.entries.map((entry) => [entry.path, entry.kind])).toEqual([['src', 'directory']]);
+    const nested = await jsonResponse<{ entries: Array<{ path: string; name: string; kind: string }> }>(
+      await fetch(`${base}/api/workspaces/${first.id}/files?query=util&limit=5`),
+    );
+    expect(nested.entries).toContainEqual({ path: 'src/lib/util.ts', name: 'util.ts', kind: 'file' });
+    expect(nested.entries.some((entry) => entry.path.includes('node_modules'))).toBe(false);
+    expect((await fetch(`${base}/api/workspaces/${first.id}/files?query=${'a'.repeat(1025)}`)).status).toBe(400);
+  });
+
+  it('accepts image and text attachments and persists the composed user content', async () => {
+    const { base, first, store } = await setup();
+    const url = sessionsUrl(base, first.id);
+    const { session } = await jsonResponse<{ session: { id: string } }>(await fetch(url, jsonRequest({})));
+    const image = Buffer.from('image-bytes').toString('base64');
+    const accepted = await fetch(`${url}/${session.id}/messages`, jsonRequest({
+      text: 'Inspect these files',
+      attachments: [
+        { kind: 'text', name: 'notes.txt', mediaType: 'text/plain', text: 'release checklist' },
+        { kind: 'image', name: 'screen.png', mediaType: 'image/png', data: image },
+      ],
+    }));
+    expect(accepted.status).toBe(200);
+    await accepted.text();
+
+    const stored = (await store.open(first.path, session.id)).events.find((event) => event.type === 'message/user');
+    expect(stored?.data).toMatchObject({
+      content: [
+        { type: 'text', text: 'Inspect these files' },
+        expect.objectContaining({ type: 'text', text: expect.stringContaining('release checklist') }),
+        { type: 'image', mediaType: 'image/png', data: image },
+      ],
+    });
+    const detail = await jsonResponse<{ messages: Array<{ role: string; content?: Array<Record<string, unknown>> }> }>(
+      await fetch(`${url}/${session.id}`),
+    );
+    const user = detail.messages.find((message) => message.role === 'user');
+    expect(user?.content).toContainEqual({ type: 'image', mediaType: 'image/png', data: image });
+
+    const invalid = await fetch(`${url}/${session.id}/messages`, jsonRequest({
+      attachments: [{ kind: 'image', name: 'bad.svg', mediaType: 'image/svg+xml', data: image }],
+    }));
+    expect(invalid.status).toBe(400);
+    expect((await fetch(`${url}/${session.id}/messages`, jsonRequest({ text: '   ' }))).status).toBe(400);
+  });
+
+  it('lists recent root sessions with the current workspace first and LIKE filtering', async () => {
+    const { base, first, second, store } = await setup();
+    const alpha = await store.create({ id: 'alpha-session', workspace: first.path, cwd: first.path });
+    await alpha.append({ type: 'message/user', data: { text: 'alpha' } });
+    const beta = await store.create({ id: 'beta-session', workspace: second.path, cwd: second.path });
+    await beta.append({ type: 'message/user', data: { text: 'beta' } });
+    const child = await store.create({
+      id: 'child-session', workspace: first.path, cwd: first.path,
+      parentSessionId: alpha.id, depth: 1,
+    });
+    await child.append({ type: 'message/user', data: { text: 'child' } });
+
+    type Recent = {
+      sessions: Array<{ id: string; workspaceId: string; title: string | null; blank: boolean }>;
+    };
+    const recent = await jsonResponse<Recent>(
+      await fetch(`${base}/api/sessions/recent?workspaceId=${first.id}&limit=10`),
+    );
+    expect(recent.sessions.map((item) => item.id)).toEqual(['alpha-session', 'beta-session']);
+    expect(recent.sessions[0]).toMatchObject({ workspaceId: first.id, title: null, blank: false });
+
+    const limited = await jsonResponse<Recent>(
+      await fetch(`${base}/api/sessions/recent?workspaceId=${first.id}&limit=1`),
+    );
+    expect(limited.sessions.map((item) => item.id)).toEqual(['alpha-session']);
+
+    const filtered = await jsonResponse<Recent>(
+      await fetch(`${base}/api/sessions/recent?workspaceId=${first.id}&query=BETA`),
+    );
+    expect(filtered.sessions.map((item) => item.id)).toEqual(['beta-session']);
+    expect((await fetch(`${base}/api/sessions/recent?workspaceId=missing`)).status).toBe(404);
+    expect((await fetch(`${base}/api/sessions/recent?query=${'a'.repeat(1025)}`)).status).toBe(400);
+  });
+
+  it('schedules context compaction for the next message', async () => {
+    let compactions = 0;
+    const { base, first } = await setup((id) => ({
+      id,
+      async *send() { yield { type: 'turn.end', reason: 'end_turn' }; },
+      interrupt() {},
+      requestCompaction() { compactions += 1; },
+    }));
+    const url = sessionsUrl(base, first.id);
+    const { session } = await jsonResponse<{ session: { id: string } }>(await fetch(url, jsonRequest({})));
+
+    const pending = await fetch(`${url}/${session.id}/compact`, jsonRequest({}));
+    expect(pending.status).toBe(202);
+    expect(await pending.json()).toEqual({ ok: true, scheduled: true });
+    expect(compactions).toBe(0);
+
+    const sent = await fetch(`${url}/${session.id}/messages`, jsonRequest({ text: 'continue' }));
+    expect(sent.status).toBe(200);
+    await sent.text();
+    expect(compactions).toBe(1);
+
+    expect((await fetch(`${url}/missing/compact`, jsonRequest({}))).status).toBe(404);
   });
 });

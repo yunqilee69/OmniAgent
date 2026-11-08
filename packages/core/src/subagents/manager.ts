@@ -48,6 +48,8 @@ export interface SubagentManagerOptions {
   onBackgroundEvent?(sessionId: string, event: AgentEvent): void;
   /** Resolves configured agents, roles, skills, and tool profiles for children. */
   runtime: RuntimeResolver;
+  /** MCP tools are re-read for every child so config changes are picked up. */
+  mcpTools?: () => readonly import('../domain/tool').Tool[];
 }
 
 interface ManagedChild {
@@ -389,6 +391,7 @@ export class SubagentManager implements SubagentService {
       session: handle,
       depth,
       subagents: this,
+      ...(this.options.mcpTools === undefined ? {} : { mcpTools: this.options.mcpTools() }),
       onBackgroundEvent: (event) => {
         this.options.onBackgroundEvent?.(handle.id, event);
         const managed = this.children.get(handle.id);

@@ -1,12 +1,16 @@
 import { constants } from 'node:fs';
 import type { BigIntStats } from 'node:fs';
-import { appendFile, chmod, mkdir, open, readFile, readdir, realpath, rename, stat, unlink } from 'node:fs/promises';
+import { appendFile, chmod, mkdir, open, readFile, readdir, realpath, rename, rmdir, stat, unlink } from 'node:fs/promises';
 import { createHash, randomUUID } from 'node:crypto';
 import { dirname, join, resolve } from 'node:path';
 import { z } from 'zod';
 import { withSessionLock } from './file-lock';
 import { cloneJson, SESSION_FORMAT_VERSION, SessionEventSchema, SessionHeaderSchema } from './types';
 import type { SessionEvent, SessionEventInput, SessionHeader } from './types';
+import { foldSessionTitle, hasHumanMessage, lastActivityTime } from './title';
+import type { SessionTitleSource } from './title';
+import { projectModeSelection } from './mode-selection';
+import { foldSessionPinned } from './pin';
 
 const StoredHeaderSchema = z.object({
   type: z.literal('session'),
@@ -128,10 +132,19 @@ function cachedSession(key: string): ActiveSession | undefined {
 export interface SessionSummary {
   id: string;
   agent?: string;
+  /** Immutable mode preset selected when this root session was created. */
+  mode?: string;
   agentId?: string;
   parentSessionId?: string;
   depth?: number;
   description?: string;
+  /** Latest accepted title, or absent before the first eligible human message. */
+  title?: string;
+  titleSource?: SessionTitleSource;
+  /** Present when the latest pin event pins this session. */
+  pinned?: boolean;
+  /** A freshly created session with no human-visible message yet. */
+  blank: boolean;
   workspace: string;
   cwd: string;
   createdAt: number;
@@ -218,6 +231,8 @@ export class SessionStore {
     parentSessionId?: string;
     depth?: number;
     description?: string;
+    /** Initial events, used by forks to clone a transcript in one write. */
+    events?: readonly SessionEventInput[];
   }): Promise<SessionHandle> {
     const id = input.id ?? input.agentId ?? randomUUID();
     const path = sessionPath(this.root, input.workspace, id);
@@ -228,6 +243,11 @@ export class SessionStore {
         const header = parseHeader(oldText);
         if (header.workspace === input.workspace && header.id === id) throw new Error(`session "${id}" already exists`);
       }
+      const initialEvents = (input.events ?? []).map((event, seq) => ({
+        ...event,
+        seq,
+        ts: event.ts ?? Date.now(),
+      }));
       const log = new SessionLog({
         id,
         agentId: input.agentId ?? id,
@@ -236,7 +256,7 @@ export class SessionStore {
         ...(input.parentSessionId === undefined ? {} : { parentSessionId: input.parentSessionId }),
         ...(input.depth === undefined ? {} : { depth: input.depth }),
         ...(input.description === undefined ? {} : { description: input.description }),
-      });
+      }, initialEvents);
       await mkdir(dirname(path), { recursive: true, mode: 0o700 });
       let file;
       try {
@@ -246,7 +266,8 @@ export class SessionStore {
         throw error;
       }
       try {
-        await file.writeFile(`${JSON.stringify(log.header)}\n`, 'utf8');
+        const content = [JSON.stringify(log.header), ...log.events.map((event) => JSON.stringify(event))].join('\n') + '\n';
+        await file.writeFile(content, 'utf8');
         await file.sync();
       } finally {
         await file.close();
@@ -289,6 +310,53 @@ export class SessionStore {
       this.remember(modernPath, session);
       return new SessionHandle(this, path, session.log);
     }));
+  }
+
+  /**
+   * Remove one session log and any matching legacy copy.
+   *
+   * The modern path is checked by header identity so a misplaced file is never
+   * deleted. A legacy copy is removed only when it carries the same workspace
+   * and id; otherwise it may belong to a colliding workspace.
+   */
+  async delete(workspace: string, id: string): Promise<boolean> {
+    const modernPath = sessionPath(this.root, workspace, id);
+    return serialize(modernPath, async () => {
+      const directories = new Set<string>();
+      const removed = await withSessionLock(modernPath, async () => {
+        let deleted = false;
+        const modernText = await this.readOptional(modernPath);
+        if (modernText !== undefined) {
+          const header = parseHeader(modernText);
+          if (header.id !== id || header.workspace !== workspace) throw new Error('session identity mismatch');
+          await unlink(modernPath);
+          deleted = true;
+          directories.add(dirname(modernPath));
+        }
+        const legacyPath = legacySessionPath(this.root, workspace, id);
+        const legacyText = await this.readOptional(legacyPath);
+        if (legacyText !== undefined) {
+          let sameSession = false;
+          try {
+            const header = parseHeader(legacyText);
+            sameSession = header.id === id && header.workspace === workspace;
+          } catch {
+            sameSession = false;
+          }
+          if (sameSession) {
+            await unlink(legacyPath);
+            deleted = true;
+            directories.add(dirname(legacyPath));
+          }
+        }
+        return deleted;
+      });
+      this.active.delete(this.key(workspace, id));
+      activeSessions.delete(modernPath);
+      // Remove empty session directories after the sibling lock file is gone.
+      for (const directory of directories) await removeEmptyDirectory(directory);
+      return removed;
+    });
   }
 
   async list(): Promise<SessionSummary[]> {
@@ -474,16 +542,22 @@ function sameSummaryHeader(summary: SessionSummary, header: SessionHeader): bool
 
 function toSummary(log: SessionLog): SessionSummary {
   const events = log.events;
+  const title = foldSessionTitle(events);
+  const mode = projectModeSelection(events);
   return {
     id: log.header.id,
+    ...(mode.status === 'selected' ? { mode: mode.selection.mode } : {}),
     ...(log.header.agentId === undefined ? {} : { agentId: log.header.agentId }),
     ...(log.header.parentSessionId === undefined ? {} : { parentSessionId: log.header.parentSessionId }),
     ...(log.header.depth === undefined ? {} : { depth: log.header.depth }),
     ...(log.header.description === undefined ? {} : { description: log.header.description }),
+    ...(title === undefined ? {} : { title: title.title, titleSource: title.source }),
+    ...(foldSessionPinned(events) ? { pinned: true } : {}),
+    blank: !hasHumanMessage(events),
     workspace: log.header.workspace,
     cwd: log.header.cwd,
     createdAt: log.header.createdAt,
-    updatedAt: events.at(-1)?.ts ?? log.header.createdAt,
+    updatedAt: lastActivityTime(events, log.header.createdAt),
     eventCount: events.length,
   };
 }
@@ -509,6 +583,14 @@ async function syncDirectory(path: string): Promise<void> {
 async function readDirOptional(path: string): Promise<string[]> {
   try { return (await readdir(path, { withFileTypes: true })).filter((entry) => entry.isDirectory()).map((entry) => entry.name); }
   catch (error) { if (isNotFound(error)) return []; throw error; }
+}
+
+async function removeEmptyDirectory(path: string): Promise<void> {
+  try {
+    await rmdir(path);
+  } catch {
+    // Directory cleanup is best-effort; the session log is already gone.
+  }
 }
 
 function isNotFound(error: unknown): boolean {

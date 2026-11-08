@@ -1,9 +1,22 @@
 import { realpath } from 'node:fs/promises';
 import { resolve } from 'node:path';
 import { z } from 'zod';
-import type { Message, ToolCall } from './domain/message';
+import type { ContentPart, Message, ToolCall } from './domain/message';
 import type { Tool, ToolSpec } from './domain/tool';
-import { userMessage } from './domain/message';
+import { assistantText, userMessage } from './domain/message';
+import type { SessionEvent } from './session/types';
+import {
+  SESSION_TITLE_EVENT,
+  collectSessionTitleMessages,
+  fallbackSessionTitle,
+  foldSessionTitle,
+  normalizeSessionTitle,
+  resolveSessionTitleLimits,
+  resolveSessionTitleLlmOptions,
+  titleFromModelOutput,
+  truncateTitleUtf8,
+} from './session/title';
+import type { SessionTitleLimits, SessionTitleLlmOptions, SessionTitleMessage, SessionTitleOptions } from './session/title';
 import type { AgentEvent, StopReason } from './protocol/events';
 import type {
   ApprovalHandler,
@@ -32,6 +45,10 @@ import { createExitPlanModeTool, EXIT_PLAN_MODE_TOOL_NAME } from './tools/builti
 import type { PlanReviewResponse } from './tools/builtin/exit-plan-mode';
 import { createSubagentTools, SUBAGENT_TOOL_NAME } from './tools/builtin/subagent';
 import { createGoalTools, CREATE_GOAL_TOOL_NAME, GET_GOAL_TOOL_NAME, UPDATE_GOAL_TOOL_NAME } from './tools/builtin/goal';
+import { createScheduleTools, renderScheduleToolGuidance, SCHEDULE_TOOL_GROUP } from './schedule/tools';
+import type { ScheduleService } from './schedule/service';
+import { createAgentAuthoringTools } from './agents/authoring';
+import type { AgentAuthoringService } from './agents/authoring';
 import { TODO_WRITE_EVENT } from './session/todo';
 import type { TodoItem } from './session/todo';
 import { GoalController, goalRefOf } from './session/goal-controller';
@@ -102,6 +119,18 @@ export interface SessionOptions {
   planActive?: boolean;
   /** Shared subagent runtime; enables delegation tools. */
   subagents?: SubagentService;
+  /** Host-wide scheduled tasks; enables the schedule tools. */
+  schedule?: ScheduleService;
+  /** Optional persisted title plus background model title generation. */
+  title?: SessionTitleOptions;
+  /** Creator-mode agent definition authoring; enables list/write agent tools. */
+  agentAuthoring?: AgentAuthoringService;
+  /**
+   * Tools discovered from configured MCP servers. They run outside the local
+   * sandbox, so they are trusted by the permission layer; the server entry
+   * itself is user-authored configuration.
+   */
+  mcpTools?: readonly Tool[];
   /** Called for events produced by turns started outside a UI send() call. */
   onBackgroundEvent?: (event: AgentEvent) => void;
 }
@@ -137,10 +166,17 @@ export class Session {
   private readonly subagents?: SubagentService;
   private readonly reviewPlanHandler?: SessionOptions['reviewPlan'];
   private readonly onBackgroundEvent?: SessionOptions['onBackgroundEvent'];
+  private readonly titleOptions?: SessionTitleOptions;
+  private readonly titleLimits: SessionTitleLimits;
+  private readonly titleLlm?: Required<SessionTitleLlmOptions>;
+  private titleAttempted = false;
+  private titleController?: AbortController;
+  private titleGeneration?: Promise<void>;
   private readonly inbox: Message[] = [];
   private readonly inboxWaiters = new Set<() => void>();
   private readonly goalController: GoalController;
   private planActive: boolean;
+  private compactRequested = false;
   private controller?: AbortController;
   private executing = false;
   private turnSource: 'human' | 'goal' | 'external' | 'notice' | 'system' = 'system';
@@ -156,6 +192,9 @@ export class Session {
     this.subagents = options.subagents;
     this.reviewPlanHandler = options.reviewPlan;
     this.onBackgroundEvent = options.onBackgroundEvent;
+    this.titleOptions = options.title;
+    this.titleLimits = resolveSessionTitleLimits(options.title);
+    this.titleLlm = options.title === undefined ? undefined : resolveSessionTitleLlmOptions(options.title);
     this.baseSystem = options.system ?? DEFAULT_SYSTEM_PROMPT;
     this.cwdValue = options.cwd;
     this.planActive = options.session === undefined
@@ -194,6 +233,13 @@ export class Session {
         // read/write/shell capabilities are trusted separately below.
         if (this.#dshPermissions?.sandbox === 'danger-full-access') this.trusted.add(tool);
       }
+    }
+    for (const tool of options.mcpTools ?? []) {
+      if (!allows(tool.name) || this.tools.has(tool.name)) continue;
+      this.tools.register(tool);
+      // MCP calls execute in the configured server process, not inside the
+      // local filesystem sandbox, so the sandbox preset cannot confine them.
+      this.trusted.add(tool);
     }
     if (allows('bash') && !this.tools.has('bash')) {
       this.dshShell = createDshShellTool({
@@ -246,6 +292,22 @@ export class Session {
       }
     }
 
+    if (options.schedule) {
+      for (const tool of createScheduleTools(this, options.schedule)) {
+        if (!allows(tool.name)) continue;
+        this.tools.register(tool);
+        this.trusted.add(tool);
+      }
+    }
+
+    if (options.agentAuthoring) {
+      for (const tool of createAgentAuthoringTools(options.agentAuthoring)) {
+        if (!allows(tool.name)) continue;
+        this.tools.register(tool);
+        this.trusted.add(tool);
+      }
+    }
+
     this.loop = new AgentLoop({
       model: options.model,
       modelId: options.modelId ?? 'fake',
@@ -253,6 +315,11 @@ export class Session {
       tools: this.tools,
       toolSpecs: () => this.visibleToolSpecs(),
       takeQueuedMessages: () => this.inbox.splice(0),
+      takeForceCompact: () => {
+        const requested = this.compactRequested;
+        this.compactRequested = false;
+        return requested;
+      },
       permissions: { check: async () => ({ decision: 'deny', source: 'DSH execution policy required' }) },
       prepareToolCall: (call, signal) => this.prepareToolCall(call, signal, this.tools, cwd, approve),
       cwd,
@@ -313,6 +380,7 @@ export class Session {
     const parts = [this.baseSystem];
     if (this.planActive) parts.push(PLAN_MODE_GUIDANCE);
     if (this.hasGoalTools()) parts.push(renderGoalToolGuidance(GOAL_DEFAULT_BLOCKED_AFTER));
+    if (this.hasScheduleTools()) parts.push(renderScheduleToolGuidance());
     if (this.depth === 0 && this.subagents !== undefined) {
       const guidance: string[] = [];
       if (this.allowsTool('send_message')) {
@@ -334,6 +402,10 @@ export class Session {
     return this.allowsTool(CREATE_GOAL_TOOL_NAME)
       || this.allowsTool(GET_GOAL_TOOL_NAME)
       || this.allowsTool(UPDATE_GOAL_TOOL_NAME);
+  }
+
+  private hasScheduleTools(): boolean {
+    return SCHEDULE_TOOL_GROUP.some((name) => this.allowsTool(name));
   }
 
   get sessionHandle(): SessionHandle | undefined {
@@ -415,6 +487,12 @@ export class Session {
     this.controller?.abort();
   }
 
+  /** Compact older history before the next model request in this session. */
+  requestCompaction(): void {
+    if (this.executing) throw new Error('Context cannot be compacted during an active turn');
+    this.compactRequested = true;
+  }
+
   /** Persist a plan-mode selection. UI callers reject changes during active turns. */
   async setPlanMode(active: boolean): Promise<void> {
     if (typeof active !== 'boolean') throw new TypeError('Plan mode state must be a boolean');
@@ -429,19 +507,48 @@ export class Session {
     this.planActive = active;
   }
 
-  /** Consume events yourself; when persistence is enabled messages/traces are written first. */
-  async *send(input: string): AsyncGenerator<AgentEvent> {
+  /**
+   * Consume events yourself; when persistence is enabled messages/traces are
+   * written first. Content-part input carries an already composed user message
+   * (text and/or images), while a plain string preserves the legacy event shape.
+   */
+  async *send(input: string | readonly ContentPart[]): AsyncGenerator<AgentEvent> {
     if (this.executing) throw new Error('A turn is already active in this session');
+    const content = typeof input === 'string' ? userMessage(input).content : input.slice();
+    if (content.length === 0) throw new Error('A non-empty message is required');
+    if (!content.some((part) => part.type === 'image' || (part.type === 'text' && part.text.trim() !== ''))) {
+      throw new Error('A non-empty message is required');
+    }
     this.executing = true;
     try {
-      const user = userMessage(input);
-      this.history.push(user);
-      await this.appendMessage('message/user', { text: input });
+      this.history.push({ role: 'user', content });
+      await this.appendMessage('message/user', typeof input === 'string' ? { text: input } : { content });
+      const title = await this.ensureTitle();
+      if (title !== undefined) yield { type: 'session.title', title };
       yield* this.runGoalChain(false, 'human');
     } finally {
       this.executing = false;
       this.resumeQueuedBackground();
     }
+  }
+
+  /**
+   * Deliver a direct human message into the active turn. The model sees it at
+   * the next step, so the turn keeps streaming instead of being restarted.
+   */
+  async deliverUserMessage(input: string | readonly ContentPart[]): Promise<'queued'> {
+    if (!this.executing) throw new Error('A turn is not active in this session');
+    const content = typeof input === 'string' ? userMessage(input).content : input.slice();
+    if (content.length === 0
+      || !content.some((part) => part.type === 'image' || (part.type === 'text' && part.text.trim() !== ''))) {
+      throw new Error('A non-empty message is required');
+    }
+    const message: Message = { role: 'user', content };
+    this.history.push(message);
+    await this.appendMessage('message/user', typeof input === 'string' ? { text: input } : { content });
+    this.inbox.push(message);
+    this.notifyInbox();
+    return 'queued';
   }
 
   /**
@@ -846,6 +953,107 @@ export class Session {
     }
   }
 
+  /**
+   * Materialize the deterministic fallback and, when configured, start one
+   * non-blocking model title attempt for the first human message.
+   * @returns the newly written fallback title, if one was created.
+   */
+  private async ensureTitle(): Promise<string | undefined> {
+    const options = this.titleOptions;
+    const handle = this.session;
+    if (options === undefined || handle === undefined) return;
+    try {
+      const first = collectSessionTitleMessages(handle.events)[0];
+      if (first === undefined) return;
+      let current = foldSessionTitle(handle.events);
+      if (current?.source.kind === 'user') return;
+      let fallbackTitle: string | undefined;
+      if (current === undefined) {
+        const fallback = fallbackSessionTitle(
+          first.text,
+          this.titleLimits.fallbackMaxWords,
+          this.titleLimits.fallbackMaxBytes,
+        );
+        if (fallback.length === 0) return;
+        await handle.append({
+          type: SESSION_TITLE_EVENT,
+          data: {
+            title: fallback,
+            messageSeqs: [first.seq],
+            source: { kind: 'fallback' },
+          },
+        });
+        current = foldSessionTitle(handle.events);
+        fallbackTitle = current?.title;
+      }
+      if (this.titleAttempted || this.titleLlm === undefined
+        || options.model === undefined || options.modelId === undefined) return fallbackTitle;
+      // The model title is only for the root conversation, never a subagent.
+      if (this.depth !== 0 || this.parentSessionId !== undefined) return fallbackTitle;
+      if (current?.source.kind === 'provider') return fallbackTitle;
+      this.titleAttempted = true;
+      this.titleGeneration = this.generateModelTitle(first, options);
+      void this.titleGeneration.catch(() => undefined);
+      return fallbackTitle;
+    } catch {
+      // Title persistence must never fail the user's turn.
+    }
+  }
+
+  /** Run one auxiliary title request and replace the fallback only on success. */
+  private async generateModelTitle(
+    first: SessionTitleMessage,
+    options: SessionTitleOptions,
+  ): Promise<void> {
+    const handle = this.session;
+    const llm = this.titleLlm;
+    const model = options.model;
+    const modelId = options.modelId;
+    if (handle === undefined || llm === undefined || model === undefined || modelId === undefined) return;
+    const controller = new AbortController();
+    this.titleController = controller;
+    try {
+      const text = truncateTitleUtf8(first.text, Math.max(256, llm.maxInputBytes - 256));
+      const input = `Generate the session title from this JSON array of human messages:\n${JSON.stringify([{ seq: first.seq, text }])}`;
+      if (Buffer.byteLength(input, 'utf8') > llm.maxInputBytes) return;
+      const signal = AbortSignal.any([controller.signal, AbortSignal.timeout(llm.timeoutMs)]);
+      const response = await model.complete({
+        model: modelId,
+        system: renderTitleSystemPrompt(llm),
+        messages: [userMessage(input)],
+        tools: [],
+        maxTokens: llm.maxOutputTokens,
+        signal,
+      });
+      if (response.stopReason !== 'end_turn' || response.message.toolCalls.length > 0) return;
+      const title = normalizeSessionTitle(
+        titleFromModelOutput(assistantText(response.message)),
+        this.titleLimits.maxTitleBytes,
+      );
+      if (title.length === 0) return;
+      const latest = foldSessionTitle(handle.events);
+      if (latest?.source.kind === 'user' || latest?.source.kind === 'provider') return;
+      const provider = options.provider ?? model.name;
+      await handle.append({
+        type: SESSION_TITLE_EVENT,
+        data: {
+          title,
+          messageSeqs: [first.seq],
+          source: {
+            kind: 'provider',
+            provider,
+            model: { provider, model: modelId },
+          },
+        },
+      });
+    } catch {
+      // The accepted fallback remains the final title.
+    } finally {
+      if (this.titleController === controller) this.titleController = undefined;
+      this.titleGeneration = undefined;
+    }
+  }
+
   private async appendMessage(type: string, data: unknown): Promise<void> {
     await this.session?.append({ type, data });
   }
@@ -854,6 +1062,17 @@ export class Session {
 function containsImage(history: readonly Message[]): boolean {
   return history.some((message) =>
     message.role === 'user' && message.content.some((part) => part.type === 'image'));
+}
+
+/** Auxiliary title instruction. It must never look like a tool-using turn. */
+function renderTitleSystemPrompt(options: Required<SessionTitleLlmOptions>): string {
+  return [
+    'Create a concise title for an AI coding-assistant session from the supplied human messages.',
+    'Return only the title on one line, in plain text of natural language, with no quotes, prefix, explanation, Markdown, XML, or terminal control codes. No code is allowed.',
+    'Use the language of the messages.',
+    `Aim for about ${options.targetWords} words in non-CJK languages or ${options.targetCjkCharacters} CJK characters.`,
+    'If the messages give little to name, still return a short best-effort title, such as Greeting, instead of explaining.',
+  ].join('\n');
 }
 
 function formatSubagentNotice(notice: SubagentNotice): string {

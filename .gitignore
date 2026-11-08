@@ -6,3 +6,6 @@ coverage/
 
 # 运行时产物（transcript / 审计日志）
 .omniagent/
+
+# 本地 agent 会话产物
+.zcode/

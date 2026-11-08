@@ -1,0 +1,48 @@
+.dialog {
+  width: min(760px, calc(100vw - 32px));
+}
+
+.content {
+  max-height: min(72vh, 760px);
+  overflow: hidden;
+  padding: 0;
+}
+
+.actions {
+  display: flex;
+  justify-content: flex-end;
+  gap: 8px;
+}
+
+.plan {
+  margin: 0;
+  padding: 0 0 16px;
+  color: var(--dsw-alias-label-primary);
+  font-family: var(--ds-font-family-code);
+  font-size: 13px;
+  line-height: 22px;
+  white-space: pre-wrap;
+  word-break: break-word;
+}
+
+.feedback {
+  box-sizing: border-box;
+  width: 100%;
+  min-height: 72px;
+  margin-bottom: 16px;
+  padding: 10px 12px;
+  border: 0.5px solid var(--dsw-alias-border-l3);
+  border-radius: var(--dsw-radius-md);
+  outline: none;
+  resize: vertical;
+  background: var(--dsw-alias-bg-module-platform);
+  color: var(--dsw-alias-label-primary);
+  font-family: var(--dsw-font-family);
+  font-size: 13px;
+  line-height: 20px;
+}
+
+.feedback:focus {
+  border-color: var(--dsw-alias-state-business-primary);
+  box-shadow: 0 0 0 2px color-mix(in srgb, var(--dsw-alias-state-business-primary) 20%, transparent);
+}

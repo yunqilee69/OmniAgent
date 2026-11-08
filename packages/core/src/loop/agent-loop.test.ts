@@ -209,6 +209,35 @@ describe('AgentLoop', () => {
     });
   });
 
+  it('compacts on demand even when history is below the context window', async () => {
+    const model = new FakeModel([textResponse('done')]);
+    let pending = true;
+    const loop = new AgentLoop({
+      model,
+      modelId: 'fake',
+      system: 'test',
+      tools: registryWithEcho(),
+      permissions: allowAll,
+      cwd: process.cwd(),
+      sessionId: 'test',
+      takeForceCompact: () => {
+        const requested = pending;
+        pending = false;
+        return requested;
+      },
+    });
+
+    const history = [userMessage('old '.repeat(200)), userMessage('recent '.repeat(200))];
+    const { events } = await collect(loop.run(history));
+
+    expect(pending).toBe(false);
+    expect(events.some((event) => event.type === 'context.compacted')).toBe(true);
+    expect(model.requests[0]?.messages[0]).toMatchObject({
+      role: 'user',
+      content: [{ type: 'text', text: expect.stringContaining('summary') }],
+    });
+  });
+
   it('未知工具不会抛异常，而是变成错误结果的 observation', async () => {
     const model = new FakeModel([
       toolCallResponse([{ id: 'c1', name: 'nope', args: {} }]),

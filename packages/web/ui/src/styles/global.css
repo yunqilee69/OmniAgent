@@ -1,0 +1,81 @@
+@import url('../../vendor/theme/styles/base.css');
+@import url('../../vendor/theme/styles/design-platform.css');
+@import url('../../vendor/theme/styles/corner-shape.css');
+@import url('../../vendor/theme/styles/focus.css');
+@import url('../../vendor/theme/styles/scrollbar.css');
+@import url('../../vendor/theme/styles/gradient-shadow-text.css');
+@import url('../../vendor/theme/styles/shiki.css');
+@import 'katex/dist/katex.min.css';
+
+:root {
+  --dsh-content-font-size: 14px;
+  --dsh-content-font-delta: 0px;
+  --dsh-content-font-size-secondary: 13px;
+  --dsh-content-font-delta-secondary: 0px;
+}
+
+/* Native form controls and scrollbars follow the chosen app theme rather than
+   the OS preference the document was loaded under. */
+html[data-theme='dark'] {
+  color-scheme: dark;
+}
+
+html[data-theme='light'] {
+  color-scheme: light;
+}
+
+* {
+  box-sizing: border-box;
+}
+
+html,
+body,
+#root {
+  height: 100%;
+  margin: 0;
+}
+
+body {
+  background: var(--dsw-alias-bg-base);
+  color: var(--dsw-alias-label-primary);
+  font-family: var(--dsw-font-family);
+  font-size: 14px;
+  line-height: 1.5;
+  -webkit-font-smoothing: antialiased;
+  overflow: hidden;
+}
+
+button,
+input,
+textarea,
+select {
+  font: inherit;
+  color: inherit;
+}
+
+button {
+  cursor: pointer;
+}
+
+button:disabled {
+  cursor: not-allowed;
+}
+
+a {
+  color: var(--dsw-alias-link);
+}
+
+[hidden] {
+  display: none !important;
+}
+
+::selection {
+  background: color-mix(in srgb, var(--dsw-alias-state-business-primary) 24%, transparent);
+}
+
+.dsh-icon-sprite {
+  position: absolute;
+  width: 0;
+  height: 0;
+  overflow: hidden;
+}

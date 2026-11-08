@@ -5,16 +5,19 @@ import { afterEach, describe, expect, it } from 'vitest';
 import {
   AgentCatalog,
   ConfigStore,
+  ModeStore,
   RuntimeResolver,
   SessionStore,
   createInitialDshPermissionEvent,
   projectAgentSelection,
+  projectModeSelection,
   projectModelSelection,
 } from '@omniagent/core';
 import type { ResolvedSessionRuntime, SessionHandle } from '@omniagent/core';
 import { startWebHost } from './server';
 import type { WebHost, WebHostOptions, ModelSummary } from './server';
 import { WorkspaceRegistry } from './workspaces';
+import { RoleSettings } from './catalog-settings';
 
 const hosts: WebHost[] = [];
 afterEach(async () => { await Promise.all(hosts.splice(0).map((host) => host.close())); });
@@ -70,17 +73,39 @@ async function setup() {
     '---',
     'You search.',
   ].join('\n'));
+  await writeFile(join(configDir, 'agents', 'scout.md'), [
+    '---',
+    'name: Scout',
+    'description: Searches without skills',
+    'role: quick',
+    'usage: primary',
+    'profile: search',
+    '---',
+    'You search.',
+  ].join('\n'));
+  await mkdir(join(path, '.agents', 'skills', 'reviewer'), { recursive: true });
+  await writeFile(join(path, '.agents', 'skills', 'reviewer', 'SKILL.md'), [
+    '---',
+    'name: reviewer',
+    'description: Reviews code changes',
+    '---',
+    'Review the diff before approving it.',
+  ].join('\n'));
   const workspaces = new WorkspaceRegistry(join(root, 'workspaces.json'));
   const workspace = await workspaces.add(path);
   const store = new SessionStore(join(root, 'sessions'));
   const configStore = await ConfigStore.open(join(configDir, 'config.json'));
   const agents = new AgentCatalog(join(configDir, 'agents'));
   const runtime = new RuntimeResolver({ configStore, agents });
+  const modeStore = new ModeStore({ path: join(configDir, 'modes.json'), configStore, agents });
+  const roleSettings = await RoleSettings.open(join(configDir, 'config.json'));
   const captured: ResolvedSessionRuntime[] = [];
   const host = await startWebHost({
     workspaces,
     store,
     runtime,
+    modeStore,
+    roleSettings,
     permissionSettings: {
       async read() { return { defaultPreset: 'workspace-write', requiresSelection: false }; },
       async update(value: { defaultPreset: 'workspace-write' }) { return value; },
@@ -134,7 +159,7 @@ async function setup() {
   });
   hosts.push(host);
   const url = `${host.address()}/api/workspaces/${workspace.id}/sessions`;
-  return { host, url, workspace, store, configStore, agents, runtime, captured, configDir, path };
+  return { host, url, workspace, store, configStore, agents, runtime, modeStore, roleSettings, captured, configDir, path };
 }
 
 async function create(url: string, body: unknown = {}): Promise<{ sessionUrl: string; id: string }> {
@@ -299,5 +324,191 @@ describe('configured session API', () => {
     expect((await fetch(`${sessionUrl}/messages`, post({ text: 'go' }))).status).toBe(200);
     expect(captured.at(-1)!.modelId).toBe('deepseek-flash');
     expect(captured.at(-1)!.reasoningEffort).toBe('max');
+  });
+
+  it('lists and persists mode presets through the settings routes', async () => {
+    const { host } = await setup();
+    const base = host.address()!;
+    const initial = await (await fetch(`${base}/api/modes`)).json() as {
+      modes: Array<{ id: string; valid: boolean }>;
+      defaultMode: string;
+    };
+    expect(initial.modes.map((mode) => mode.id)).toEqual(['standard', 'creator']);
+    expect(initial.defaultMode).toBe('standard');
+
+    const saved = await fetch(`${base}/api/modes/writer-mode`, {
+      method: 'PUT',
+      headers: { 'content-type': 'application/json' },
+      body: JSON.stringify({
+        name: 'Writer mode',
+        description: 'Writer with the quick role.',
+        agent: 'writer',
+        model: { version: 2, kind: 'role', role: 'quick' },
+        tools: ['read_file'],
+        skills: ['docs'],
+      }),
+    });
+    expect(saved.status).toBe(200);
+    expect((await saved.json() as { mode: { id: string } }).mode.id).toBe('writer-mode');
+
+    const defaulted = await fetch(`${base}/api/settings/default-mode`, {
+      method: 'PUT',
+      headers: { 'content-type': 'application/json' },
+      body: JSON.stringify({ mode: 'writer-mode' }),
+    });
+    expect(await defaulted.json()).toEqual({ defaultMode: 'writer-mode' });
+    expect((await fetch(`${base}/api/settings/default-mode`, {
+      method: 'PUT',
+      headers: { 'content-type': 'application/json' },
+      body: JSON.stringify({ mode: 'missing' }),
+    })).status).toBe(400);
+
+    const removed = await fetch(`${base}/api/modes/writer-mode`, { method: 'DELETE' });
+    expect(await removed.json()).toEqual({ removed: true });
+    const after = await (await fetch(`${base}/api/modes`)).json() as { defaultMode: string };
+    expect(after.defaultMode).toBe('standard');
+  });
+
+  it('exposes tools and discovered skills for the mode editor', async () => {
+    const { host, workspace } = await setup();
+    const response = await fetch(`${host.address()}/api/modes/options?workspaceId=${encodeURIComponent(workspace.id)}`);
+    expect(response.status).toBe(200);
+    const options = await response.json() as { tools: string[]; skills: Array<{ name: string }> };
+    expect(options.tools).toContain('read_file');
+    expect(options.tools).toContain('subagent');
+    expect(Array.isArray(options.skills)).toBe(true);
+    expect((await fetch(`${host.address()}/api/modes/options?workspaceId=missing`)).status).toBe(404);
+  });
+
+  it('reports only the skills the current session agent may load', async () => {
+    const { url } = await setup();
+    const writer = await create(url);
+    const writerDetail = await (await fetch(writer.sessionUrl)).json() as {
+      agentSkills: Array<{ name: string; description: string }>;
+    };
+    expect(writerDetail.agentSkills).toContainEqual({ name: 'reviewer', description: 'Reviews code changes' });
+
+    const scout = await create(url, { agent: 'scout' });
+    const scoutDetail = await (await fetch(scout.sessionUrl)).json() as {
+      agentSkills: Array<{ name: string; description: string }>;
+    };
+    expect(scoutDetail.agentSkills).toEqual([]);
+  });
+
+  it('creates a session from a mode snapshot with a fixed agent and switchable model', async () => {
+    const { url, store, workspace, captured } = await setup();
+    const response = await fetch(url, post({ mode: 'creator' }));
+    expect(response.status).toBe(201);
+    const { session } = await response.json() as { session: { id: string; mode?: string } };
+    expect(session.mode).toBe('creator');
+    const sessionUrl = `${url}/${session.id}`;
+
+    const events = (await store.open(workspace.path, session.id)).events;
+    expect(projectAgentSelection(events)).toEqual({ status: 'selected', agent: 'creator' });
+    const mode = projectModeSelection(events);
+    expect(mode.status).toBe('selected');
+    if (mode.status !== 'selected') throw new Error('mode selection missing');
+    expect(mode.selection).toMatchObject({
+      mode: 'creator',
+      agent: 'creator',
+      model: { version: 2, kind: 'agent' },
+    });
+    expect(mode.selection.tools).not.toBe('*');
+    expect(mode.selection.tools).not.toContain('write_file');
+    expect(mode.selection.skills).toBe('*');
+
+    const detail = await (await fetch(sessionUrl)).json() as { mode: unknown };
+    expect(detail.mode).toEqual(mode.selection);
+
+    expect((await fetch(`${sessionUrl}/agent`, post({ agent: 'writer' }))).status).toBe(409);
+    const switched = await fetch(`${sessionUrl}/model`, post({ version: 2, kind: 'role', role: 'quick' }));
+    expect(switched.status).toBe(200);
+    expect((await switched.json() as { resolvedModel: { model: string; reasoningEffort?: string } }).resolvedModel)
+      .toMatchObject({ model: 'deepseek-v4-pro', reasoningEffort: 'low' });
+    expect(projectModelSelection((await store.open(workspace.path, session.id)).events))
+      .toMatchObject({ status: 'selected', binding: { version: 2, kind: 'role', role: 'quick' } });
+
+    const completed = await fetch(`${sessionUrl}/messages`, post({ text: 'go' }));
+    expect(completed.status).toBe(200);
+    await completed.text();
+    expect(captured).toHaveLength(1);
+    expect(captured[0]!.agent.id).toBe('creator');
+    expect(captured[0]!.sessionAgent.tools).not.toBe('*');
+    expect(captured[0]!.sessionAgent.tools).not.toContain('write_file');
+    expect(captured[0]!.modelId).toBe('deepseek-v4-pro');
+  });
+
+  it('creates a mode session with a model override while keeping the mode agent and tools', async () => {
+    const { url, store, workspace, captured } = await setup();
+    const binding = { version: 2, kind: 'role', role: 'quick' };
+    const response = await fetch(url, post({ mode: 'creator', model: binding }));
+    expect(response.status).toBe(201);
+    const { session } = await response.json() as { session: { id: string; mode?: string } };
+    expect(session.mode).toBe('creator');
+    const sessionUrl = `${url}/${session.id}`;
+
+    const events = (await store.open(workspace.path, session.id)).events;
+    expect(projectAgentSelection(events)).toEqual({ status: 'selected', agent: 'creator' });
+    const mode = projectModeSelection(events);
+    expect(mode.status).toBe('selected');
+    if (mode.status !== 'selected') throw new Error('mode selection missing');
+    expect(mode.selection).toMatchObject({ mode: 'creator', agent: 'creator', model: binding });
+    expect(mode.selection.tools).not.toBe('*');
+    expect(mode.selection.tools).not.toContain('write_file');
+
+    const detail = await (await fetch(sessionUrl)).json() as {
+      model: unknown;
+      resolvedModel: { model: string; reasoningEffort?: string };
+    };
+    expect(detail.model).toEqual(binding);
+    expect(detail.resolvedModel).toMatchObject({ model: 'deepseek-v4-pro', reasoningEffort: 'low' });
+
+    const completed = await fetch(`${sessionUrl}/messages`, post({ text: 'go' }));
+    expect(completed.status).toBe(200);
+    await completed.text();
+    expect(captured).toHaveLength(1);
+    expect(captured[0]!.agent.id).toBe('creator');
+    expect(captured[0]!.modelId).toBe('deepseek-v4-pro');
+  });
+
+  it('rejects mixed mode and agent overrides and unknown modes', async () => {
+    const { url } = await setup();
+    expect((await fetch(url, post({ mode: 'creator', agent: 'writer' }))).status).toBe(400);
+    expect((await fetch(url, post({ mode: 'creator', model: { version: 1, provider: 'x', model: 'y' } }))).status).toBe(400);
+    expect((await fetch(url, post({ mode: 'missing' }))).status).toBe(409);
+    expect((await fetch(url, post({ mode: 3 }))).status).toBe(400);
+  });
+
+  it('lists, saves and removes roles through the settings routes', async () => {
+    const { host } = await setup();
+    const base = host.address()!;
+    const initial = await (await fetch(`${base}/api/settings/roles`)).json() as {
+      roles: Array<{ id: string; builtIn?: boolean; valid: boolean }>;
+    };
+    expect(initial.roles.find((role) => role.id === 'default')).toMatchObject({ builtIn: true, valid: true });
+
+    const saved = await fetch(`${base}/api/settings/roles/research`, {
+      method: 'PUT',
+      headers: { 'content-type': 'application/json' },
+      body: JSON.stringify({ name: 'Research', provider: 'deepseek-official', model: 'deepseek-v4-pro' }),
+    });
+    expect(saved.status).toBe(200);
+    expect((await saved.json() as { role: { id: string; name: string } }).role).toMatchObject({
+      id: 'research', name: 'Research',
+    });
+
+    expect((await fetch(`${base}/api/settings/roles/broken`, {
+      method: 'PUT',
+      headers: { 'content-type': 'application/json' },
+      body: JSON.stringify({ provider: 'missing', model: 'missing' }),
+    })).status).toBe(400);
+    expect((await fetch(`${base}/api/settings/roles/broken2`, {
+      method: 'PUT',
+      headers: { 'content-type': 'application/json' },
+      body: JSON.stringify({ provider: 'deepseek-official', model: 'deepseek-flash', extra: true }),
+    })).status).toBe(400);
+
+    expect(await (await fetch(`${base}/api/settings/roles/research`, { method: 'DELETE' })).json())
+      .toEqual({ removed: true });
   });
 });

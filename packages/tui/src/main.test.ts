@@ -105,9 +105,9 @@ describe('TUI session permissions', () => {
       child.stdin.write('/model\n');
       await waitFor(() => prompts() >= 2);
       expect(output).toContain('1. 跟随智能体');
-      expect(output).toContain('3. 模型 test-provider/m1');
-      expect(output).toContain('4. 模型 test-provider/m2');
-      child.stdin.write('/model 4\n');
+      expect(output).toContain('2. 模型 test-provider/m1');
+      expect(output).toContain('3. 模型 test-provider/m2');
+      child.stdin.write('/model 3\n');
       await waitFor(() => prompts() >= 3);
       const events = (await store.open(cwd, created!.id)).events;
       expect(events.filter((event) => event.type === 'model/selected').at(-1))

@@ -15,13 +15,48 @@ const KNOWN_FIELDS = new Set(['name', 'description', 'role', 'usage', 'profile']
 
 const BUILTIN_DEFAULT: AgentDefinition = {
   id: 'default',
-  name: 'Default',
-  description: '默认智能体',
+  name: '默认智能体',
+  description: '处理日常任务、编码、调研与文件工作的通用智能体。',
   role: 'default',
   usage: 'both',
   profile: 'default',
   body: '',
   sourcePath: 'builtin:default',
+};
+
+/**
+ * 创造模式是内置的第二套智能体预设：它通过对话接收用户的配置意图，
+ * 借助 schedule_* 工具创建自定义任务，并借助 agent 定义工具把新的
+ * 智能体写入 ~/.omniagent/agents。它只作为主智能体提供。
+ */
+const BUILTIN_CREATOR: AgentDefinition = {
+  id: 'creator',
+  name: '创造智能体',
+  description: '通过对话创建自定义任务、智能体定义，并调整 OmniAgent 配置。',
+  role: 'default',
+  usage: 'primary',
+  profile: 'default',
+  body: [
+    '你是 OmniAgent 的创造模式（Creator mode）。',
+    '',
+    '你的职责是帮助用户通过对话配置 OmniAgent 本身，而不是完成普通的业务任务。常见工作包括：',
+    '- 创建、查看、修改或暂停自定义自动化任务（schedule_create、schedule_list、schedule_view、schedule_edit）。',
+    '- 创建或更新自定义智能体定义（list_agent_definitions、write_agent_definition）。',
+    '- 向用户解释配置会写入哪里、何时生效，以及如何验证结果。',
+    '',
+    '工作方式：',
+    '1. 先确认用户真正想要的目标、触发条件和期望结果；信息不足时先问清楚，不要猜测。',
+    '2. 修改前先读取当前状态（列出现有任务或智能体定义），避免覆盖同名内容。',
+    '3. 执行写操作前向用户说明将要创建或修改的内容，得到明确同意后再调用工具。',
+    '4. 完成后用简明中文汇报创建结果、标识符和生效方式。',
+    '',
+    '限制：',
+    '- 自定义任务必须使用 schedule_* 工具创建，不要手写 ~/.omniagent/schedules.json。',
+    '- 智能体定义必须使用 write_agent_definition 工具写入，不要用 write_file 修改 OmniAgent 配置目录。',
+    '- 内置的 default 与 creator 智能体不可覆盖；请为新智能体使用独立 id。',
+    '- 不修改 provider、API key 或其他需要用户手动编辑 config.json 的敏感配置；需要时向用户说明配置文件位置。',
+  ].join('\n'),
+  sourcePath: 'builtin:creator',
 };
 
 function isNotFound(error: unknown): boolean {
@@ -116,6 +151,7 @@ export class AgentCatalog {
     const errors: AgentError[] = [];
     const hashes: string[] = [];
     let defaultFile = false;
+    let creatorFile = false;
 
     let entries: Dirent[];
     try {
@@ -134,6 +170,7 @@ export class AgentCatalog {
         continue;
       }
       if (id === 'default') defaultFile = true;
+      if (id === 'creator') creatorFile = true;
       const path = join(this.dir, entry.name);
       try {
         const source = await readAgentFile(path);
@@ -145,12 +182,13 @@ export class AgentCatalog {
     }
 
     if (!defaultFile) agents.push({ ...BUILTIN_DEFAULT });
+    if (!creatorFile) agents.push({ ...BUILTIN_CREATOR });
 
     const byId = new Map(agents.map((agent) => [agent.id, agent]));
     const sorted = [...byId.values()].sort((left, right) => left.id.localeCompare(right.id));
     const revision = createHash('sha256')
       .update(hashes.join('\n'))
-      .update(`\0${defaultFile}`)
+      .update(`\0${defaultFile}\0${creatorFile}`)
       .digest('hex');
     this.snapshot = { agents: sorted, errors, revision };
     this.loaded = true;

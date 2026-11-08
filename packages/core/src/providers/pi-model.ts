@@ -237,6 +237,7 @@ export class PiAiModel implements ModelClient {
       const context = toPiContext(request, model, endpointHash, this.dependencies.onReplayDegrade);
       const events = this.dispatch(model, context, {
         signal, ...(apiKey === undefined ? {} : { apiKey }),
+        ...(request.maxTokens === undefined ? {} : { maxTokens: request.maxTokens }),
         ...(config.headers === undefined ? {} : { headers: { ...config.headers } }),
         ...(config.timeoutMs === undefined ? {} : { timeoutMs: config.timeoutMs }),
         ...(config.maxRetries === undefined ? {} : { maxRetries: config.maxRetries }),

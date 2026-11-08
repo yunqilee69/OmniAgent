@@ -1,0 +1,59 @@
+/* Composer status strip: quiet session readings below the input card. */
+
+.root {
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  gap: 12px;
+  min-height: 22px;
+  max-width: 100%;
+  color: var(--dsw-alias-label-tertiary);
+  font-size: 12px;
+  line-height: 20px;
+  font-variant-numeric: tabular-nums;
+  white-space: nowrap;
+}
+
+.pill {
+  display: inline-flex;
+  align-items: center;
+  gap: 6px;
+  padding: 1px 8px;
+  border-radius: var(--dsw-radius-sm);
+  color: var(--dsw-alias-label-tertiary);
+}
+
+.pill svg {
+  flex: none;
+  width: 14px;
+  height: 14px;
+}
+
+.hint {
+  display: inline-flex;
+  align-items: center;
+  gap: 4px;
+  margin-left: 4px;
+  color: var(--dsw-alias-label-caption);
+}
+
+.hint kbd {
+  padding: 0 4px;
+  border: 0.5px solid var(--dsw-alias-border-l3);
+  border-radius: var(--dsw-radius-xs);
+  background: var(--dsw-alias-button-elevated-fill);
+  color: var(--dsw-alias-label-tertiary);
+  font-family: var(--ds-font-family-code);
+  font-size: 10px;
+  line-height: 16px;
+}
+
+.sep {
+  color: var(--dsw-alias-separator-primary);
+}
+
+@media (max-width: 720px) {
+  .hint {
+    display: none;
+  }
+}

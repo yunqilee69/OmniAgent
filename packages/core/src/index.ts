@@ -113,6 +113,43 @@ export {
   truncateOutput,
 } from './tools';
 
+// MCP
+export {
+  MCP_DEFAULT_TIMEOUT_MS,
+  MCP_MAX_TIMEOUT_MS,
+  MCP_STANDARD_TRANSPORTS,
+  MCP_TOOL_PREFIX,
+  MCP_TRANSPORTS,
+  McpService,
+  callMcpTool,
+  connectMcpServer,
+  expandMcpValue,
+  formatMcpToolResult,
+  isMcpServerId,
+  isMcpToolName,
+  listAllMcpPrompts,
+  listAllMcpResources,
+  listAllMcpTools,
+  mcpToolName,
+  parseMcpServerEntry,
+  parseMcpServers,
+  probeMcpServer,
+} from './mcp';
+export type {
+  CallMcpToolOptions,
+  ListOptions,
+  McpClientHandle,
+  McpConnectionOptions,
+  McpProbeResult,
+  McpProbeTool,
+  McpServerConfig,
+  McpServerParseResult,
+  McpServerRuntimeStatus,
+  McpServiceOptions,
+  McpTransport,
+  ParsedMcpServers,
+} from './mcp';
+
 // 权限
 export { decide } from './permissions/evaluate';
 export type { DecideInput } from './permissions/evaluate';
@@ -157,6 +194,36 @@ export {
 export type { SessionEvent, SessionEventInput, SessionHeader } from './session/types';
 export { SessionLog, SessionStore, sessionPath, workspaceKey, encodeSegment } from './session/store';
 export type { SessionHandle, SessionSummary } from './session/store';
+export {
+  DEFAULT_SESSION_TITLE_LIMITS,
+  DEFAULT_SESSION_TITLE_LLM_OPTIONS,
+  SESSION_TITLE_EVENT,
+  collectSessionTitleMessages,
+  fallbackSessionTitle,
+  foldSessionTitle,
+  hasHumanMessage,
+  lastActivityTime,
+  normalizeSessionTitle,
+  resolveSessionTitleLimits,
+  resolveSessionTitleLlmOptions,
+  sessionTitleMessage,
+  titleFromModelOutput,
+  truncateTitleUtf8,
+} from './session/title';
+export type {
+  SessionTitleEventData,
+  SessionTitleLimits,
+  SessionTitleLlmOptions,
+  SessionTitleMessage,
+  SessionTitleModelIdentity,
+  SessionTitleOptions,
+  SessionTitleSnapshot,
+  SessionTitleSource,
+} from './session/title';
+export { SESSION_PIN_EVENT, createSessionPinEvent, foldSessionPinned } from './session/pin';
+export type { SessionPinEventData } from './session/pin';
+export { SESSION_FORK_EVENT, createSessionForkEvent, foldSessionForkSource } from './session/fork';
+export type { SessionForkEventData } from './session/fork';
 export { projectMessages, safePublicMessages } from './session/projection';
 export {
   TODO_STATUSES,
@@ -304,12 +371,36 @@ export { SandboxUnavailableError, createSandboxRunner, sandboxCommand } from './
 export type { SandboxCommand, SandboxPlatform, SandboxProfile } from './sandbox/runner';
 export { discoverSkills, filterSkills, loadSkill, loadSkillByName, renderSkillCatalog } from './skills/filesystem';
 export type { LoadedSkill, SkillSummary } from './skills/filesystem';
-export { AgentCatalog, MAX_AGENT_BYTES, parseMarkdown, renderAgentCatalog } from './agents';
-export type { AgentCatalogSnapshot, AgentDefinition, AgentError as AgentCatalogError } from './agents';
+export {
+  AgentAuthoringService,
+  AgentCatalog,
+  AgentDefinitionWriteSchema,
+  InvalidAgentSettings,
+  LIST_AGENT_DEFINITIONS_TOOL_NAME,
+  MAX_AGENT_BYTES,
+  WRITE_AGENT_DEFINITION_TOOL_NAME,
+  createAgentAuthoringTools,
+  parseMarkdown,
+  renderAgentCatalog,
+} from './agents';
+export type {
+  AgentAuthoringServiceOptions,
+  AgentCatalogSnapshot,
+  AgentDefinition,
+  AgentDefinitionDetail,
+  AgentDefinitionSummary,
+  AgentDefinitionWrite,
+  AgentDefinitionWriteResult,
+  AgentError as AgentCatalogError,
+} from './agents';
 export { AGENT_SELECTION_EVENT, AGENT_SELECTION_VERSION, AGENT_USAGES, AgentSelectionSchema, AgentUsageSchema, createAgentSelectionEvent, createAgentSwitch, projectAgentSelection, usageAllowsRoot, usageAllowsSubagent } from './session/agent-selection';
 export type { AgentSelection, AgentSelectionProjection, AgentUsage } from './session/agent-selection';
 export { MODEL_SELECTION_EVENT, MODEL_SELECTION_VERSION, ModelBindingSchema, createModelSelectionEvent, createModelSwitch, defaultModelBinding, projectModelSelection, resolveModelBinding } from './session/model-binding';
 export type { ModelBinding, ModelSelectionProjection, ResolvedModelBinding } from './session/model-binding';
+export { MODE_SELECTION_EVENT, MODE_SELECTION_VERSION, ModeSelectionSchema, createModeSelectionEvent, hasModeSelection, projectModeSelection } from './session/mode-selection';
+export type { ModeSelection, ModeSelectionProjection } from './session/mode-selection';
+export { ModeConfigError, ModeStore } from './modes';
+export type { ModeDefinition, ModeSelector, ModeStoreOptions, ModeSummary, ModeWrite } from './modes';
 export { RuntimeResolver } from './session/runtime';
 export type { ResolvedSessionRuntime, ResolveSessionInput, RuntimeResolverOptions, SessionAgent } from './session/runtime';
 export { ConfigError, ConfigStore } from './config/store';
@@ -335,6 +426,9 @@ export type { Config, LoadedConfig, ProviderConfig } from './config/load';
 // 组合根
 export { DEFAULT_SYSTEM_PROMPT, Session } from './session';
 export type { SessionOptions } from './session';
+
+// 调度任务
+export * from './schedule/index.ts';
 
 // 评测
 export { formatEvalResults, runEvalCase, runEvalSuite } from './eval/harness';

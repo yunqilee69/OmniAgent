@@ -17,6 +17,8 @@ export interface ModelRequest {
   system: string;
   messages: Message[];
   tools: ToolSpec[];
+  /** Optional output-token ceiling; auxiliary requests such as titles use it. */
+  maxTokens?: number;
   signal?: AbortSignal;
 }
 

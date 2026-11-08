@@ -362,6 +362,26 @@ describe('Session', () => {
     expect(compacted).toBe(true);
   });
 
+  it('honors a manual compaction request on the next turn', async () => {
+    const root = await temporaryWorkspace('omniagent-session-manual-compact-');
+    const handle = await new SessionStore(root).create({ id: 'agent', workspace: root, cwd: root });
+    const model = new FakeModel([textResponse('first'), textResponse('second')]);
+    const session = new Session({
+      cwd: root, model, dshPermissions: snapshot('read-only'),
+      approve: async () => 'deny', session: handle,
+    });
+
+    await collect(session.send('older context '.repeat(100)));
+    session.requestCompaction();
+    const events = await collect(session.send('new task'));
+
+    expect(events.some((event) => event.type === 'context.compacted')).toBe(true);
+    expect(model.requests[1]?.messages[0]).toMatchObject({
+      role: 'user',
+      content: [{ type: 'text', text: expect.stringContaining('summary') }],
+    });
+  });
+
   it('records bounded, sanitized error traces without changing emitted model errors', async () => {
     const root = await mkdtemp(join(tmpdir(), 'omniagent-session-error-'));
     const handle = await new SessionStore(root).create({ id: 'agent', workspace: root, cwd: root });
@@ -930,5 +950,42 @@ describe('Session', () => {
     expect(JSON.stringify(failed.events.filter((event) => event.type.startsWith('trace/')))).not.toContain(secret);
     expect(session.messages).toEqual(projectMessages(failed.events));
     expect((await collect(session.send('second'))).at(-1)).toEqual({ type: 'turn.end', reason: 'end_turn' });
+  });
+
+  it('registers MCP tools and lets a restricted agent call them in read-only mode', async () => {
+    const calls: unknown[] = [];
+    const mcpTool: Tool = {
+      name: 'mcp__demo__echo',
+      description: 'Echo text',
+      parameters: z.object({ text: z.string() }),
+      mutating: true,
+      async execute(args) {
+        calls.push(args);
+        return { content: `echo: ${(args as { text: string }).text}` };
+      },
+    };
+    const session = new Session({
+      cwd: await temporaryWorkspace('omniagent-mcp-session-'),
+      model: new FakeModel([
+        toolCallResponse([{ name: 'mcp__demo__echo', args: { text: 'hi' } }], 'call the server'),
+        textResponse('done'),
+      ]),
+      agent: {
+        id: 'mcp-agent',
+        name: 'MCP agent',
+        role: 'default',
+        usage: 'both',
+        tools: new Set(['mcp__demo__echo']),
+        skills: '*',
+      },
+      dshPermissions: snapshot('read-only'),
+      mcpTools: [mcpTool],
+    });
+
+    const events = await collect(session.send('go'));
+    expect(calls).toEqual([{ text: 'hi' }]);
+    expect(events.find((event) => event.type === 'tool.result')).toMatchObject({
+      result: { name: 'mcp__demo__echo', ok: true, content: 'echo: hi' },
+    });
   });
 });

@@ -1,7 +1,7 @@
 {
   "compilerOptions": {
     "target": "ES2022",
-    "lib": ["ES2023"],
+    "lib": ["ES2023", "DOM", "DOM.Iterable"],
     "module": "ESNext",
     "moduleResolution": "Bundler",
     "types": ["node"],
@@ -9,7 +9,9 @@
     "strict": true,
     "noUncheckedIndexedAccess": true,
     "noImplicitOverride": true,
+    "allowImportingTsExtensions": true,
     "verbatimModuleSyntax": true,
+    "jsx": "react-jsx",
 
     "skipLibCheck": true,
     "resolveJsonModule": true,
@@ -20,5 +22,11 @@
       "@omniagent/core/*": ["./packages/core/src/*.ts"]
     }
   },
-  "include": ["packages/*/src/**/*.ts", "vitest.config.ts"]
+  "include": [
+    "packages/*/src/**/*.ts",
+    "packages/web/ui/**/*.ts",
+    "packages/web/ui/**/*.tsx",
+    "packages/web/vite.config.ts",
+    "vitest.config.ts"
+  ]
 }

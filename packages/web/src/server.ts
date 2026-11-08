@@ -1,14 +1,43 @@
 import { createServer, type IncomingMessage, type Server, type ServerResponse } from 'node:http';
-import { stat } from 'node:fs/promises';
-import { isAbsolute } from 'node:path';
-import { projectMessages } from '@omniagent/core';
+import { readFile, stat } from 'node:fs/promises';
+import { extname, isAbsolute, normalize, resolve, sep } from 'node:path';
+import { fileURLToPath } from 'node:url';
+import {
+  AgentDefinitionWriteSchema,
+  createSessionForkEvent,
+  createSessionPinEvent,
+  DEFAULT_SESSION_TITLE_LIMITS,
+  foldSessionPinned,
+  foldSessionTitle,
+  hasHumanMessage,
+  InvalidAgentSettings,
+  lastActivityTime,
+  MAX_AGENT_BYTES,
+  normalizeSessionTitle,
+  projectMessages,
+  ScheduleInputError,
+  SESSION_FORK_EVENT,
+  SESSION_PIN_EVENT,
+  SESSION_TITLE_EVENT,
+  truncateTitleUtf8,
+} from '@omniagent/core';
 import type {
+  AgentAuthoringService,
   AgentEvent,
   AgentUsage,
   ModelBinding,
   ModelCapabilities,
+  ModeSelection,
+  ModeStore,
   ResolvedSessionRuntime,
   RuntimeResolver,
+  ScheduleCatalogEntry,
+  ScheduleCreateRequest,
+  ScheduleDeliveryHistoryRequest,
+  SchedulePatch,
+  ScheduleService,
+  ScheduleTargetRequest,
+  ScheduleTiming,
   SessionHandle,
   SessionStore,
   SessionSummary,
@@ -16,16 +45,21 @@ import type {
 import {
   createAgentSelectionEvent,
   createAgentSwitch,
+  createModeSelectionEvent,
   createModelSelectionEvent,
   createModelSwitch,
   defaultModelBinding,
+  discoverSkills,
+  KNOWN_TOOL_NAMES,
   ModelBindingSchema,
   projectAgentSelection,
+  projectModeSelection,
   projectModelSelection,
   usageAllowsRoot,
 } from '@omniagent/core';
 import type { ReasoningEffort } from '@omniagent/core';
 import { MessageSchema } from '../../core/src/domain/message';
+import type { ContentPart } from '../../core/src/domain/message';
 import {
   createDshPresetSwitch, createInitialDshPermissionEvent, isDshPermissionPreset,
   projectDshPermissions, resolveDshDefaultPreset, snapshotDshPermissions,
@@ -34,19 +68,41 @@ import type { DshPermissionProjection, DshPermissionSnapshot } from '../../core/
 import { safePublicMessages } from '../../core/src/session/projection';
 import { projectTodos } from '../../core/src/session/todo';
 import { createPlanModeEvent, projectPlanMode } from '../../core/src/session/plan';
-import { WEB_CLIENT_HTML } from './client';
 import type { ApprovalBroker, ApprovalTurn } from './approval';
 import { InvalidPermissionSettings } from './permissions';
 import type { PermissionSettings } from './permissions';
+import { InvalidRoleSettings } from './catalog-settings';
+import type { RoleSettings } from './catalog-settings';
+import { InvalidModelSettings } from './model-settings';
+import type { ModelSettings } from './model-settings';
+import { InvalidMcpSettings } from './mcp-settings';
+import type { McpSettings } from './mcp-settings';
 import { exportSession } from './session-export';
 import { projectTraceEvents } from './trace-projection';
 import { projectTrajectory } from './trajectory';
+import { searchWorkspaceFiles } from './workspace-files';
+import type { LiveSessionRegistry } from './live-sessions';
 import type { Workspace, WorkspaceRegistry } from './workspaces';
 
 export interface WebSession {
   id: string;
-  send(input: string): AsyncGenerator<AgentEvent>;
+  send(input: string | readonly ContentPart[]): AsyncGenerator<AgentEvent>;
   interrupt(): void;
+  /** Add a direct human message to the active turn at its next model step. */
+  deliverUserMessage?(input: string | readonly ContentPart[]): Promise<'queued'>;
+  /** Compact older history before the next model request. */
+  requestCompaction?(): void;
+}
+
+/** Composer attachment accepted by the message route. */
+export interface SendAttachment {
+  kind: 'image' | 'text';
+  name: string;
+  mediaType: string;
+  /** Base64 payload without a data URL prefix, for images. */
+  data?: string;
+  /** UTF-8 file contents, for text-like attachments. */
+  text?: string;
 }
 
 export interface AgentSummary {
@@ -56,6 +112,8 @@ export interface AgentSummary {
   role: string;
   usage: AgentUsage;
   profile: string;
+  /** Built-in definitions ship with OmniAgent instead of an agents/*.md file. */
+  builtIn?: boolean;
   valid: boolean;
   warnings: string[];
 }
@@ -81,7 +139,7 @@ export interface ModelSummary {
 
 export interface WebHostOptions {
   workspaces: Pick<WorkspaceRegistry, 'list' | 'get' | 'add' | 'remove' | 'touch'>;
-  store: Pick<SessionStore, 'list' | 'create' | 'open'>;
+  store: Pick<SessionStore, 'list' | 'create' | 'open' | 'delete'>;
   /** Unconfigured composition seam; configured hosts use createRuntimeSession. */
   createSession?: (
     workspace: Workspace,
@@ -98,11 +156,29 @@ export interface WebHostOptions {
   ) => WebSession | Promise<WebSession>;
   listAgents?: () => AgentSummary[] | Promise<AgentSummary[]>;
   listRoles?: () => RoleSummary[] | Promise<RoleSummary[]>;
+  /** Durable mode presets used for new root sessions. */
+  modeStore?: ModeStore;
+  /** Editable role table stored in config.json. */
+  roleSettings?: RoleSettings;
+  /** Editable provider/model sources stored in config.json. */
+  modelSettings?: ModelSettings;
+  /** Editable MCP server table stored in config.json. */
+  mcpSettings?: McpSettings;
+  /** Connected MCP tool names, offered to the mode/profile tool selectors. */
+  mcpToolNames?: () => string[];
+  /** Agent definition files for the manual Settings → Agents editor. */
+  agentAuthoring?: AgentAuthoringService;
   readAudit?: (workspace: Workspace, sessionId: string) => Promise<unknown[]>;
   permissionSettings?: Pick<PermissionSettings, 'read' | 'update' | 'snapshot'>;
   approvalBroker?: ApprovalBroker;
   /** Credential-free model metadata for the configured catalog. */
   modelCatalog?: () => ModelSummary[] | Promise<ModelSummary[]>;
+  /** Directory containing the built Vite client. Defaults to packages/web/dist. */
+  staticDir?: string;
+  /** Shared live-session registry so scheduled deliveries reuse an open session runtime. */
+  liveSessions?: LiveSessionRegistry;
+  /** Host-wide automation tasks shared by the page, HTTP routes, and agent tools. */
+  schedule?: ScheduleService;
 }
 
 export interface WebHost {
@@ -112,21 +188,56 @@ export interface WebHost {
 }
 
 const MAX_BODY_BYTES = 64 * 1024;
+/** JSON escaping can roughly double an agent body; keep one request above MAX_AGENT_BYTES. */
+const MAX_AGENT_REQUEST_BYTES = MAX_AGENT_BYTES * 2 + MAX_BODY_BYTES;
+const MAX_MESSAGE_BODY_BYTES = 32 * 1024 * 1024;
+const MAX_ATTACHMENTS = 8;
+const MAX_ATTACHMENT_NAME = 256;
+const MAX_IMAGE_DATA_BYTES = 8 * 1024 * 1024;
+const MAX_TEXT_ATTACHMENT_BYTES = 256 * 1024;
 const MAX_CACHED_WEB_SESSIONS = 64;
+const DEFAULT_STATIC_DIR = fileURLToPath(new URL('../dist', import.meta.url));
 const DOCUMENT_CSP = [
   "default-src 'none'",
-  "script-src 'unsafe-inline'",
-  "style-src 'unsafe-inline'",
-  "img-src data:",
+  "script-src 'self'",
+  "style-src 'self' 'unsafe-inline'",
+  "img-src 'self' data: blob:",
+  "font-src 'self' data:",
   "connect-src 'self'",
   "base-uri 'none'",
   "form-action 'self'",
   "frame-ancestors 'none'",
   "object-src 'none'",
 ].join('; ');
+const STATIC_CONTENT_TYPES: Record<string, string> = {
+  '.html': 'text/html; charset=utf-8',
+  '.js': 'text/javascript; charset=utf-8',
+  '.mjs': 'text/javascript; charset=utf-8',
+  '.css': 'text/css; charset=utf-8',
+  '.json': 'application/json; charset=utf-8',
+  '.map': 'application/json; charset=utf-8',
+  '.svg': 'image/svg+xml',
+  '.png': 'image/png',
+  '.jpg': 'image/jpeg',
+  '.jpeg': 'image/jpeg',
+  '.webp': 'image/webp',
+  '.avif': 'image/avif',
+  '.gif': 'image/gif',
+  '.ico': 'image/x-icon',
+  '.woff': 'font/woff',
+  '.woff2': 'font/woff2',
+  '.ttf': 'font/ttf',
+  '.otf': 'font/otf',
+  '.txt': 'text/plain; charset=utf-8',
+  '.webmanifest': 'application/manifest+json',
+};
 
 class HttpError extends Error {
-  constructor(readonly status: number, message: string) {
+  constructor(
+    readonly status: number,
+    message: string,
+    readonly code?: string,
+  ) {
     super(message);
   }
 }
@@ -135,6 +246,8 @@ interface RunningTurn {
   session?: WebSession;
   approval?: ApprovalTurn;
   cancelled: boolean;
+  /** Settles when this turn has bound a session or can no longer do so. */
+  ready?: Promise<void>;
 }
 
 interface CachedSession {
@@ -151,13 +264,14 @@ export function createWebHost(options: WebHostOptions): WebHost {
   const removing = new Set<string>();
   const permissionLocks = new Map<string, Promise<void>>();
   const failedPermissions = new Set<string>();
+  const compactRequests = new Set<string>();
   let permissionDefaultUpdates = 0;
   const server = createServer((request, response) => {
     // A client can reset the connection while a response write is in flight;
     // that surfaces as EPIPE/ECONNRESET on the socket, not on the response.
     response.socket?.on('error', () => undefined);
     void route(request, response, options, sessions, running, creating, removing, permissionLocks, failedPermissions,
-      () => permissionDefaultUpdates, (value) => { permissionDefaultUpdates = value; }).catch((error: unknown) => {
+      compactRequests, () => permissionDefaultUpdates, (value) => { permissionDefaultUpdates = value; }).catch((error: unknown) => {
       if (response.headersSent) {
         if (!response.destroyed && !response.writableEnded) response.end();
         return;
@@ -165,7 +279,10 @@ export function createWebHost(options: WebHostOptions): WebHost {
       if (response.destroyed) return;
       const status = error instanceof HttpError ? error.status : 500;
       const message = status === 500 ? 'Internal server error' : (error as Error).message;
-      json(response, status, { error: message });
+      json(response, status, {
+        error: message,
+        ...(error instanceof HttpError && error.code !== undefined ? { code: error.code } : {}),
+      });
     });
   });
   return {
@@ -197,6 +314,78 @@ export async function startWebHost(options: WebHostOptions, port = 0): Promise<W
   return host;
 }
 
+function safeStaticPath(root: string, pathname: string): string | undefined {
+  let decoded: string;
+  try {
+    decoded = decodeURIComponent(pathname);
+  } catch {
+    return undefined;
+  }
+  if (decoded.includes('\0')) return undefined;
+  const relative = decoded.replace(/^\/+/, '');
+  const base = resolve(root);
+  if (relative === '') return resolve(base, 'index.html');
+  const normalized = normalize(relative);
+  if (normalized === '..' || normalized.startsWith(`..${sep}`) || isAbsolute(normalized)) return undefined;
+  const candidate = resolve(base, normalized);
+  return candidate === base || candidate.startsWith(`${base}${sep}`) ? candidate : undefined;
+}
+
+/**
+ * Serve the built Vite client. Hashed assets are immutable, while document
+ * requests always revalidate so a rebuilt bundle is picked up immediately.
+ */
+async function serveStatic(
+  request: IncomingMessage,
+  response: ServerResponse,
+  pathname: string,
+  root: string,
+): Promise<void> {
+  const headers = {
+    'x-frame-options': 'DENY',
+    'x-content-type-options': 'nosniff',
+    'referrer-policy': 'no-referrer',
+    'permissions-policy': 'camera=(), microphone=(), geolocation=()',
+  };
+  const requested = pathname === '/' ? '/index.html' : pathname;
+  const file = safeStaticPath(root, requested);
+  const content = file === undefined ? undefined : await readFile(file).catch(() => undefined);
+  if (file !== undefined && content !== undefined) {
+    const extension = extname(file).toLowerCase();
+    response.writeHead(200, {
+      ...headers,
+      'content-type': STATIC_CONTENT_TYPES[extension] ?? 'application/octet-stream',
+      'cache-control': requested.startsWith('/assets/') ? 'public, max-age=31536000, immutable' : 'no-cache',
+      ...(extension === '.html' ? { 'content-security-policy': DOCUMENT_CSP } : {}),
+    });
+    response.end(request.method === 'HEAD' ? undefined : content);
+    return;
+  }
+  const navigation = pathname === '/' || (!pathname.startsWith('/assets/') && extname(pathname) === '');
+  if (!navigation) {
+    response.writeHead(404, { ...headers, 'content-type': 'text/plain; charset=utf-8', 'cache-control': 'no-store' });
+    response.end(request.method === 'HEAD' ? undefined : 'Not found');
+    return;
+  }
+  // Unknown extensionless routes are client-side navigation: fall back to the
+  // application document, which re-boots the SPA.
+  const document = await readFile(resolve(root, 'index.html')).catch(() => undefined);
+  if (document === undefined) {
+    response.writeHead(503, { ...headers, 'content-type': 'text/plain; charset=utf-8', 'cache-control': 'no-store' });
+    response.end(request.method === 'HEAD'
+      ? undefined
+      : 'The web client has not been built. Run "pnpm web:build" first.');
+    return;
+  }
+  response.writeHead(200, {
+    ...headers,
+    'content-type': 'text/html; charset=utf-8',
+    'content-security-policy': DOCUMENT_CSP,
+    'cache-control': 'no-cache',
+  });
+  response.end(request.method === 'HEAD' ? undefined : document);
+}
+
 async function route(
   request: IncomingMessage,
   response: ServerResponse,
@@ -207,32 +396,270 @@ async function route(
   removing: Set<string>,
   permissionLocks: Map<string, Promise<void>>,
   failedPermissions: Set<string>,
+  compactRequests: Set<string>,
   getPermissionDefaultUpdates: () => number,
   setPermissionDefaultUpdates: (value: number) => void,
 ): Promise<void> {
   validateOrigin(request);
   const url = new URL(request.url ?? '/', 'http://localhost');
-  if (request.method === 'GET' && url.pathname === '/') {
-    response.writeHead(200, {
-      'content-type': 'text/html; charset=utf-8',
-      'content-security-policy': DOCUMENT_CSP,
-      'x-frame-options': 'DENY',
-      'x-content-type-options': 'nosniff',
-      'referrer-policy': 'no-referrer',
-      'permissions-policy': 'camera=(), microphone=(), geolocation=()',
-    });
-    response.end(WEB_CLIENT_HTML);
-    return;
-  }
   if (request.method === 'GET' && url.pathname === '/health') return json(response, 200, { ok: true });
+  if ((request.method === 'GET' || request.method === 'HEAD')
+    && url.pathname !== '/api' && !url.pathname.startsWith('/api/')) {
+    return serveStatic(request, response, url.pathname, options.staticDir ?? DEFAULT_STATIC_DIR);
+  }
   if (request.method === 'GET' && url.pathname === '/api/models') {
     return json(response, 200, { models: await options.modelCatalog?.() ?? [] });
+  }
+  if (request.method === 'GET' && url.pathname === '/api/sessions/recent') {
+    const query = url.searchParams.get('query') ?? '';
+    if (query.length > 1_024) throw new HttpError(400, 'The session reference query is too long');
+    const requestedLimit = Number(url.searchParams.get('limit') ?? '30');
+    const limit = Number.isFinite(requestedLimit) ? Math.min(50, Math.max(1, Math.trunc(requestedLimit))) : 30;
+    const currentWorkspaceId = url.searchParams.get('workspaceId');
+    const workspaces = await options.workspaces.list();
+    if (currentWorkspaceId !== null && workspaces.every((workspace) => workspace.id !== currentWorkspaceId)) {
+      throw new HttpError(404, 'Workspace not found');
+    }
+    const byPath = new Map(workspaces.map((workspace) => [workspace.path, workspace]));
+    const sessions = (await options.store.list())
+      .filter((session) => session.parentSessionId === undefined && session.depth === undefined)
+      .flatMap((session) => {
+        const workspace = byPath.get(session.workspace);
+        if (workspace === undefined) return [];
+        const values = [session.title ?? '', session.description ?? '', workspace.name, session.id];
+        if (!likeMatches(values, query)) return [];
+        return [{
+          id: session.id,
+          title: session.title ?? null,
+          workspaceId: workspace.id,
+          workspaceName: workspace.name,
+          updatedAt: session.updatedAt,
+          blank: session.blank,
+          ...(session.agent === undefined ? {} : { agent: session.agent }),
+          ...(session.mode === undefined ? {} : { mode: session.mode }),
+        }];
+      })
+      .sort((left, right) => {
+        const current = Number(right.workspaceId === currentWorkspaceId) - Number(left.workspaceId === currentWorkspaceId);
+        return current || right.updatedAt - left.updatedAt
+          || (left.title ?? '').localeCompare(right.title ?? '') || left.id.localeCompare(right.id);
+      });
+    return json(response, 200, { sessions: sessions.slice(0, limit) });
   }
   if (request.method === 'GET' && url.pathname === '/api/agents') {
     return json(response, 200, { agents: await options.listAgents?.() ?? [] });
   }
   if (request.method === 'GET' && url.pathname === '/api/roles') {
     return json(response, 200, { roles: await options.listRoles?.() ?? [] });
+  }
+  if (request.method === 'GET' && url.pathname === '/api/modes') {
+    if (!options.modeStore) throw new HttpError(404, 'Not found');
+    return json(response, 200, {
+      modes: await options.modeStore.list(),
+      defaultMode: await options.modeStore.defaultId(),
+    });
+  }
+  if (request.method === 'GET' && url.pathname === '/api/modes/options') {
+    const workspaceId = url.searchParams.get('workspaceId');
+    const workspace = workspaceId === null ? undefined : await options.workspaces.get(workspaceId);
+    if (workspaceId !== null && workspace === undefined) throw new HttpError(404, 'Workspace not found');
+    let skills: Array<{ name: string; description: string }> = [];
+    try {
+      skills = (await discoverSkills(workspace === undefined ? {} : { workspace: workspace.path }))
+        .map((skill) => ({ name: skill.name, description: skill.description }));
+    } catch {
+      skills = [];
+    }
+    return json(response, 200, {
+      tools: [...new Set([...KNOWN_TOOL_NAMES, ...(options.mcpToolNames?.() ?? [])])].sort(),
+      skills,
+    });
+  }
+  if (url.pathname === '/api/settings/default-mode' && options.modeStore) {
+    if (request.method === 'GET') return json(response, 200, { defaultMode: await options.modeStore.defaultId() });
+    if (request.method === 'PUT') {
+      const body = await readJson(request);
+      if (Object.keys(body).length !== 1 || typeof body.mode !== 'string' || body.mode.trim() === '') {
+        throw new HttpError(400, 'A valid mode id is required');
+      }
+      try {
+        return json(response, 200, { defaultMode: await options.modeStore.setDefault(body.mode) });
+      } catch (error) {
+        throw new HttpError(400, error instanceof Error ? error.message : 'Invalid mode');
+      }
+    }
+  }
+  if (url.pathname.startsWith('/api/modes/') && options.modeStore) {
+    const id = decodePart(url.pathname.slice('/api/modes/'.length));
+    if (id === '' || id.includes('/')) throw new HttpError(404, 'Not found');
+    if (request.method === 'PUT') {
+      const body = await readJson(request);
+      try {
+        return json(response, 200, { mode: await options.modeStore.save(id, body) });
+      } catch (error) {
+        throw new HttpError(400, error instanceof Error ? error.message : 'Invalid mode');
+      }
+    }
+    if (request.method === 'DELETE') {
+      try {
+        return json(response, 200, { removed: await options.modeStore.remove(id) });
+      } catch (error) {
+        throw new HttpError(400, error instanceof Error ? error.message : 'Invalid mode');
+      }
+    }
+  }
+  if (url.pathname === '/api/settings/model-sources' && options.modelSettings) {
+    if (request.method === 'GET') return json(response, 200, await options.modelSettings.list());
+  }
+  if (url.pathname === '/api/settings/model-sources/discover' && options.modelSettings) {
+    if (request.method === 'POST') {
+      const body = await readJson(request);
+      try {
+        return json(response, 200, await options.modelSettings.discover(body));
+      } catch (error) {
+        if (error instanceof InvalidModelSettings) throw new HttpError(400, error.message);
+        throw new HttpError(400, error instanceof Error ? error.message : 'Could not fetch models');
+      }
+    }
+  }
+  if (url.pathname.startsWith('/api/settings/model-sources/') && options.modelSettings) {
+    const id = decodePart(url.pathname.slice('/api/settings/model-sources/'.length));
+    if (id === '' || id.includes('/')) throw new HttpError(404, 'Not found');
+    if (request.method === 'PUT') {
+      const body = await readJson(request);
+      try {
+        return json(response, 200, { source: await options.modelSettings.save(id, body) });
+      } catch (error) {
+        if (error instanceof InvalidModelSettings) throw new HttpError(400, error.message);
+        throw new HttpError(400, error instanceof Error ? error.message : 'Invalid model source');
+      }
+    }
+    if (request.method === 'DELETE') {
+      try {
+        return json(response, 200, { removed: await options.modelSettings.remove(id) });
+      } catch (error) {
+        if (error instanceof InvalidModelSettings) throw new HttpError(400, error.message);
+        throw new HttpError(400, error instanceof Error ? error.message : 'Invalid model source');
+      }
+    }
+  }
+  if (url.pathname === '/api/settings/roles' && options.roleSettings) {
+    if (request.method === 'GET') return json(response, 200, await options.roleSettings.list());
+  }
+  if (url.pathname.startsWith('/api/settings/roles/') && options.roleSettings) {
+    const id = decodePart(url.pathname.slice('/api/settings/roles/'.length));
+    if (id === '' || id.includes('/')) throw new HttpError(404, 'Not found');
+    if (request.method === 'PUT') {
+      const body = await readJson(request);
+      try {
+        return json(response, 200, { role: await options.roleSettings.save(id, body) });
+      } catch (error) {
+        if (error instanceof InvalidRoleSettings) throw new HttpError(400, error.message);
+        throw new HttpError(400, error instanceof Error ? error.message : 'Invalid role');
+      }
+    }
+    if (request.method === 'DELETE') {
+      try {
+        return json(response, 200, { removed: await options.roleSettings.remove(id) });
+      } catch (error) {
+        if (error instanceof InvalidRoleSettings) throw new HttpError(400, error.message);
+        throw new HttpError(400, error instanceof Error ? error.message : 'Invalid role');
+      }
+    }
+  }
+  if (url.pathname === '/api/settings/mcp-servers' && options.mcpSettings) {
+    if (request.method === 'GET') return json(response, 200, await options.mcpSettings.list());
+  }
+  if (url.pathname === '/api/settings/mcp-servers/test' && options.mcpSettings) {
+    if (request.method === 'POST') {
+      const body = await readJson(request);
+      if (typeof body.id !== 'string' || body.id.trim() === '') {
+        throw new HttpError(400, 'A server id is required');
+      }
+      if (body.server !== undefined
+        && (typeof body.server !== 'object' || body.server === null || Array.isArray(body.server))) {
+        throw new HttpError(400, 'server must be an object');
+      }
+      try {
+        return json(response, 200, await options.mcpSettings.test(body.id.trim(), body.server));
+      } catch (error) {
+        if (error instanceof InvalidMcpSettings) throw new HttpError(400, error.message);
+        throw new HttpError(500, error instanceof Error ? error.message : 'MCP server test failed');
+      }
+    }
+  }
+  if (url.pathname.startsWith('/api/settings/mcp-servers/') && options.mcpSettings) {
+    const id = decodePart(url.pathname.slice('/api/settings/mcp-servers/'.length));
+    if (id === '' || id.includes('/')) throw new HttpError(404, 'Not found');
+    if (request.method === 'PUT') {
+      const body = await readJson(request);
+      try {
+        return json(response, 200, { server: await options.mcpSettings.save(id, body) });
+      } catch (error) {
+        if (error instanceof InvalidMcpSettings) throw new HttpError(400, error.message);
+        throw new HttpError(400, error instanceof Error ? error.message : 'Invalid MCP server');
+      }
+    }
+    if (request.method === 'DELETE') {
+      try {
+        return json(response, 200, { removed: await options.mcpSettings.remove(id) });
+      } catch (error) {
+        if (error instanceof InvalidMcpSettings) throw new HttpError(400, error.message);
+        throw new HttpError(400, error instanceof Error ? error.message : 'Invalid MCP server');
+      }
+    }
+  }
+  if (url.pathname === '/api/settings/agents' && options.agentAuthoring) {
+    if (request.method === 'GET') {
+      return json(response, 200, {
+        agents: await options.agentAuthoring.list(),
+        profiles: await options.agentAuthoring.listProfiles(),
+      });
+    }
+  }
+  if (url.pathname.startsWith('/api/settings/agents/') && options.agentAuthoring) {
+    const id = decodePart(url.pathname.slice('/api/settings/agents/'.length));
+    if (id === '' || id.includes('/')) throw new HttpError(404, 'Not found');
+    if (request.method === 'GET') {
+      try {
+        return json(response, 200, {
+          agent: await options.agentAuthoring.read(id),
+          profiles: await options.agentAuthoring.listProfiles(),
+        });
+      } catch (error) {
+        if (error instanceof InvalidAgentSettings) throw new HttpError(404, error.message);
+        throw error;
+      }
+    }
+    if (request.method === 'PUT') {
+      const body = await readJson(request, MAX_AGENT_REQUEST_BYTES);
+      const parsed = AgentDefinitionWriteSchema.safeParse({ ...body, id });
+      if (!parsed.success) {
+        throw new HttpError(400, parsed.error.issues[0]?.message ?? 'Invalid agent definition');
+      }
+      try {
+        const result = await options.agentAuthoring.write(parsed.data);
+        return json(response, 200, {
+          agent: await options.agentAuthoring.read(id),
+          created: result.created,
+        });
+      } catch (error) {
+        if (error instanceof InvalidAgentSettings) throw new HttpError(400, error.message);
+        throw error;
+      }
+    }
+    if (request.method === 'DELETE') {
+      try {
+        return json(response, 200, { removed: await options.agentAuthoring.remove(id) });
+      } catch (error) {
+        if (error instanceof InvalidAgentSettings) throw new HttpError(400, error.message);
+        throw error;
+      }
+    }
+  }
+  if (url.pathname === '/api/schedules' || url.pathname.startsWith('/api/schedules/')) {
+    if (!options.schedule) throw new HttpError(404, 'Not found');
+    return routeSchedules(request, response, url, options.schedule);
   }
   if (url.pathname === '/api/settings/permissions' && options.permissionSettings) {
     if (request.method === 'GET') return json(response, 200, { settings: await options.permissionSettings.read() });
@@ -280,6 +707,13 @@ async function route(
   const workspace = await options.workspaces.get(parts[2]);
   if (!workspace) throw new HttpError(404, 'Workspace not found');
   const workspacePrefix = `${workspace.path}\0`;
+  if (request.method === 'GET' && parts.length === 4 && parts[3] === 'files') {
+    const query = url.searchParams.get('query') ?? '';
+    if (query.length > 1_024) throw new HttpError(400, 'The file reference query is too long');
+    const requestedLimit = Number(url.searchParams.get('limit') ?? '20');
+    const limit = Number.isFinite(requestedLimit) ? Math.min(50, Math.max(1, Math.trunc(requestedLimit))) : 20;
+    return json(response, 200, { entries: await searchWorkspaceFiles(workspace.path, query, limit) });
+  }
   if (request.method === 'DELETE' && parts.length === 3) {
     if (removing.has(workspace.id) || creating.has(workspace.id) ||
         [...running.keys()].some((key) => key.startsWith(workspacePrefix)) ||
@@ -309,7 +743,9 @@ async function route(
         }
       }));
     return json(response, 200, {
-      sessions: summaries.sort((left, right) => right.updatedAt - left.updatedAt),
+      sessions: summaries.sort((left, right) =>
+        Number(right.pinned === true) - Number(left.pinned === true)
+        || right.updatedAt - left.updatedAt),
     });
   }
   if (request.method === 'POST' && parts.length === 4) {
@@ -323,29 +759,71 @@ async function route(
       let runtime: ResolvedSessionRuntime | undefined;
       let agentId: string | undefined;
       let binding: ModelBinding | undefined;
+      let modeSelection: ModeSelection | undefined;
       if (options.runtime) {
-        if (Object.keys(body).some((name) => name !== 'agent' && name !== 'model')) {
+        if (Object.keys(body).some((name) => name !== 'mode' && name !== 'agent' && name !== 'model')) {
           throw new HttpError(400, 'Invalid session configuration');
         }
-        if (body.agent !== undefined && (typeof body.agent !== 'string' || body.agent.length === 0)) {
-          throw new HttpError(400, 'A valid agent id is required');
-        }
-        const parsedBinding = body.model === undefined
-          ? { success: true as const, data: defaultModelBinding() }
-          : ModelBindingSchema.safeParse(body.model);
-        if (!parsedBinding.success) throw new HttpError(400, 'A valid model binding is required');
-        if (!options.createRuntimeSession) throw new HttpError(500, 'Runtime session composition is unavailable');
-        agentId = typeof body.agent === 'string' ? body.agent : 'default';
-        binding = parsedBinding.data;
-        try {
-          runtime = await options.runtime.resolve({
-            cwd: workspace.path,
-            agentId,
-            binding,
-            isRoot: true,
-          });
-        } catch (error) {
-          throw new HttpError(409, error instanceof Error ? error.message : 'The selected agent is unavailable');
+        if (body.mode !== undefined) {
+          if (body.agent !== undefined) {
+            throw new HttpError(400, 'A mode session cannot also specify an agent');
+          }
+          if (typeof body.mode !== 'string' || body.mode.length === 0) {
+            throw new HttpError(400, 'A valid mode id is required');
+          }
+          const parsedOverride = body.model === undefined
+            ? { success: true as const, data: undefined }
+            : ModelBindingSchema.safeParse(body.model);
+          if (!parsedOverride.success) throw new HttpError(400, 'A valid model binding is required');
+          if (!options.modeStore) throw new HttpError(409, 'Mode presets are unavailable');
+          const mode = await options.modeStore.get(body.mode);
+          if (mode === undefined) throw new HttpError(409, `Unknown mode "${body.mode}"`);
+          if (!mode.valid) throw new HttpError(409, `Mode "${body.mode}" is unavailable: ${mode.warnings.join('; ')}`);
+          if (!options.createRuntimeSession) throw new HttpError(500, 'Runtime session composition is unavailable');
+          agentId = mode.agent;
+          // A mode fixes the agent, tools and skills. The model still defaults
+          // to the mode binding but the user may override it for this session.
+          binding = parsedOverride.data ?? mode.model;
+          try {
+            runtime = await options.runtime.resolve({
+              cwd: workspace.path,
+              agentId,
+              binding,
+              isRoot: true,
+              mode: { id: mode.id, tools: mode.tools, skills: mode.skills },
+            });
+          } catch (error) {
+            throw new HttpError(409, error instanceof Error ? error.message : 'The selected mode is unavailable');
+          }
+          modeSelection = {
+            version: 1,
+            mode: mode.id,
+            agent: agentId,
+            model: runtime.modelBinding,
+            tools: runtime.sessionAgent.tools === '*' ? '*' : [...runtime.sessionAgent.tools].sort(),
+            skills: runtime.sessionAgent.skills === '*' ? '*' : [...runtime.sessionAgent.skills].sort(),
+          };
+        } else {
+          if (body.agent !== undefined && (typeof body.agent !== 'string' || body.agent.length === 0)) {
+            throw new HttpError(400, 'A valid agent id is required');
+          }
+          const parsedBinding = body.model === undefined
+            ? { success: true as const, data: defaultModelBinding() }
+            : ModelBindingSchema.safeParse(body.model);
+          if (!parsedBinding.success) throw new HttpError(400, 'A valid model binding is required');
+          if (!options.createRuntimeSession) throw new HttpError(500, 'Runtime session composition is unavailable');
+          agentId = typeof body.agent === 'string' ? body.agent : 'default';
+          binding = parsedBinding.data;
+          try {
+            runtime = await options.runtime.resolve({
+              cwd: workspace.path,
+              agentId,
+              binding,
+              isRoot: true,
+            });
+          } catch (error) {
+            throw new HttpError(409, error instanceof Error ? error.message : 'The selected agent is unavailable');
+          }
         }
       } else if (Object.keys(body).length > 0) {
         throw new HttpError(400, 'Agent and model selection require a configured runtime');
@@ -365,6 +843,7 @@ async function route(
         if (runtime !== undefined && agentId !== undefined && binding !== undefined) {
           await handle.append(createAgentSelectionEvent(agentId));
           await handle.append(createModelSelectionEvent(binding));
+          if (modeSelection !== undefined) await handle.append(createModeSelectionEvent(modeSelection));
         }
       });
       await options.workspaces.touch(workspace.id);
@@ -384,8 +863,15 @@ async function route(
     const audit = await options.readAudit?.(workspace, sessionId) ?? [];
     await options.workspaces.touch(workspace.id);
     const selection = await describeSelection(options, workspace, handle);
+    const title = foldSessionTitle(handle.events);
+    const mode = projectModeSelection(handle.events);
     return json(response, 200, {
       header: handle.header,
+      title: title?.title ?? null,
+      titleSource: title?.source ?? null,
+      blank: !hasHumanMessage(handle.events),
+      mode: mode.status === 'selected' ? mode.selection : null,
+      running: running.has(key),
       messages: safePublicMessages(projectMessages(handle.events)),
       permission: { preset: permissionProjection(handle, key, failedPermissions).preset },
       ...selection,
@@ -395,6 +881,58 @@ async function route(
       trajectory: projectTrajectory(handle.events),
       audit,
     });
+  }
+  if (request.method === 'PATCH' && parts.length === 5) {
+    const body = await readJson(request);
+    if (Object.keys(body).length !== 1 || typeof body.title !== 'string' || body.title.length > 1_000) {
+      throw new HttpError(400, 'A session title is required');
+    }
+    const title = normalizeSessionTitle(body.title, DEFAULT_SESSION_TITLE_LIMITS.maxTitleBytes);
+    if (title === '') throw new HttpError(400, 'A non-empty session title is required');
+    const handle = await openSession(options.store, workspace, sessionId);
+    const current = foldSessionTitle(handle.events);
+    if (current?.source.kind !== 'user' || current.title !== title) {
+      await handle.append({
+        type: SESSION_TITLE_EVENT,
+        data: { title, messageSeqs: [], source: { kind: 'user' } },
+      });
+    }
+    return json(response, 200, { title });
+  }
+  if (request.method === 'DELETE' && parts.length === 5) {
+    if (running.has(key)) throw new HttpError(409, 'Cannot delete a session while its turn is active');
+    if (removing.has(workspace.id)) throw new HttpError(409, 'Workspace is being unregistered');
+    const registered = await options.workspaces.get(workspace.id);
+    if (!registered || registered.path !== workspace.path) throw new HttpError(404, 'Workspace not found');
+    await openSession(options.store, workspace, sessionId);
+    await options.store.delete(workspace.path, sessionId);
+    sessions.delete(key);
+    options.liveSessions?.delete(key);
+    failedPermissions.delete(key);
+    return json(response, 200, { deleted: true });
+  }
+  if (request.method === 'POST' && parts.length === 6 && parts[5] === 'pin') {
+    const body = await readJson(request);
+    if (Object.keys(body).length !== 1 || typeof body.pinned !== 'boolean') {
+      throw new HttpError(400, 'A boolean pinned value is required');
+    }
+    const handle = await openSession(options.store, workspace, sessionId);
+    if (foldSessionPinned(handle.events) !== body.pinned) {
+      await handle.append(createSessionPinEvent(body.pinned));
+    }
+    return json(response, 200, { pinned: body.pinned });
+  }
+  if (request.method === 'POST' && parts.length === 6 && parts[5] === 'fork') {
+    if (running.size > 0 || creating.size > 0 || getPermissionDefaultUpdates() > 0) {
+      throw new HttpError(409, 'Cannot fork a session while a turn or session creation is active');
+    }
+    if (removing.has(workspace.id)) throw new HttpError(409, 'Workspace is being unregistered');
+    const registered = await options.workspaces.get(workspace.id);
+    if (!registered || registered.path !== workspace.path) throw new HttpError(404, 'Workspace not found');
+    const source = await openSession(options.store, workspace, sessionId);
+    const created = await forkSession(options.store, source, workspace);
+    await options.workspaces.touch(workspace.id);
+    return json(response, 201, { session: summarize(created) });
   }
   if (request.method === 'GET' && parts.length === 6 && parts[5] === 'messages') {
     const handle = await openSession(options.store, workspace, sessionId);
@@ -422,6 +960,7 @@ async function route(
         } catch (error) {
           failedPermissions.add(key);
           sessions.delete(key);
+          options.liveSessions?.delete(key);
           throw error;
         }
       }
@@ -443,6 +982,9 @@ async function route(
       const registered = await options.workspaces.get(workspace.id);
       if (!registered || registered.path !== workspace.path) throw new HttpError(404, 'Workspace not found');
       const handle = await openSession(options.store, workspace, sessionId);
+      if (projectModeSelection(handle.events).status === 'selected') {
+        throw new HttpError(409, 'The session mode is fixed; create a new session to change it');
+      }
       const binding = projectModelSelection(handle.events);
       if (binding.status === 'invalid') throw new HttpError(409, 'The session model binding is invalid; select a model again');
       let resolved: ResolvedSessionRuntime;
@@ -461,6 +1003,7 @@ async function route(
       const event = createAgentSwitch(current, { version: 1, agent });
       if (event) await handle.append(event);
       sessions.delete(key);
+      options.liveSessions?.delete(key);
       return agentSummary(resolved);
     });
     return json(response, 200, { agent: result });
@@ -493,6 +1036,7 @@ async function route(
       const event = createModelSwitch(projectModelSelection(handle.events), binding);
       if (event) await handle.append(event);
       sessions.delete(key);
+      options.liveSessions?.delete(key);
       return {
         model: binding,
         resolvedModel: resolvedModelSummary(resolved),
@@ -516,6 +1060,7 @@ async function route(
         await handle.append(createPlanModeEvent(active));
       }
       sessions.delete(key);
+      options.liveSessions?.delete(key);
     });
     return json(response, 200, { plan: { active } });
   }
@@ -568,6 +1113,13 @@ async function route(
     }
     return json(response, 200, { ok: true });
   }
+  if (request.method === 'POST' && parts.length === 6 && parts[5] === 'compact') {
+    await readJson(request);
+    await openSession(options.store, workspace, sessionId);
+    if (running.has(key)) throw new HttpError(409, 'The session is running; compact context after the reply finishes');
+    compactRequests.add(key);
+    return json(response, 202, { ok: true, scheduled: true });
+  }
   if (request.method === 'POST' && parts.length === 6 && parts[5] === 'interrupt') {
     await readJson(request);
     const turn = running.get(key);
@@ -580,13 +1132,39 @@ async function route(
     return json(response, 200, { ok: true });
   }
   if (request.method === 'POST' && parts.length === 6 && parts[5] === 'messages') {
-    const body = await readJson(request);
-    if (typeof body.text !== 'string' || body.text.trim().length === 0) {
-      throw new HttpError(400, 'Message text is required');
+    const body = await readJson(request, MAX_MESSAGE_BODY_BYTES);
+    const text = typeof body.text === 'string' ? body.text : '';
+    const attachments = parseSendAttachments(body.attachments);
+    if (text.trim().length === 0 && attachments.length === 0) {
+      throw new HttpError(400, 'Message text or an attachment is required');
+    }
+    const content = attachments.length === 0 ? text : composeUserContent(text, attachments);
+    const sendMode = body.mode;
+    if (sendMode !== undefined && sendMode !== 'steer') {
+      throw new HttpError(400, 'A valid send mode is required');
+    }
+    if (sendMode === 'steer' && running.has(key)) {
+      if (removing.has(workspace.id)) throw new HttpError(409, 'Workspace is being unregistered');
+      const active = running.get(key)!;
+      if (active.ready !== undefined) {
+        let timer: ReturnType<typeof setTimeout> | undefined;
+        await Promise.race([
+          active.ready,
+          new Promise<void>((resolve) => { timer = setTimeout(resolve, 10_000); }),
+        ]);
+        if (timer !== undefined) clearTimeout(timer);
+      }
+      if (active.session?.deliverUserMessage === undefined) {
+        throw new HttpError(409, 'The active turn cannot accept another message yet');
+      }
+      const delivery = await active.session.deliverUserMessage(content);
+      return json(response, 202, { accepted: true, delivery });
     }
     if (running.has(key)) throw new HttpError(409, 'Session already has an active turn');
     if (removing.has(workspace.id)) throw new HttpError(409, 'Workspace is being unregistered');
-    const turn: RunningTurn = { cancelled: false };
+    let markReady!: () => void;
+    const ready = new Promise<void>((resolve) => { markReady = resolve; });
+    const turn: RunningTurn = { cancelled: false, ready };
     running.set(key, turn);
     const disconnected = () => {
       if (response.writableEnded) return;
@@ -627,6 +1205,7 @@ async function route(
             agentId: agent.agent,
             binding: binding.binding,
             isRoot: true,
+            ...(modeRuntimeOverride(handle) === undefined ? {} : { mode: modeRuntimeOverride(handle) }),
           });
         } catch (error) {
           throw new HttpError(409, error instanceof Error ? error.message : 'The selected agent is unavailable');
@@ -659,6 +1238,8 @@ async function route(
         return;
       }
       turn.session = session;
+      if (compactRequests.delete(key)) session.requestCompaction?.();
+      markReady();
       turn.approval = options.approvalBroker?.start(workspace.path, sessionId);
       response.writeHead(200, {
         'content-type': 'text/event-stream; charset=utf-8',
@@ -667,7 +1248,7 @@ async function route(
         'connection': 'keep-alive',
       });
       response.flushHeaders();
-      const source = session.send(body.text);
+      const source = session.send(content);
       for await (const event of turn.approval ? turn.approval.stream(source) : source) {
         if (response.destroyed) break;
         const publicEvent = publicAgentEvent(event);
@@ -683,6 +1264,7 @@ async function route(
         response.write(`data: ${JSON.stringify({ type: 'turn.end', reason: 'error' })}\n\n`);
       }
     } finally {
+      markReady();
       turn.approval?.close();
       if (running.get(key) === turn) running.delete(key);
       response.off('close', disconnected);
@@ -693,6 +1275,161 @@ async function route(
     return;
   }
   throw new HttpError(404, 'Not found');
+}
+
+/**
+ * Automation-task HTTP surface. Errors from the shared Schedule service are
+ * translated to JSON status responses so the page can render the same
+ * localized validation feedback as the agent tools.
+ */
+async function routeSchedules(
+  request: IncomingMessage,
+  response: ServerResponse,
+  url: URL,
+  schedule: ScheduleService,
+): Promise<void> {
+  const parts = url.pathname.split('/').filter(Boolean).map(decodePart);
+  try {
+    if (parts.length === 2) {
+      if (request.method === 'GET') {
+        const active = url.searchParams.get('active');
+        const limit = parsePageNumber(url.searchParams.get('limit'));
+        const offset = parsePageNumber(url.searchParams.get('offset'));
+        const result = await schedule.list({
+          ...(active === 'true' ? { active: true } : active === 'false' ? { active: false } : {}),
+          ...(limit === undefined ? {} : { limit }),
+          ...(offset === undefined ? {} : { offset }),
+        });
+        return json(response, 200, {
+          schedules: result.items,
+          total: result.total,
+          limit: result.limit,
+          offset: result.offset,
+        });
+      }
+      if (request.method === 'POST') {
+        const body = await readJson(request);
+        const created = await schedule.create(parseCreateSchedule(body), actorSessionId(body));
+        return json(response, 201, { schedule: created });
+      }
+    }
+    if (parts.length === 3 && parts[2] === 'limits' && request.method === 'GET') {
+      return json(response, 200, { limits: schedule.deliveryLimits() });
+    }
+    if (parts.length === 3 && parts[2] === 'clear-ended' && request.method === 'POST') {
+      await readJson(request);
+      return json(response, 200, await schedule.deleteInactive());
+    }
+    const id = parts[2];
+    if (id === undefined || id.length === 0 || id.length > 256) throw new HttpError(404, 'Schedule not found');
+    if (parts.length === 3) {
+      if (request.method === 'GET') {
+        const result = await schedule.view({ id });
+        if ('code' in result) throw new HttpError(404, 'Schedule not found', result.code);
+        return json(response, 200, { schedule: result });
+      }
+      if (request.method === 'PATCH' || request.method === 'PUT') {
+        const body = await readJson(request);
+        const patch = parseSchedulePatch(body.patch);
+        const expectedUpdatedAt = optionalStringOrNull(body.expectedUpdatedAt, 'expectedUpdatedAt');
+        const result = await schedule.edit({
+          id,
+          action: 'update',
+          patch,
+          ...(expectedUpdatedAt === undefined ? {} : { expectedUpdatedAt }),
+        }, actorSessionId(body));
+        if ('code' in result) {
+          const status = result.code === 'schedule_conflict' ? 409 : 404;
+          throw new HttpError(status, result.code === 'schedule_conflict'
+            ? 'The schedule was changed by another editor'
+            : 'Schedule not found', result.code);
+        }
+        if ('deleted' in result) throw new HttpError(500, 'Schedule update returned a deletion');
+        return json(response, 200, { schedule: result });
+      }
+      if (request.method === 'DELETE') {
+        const expectedUpdatedAt = optionalStringOrNull(url.searchParams.get('expectedUpdatedAt'), 'expectedUpdatedAt');
+        const result = await schedule.edit({
+          id,
+          action: 'delete',
+          ...(expectedUpdatedAt === undefined ? {} : { expectedUpdatedAt }),
+        });
+        if ('code' in result) {
+          const status = result.code === 'schedule_conflict' ? 409 : 404;
+          throw new HttpError(status, result.code === 'schedule_conflict'
+            ? 'The schedule was changed by another editor'
+            : 'Schedule not found', result.code);
+        }
+        if (!('deleted' in result)) throw new HttpError(500, 'Schedule deletion returned a task');
+        return json(response, 200, { deleted: true });
+      }
+    }
+    if (parts.length === 4 && parts[3] === 'run' && request.method === 'POST') {
+      await readJson(request);
+      const result = await schedule.run({ id });
+      if ('code' in result) {
+        const status = result.code === 'schedule_execution_pending' ? 409 : 404;
+        throw new HttpError(status, result.code === 'schedule_execution_pending'
+          ? 'This schedule is already running'
+          : 'Schedule not found', result.code);
+      }
+      return json(response, 200, { schedule: result });
+    }
+    if (parts.length === 4 && parts[3] === 'history' && request.method === 'GET') {
+      const limit = parsePageNumber(url.searchParams.get('limit')) ?? 20;
+      const before = url.searchParams.get('before') ?? undefined;
+      const historyRequest: ScheduleDeliveryHistoryRequest = {
+        id,
+        limit,
+        ...(before === undefined || before === '' ? {} : { before }),
+      };
+      const result = await schedule.history(historyRequest);
+      if ('code' in result) throw new HttpError(404, 'Schedule not found', result.code);
+      return json(response, 200, { history: result });
+    }
+    throw new HttpError(404, 'Not found');
+  } catch (error) {
+    if (error instanceof ScheduleInputError) throw new HttpError(400, error.message, error.code);
+    throw error;
+  }
+}
+
+function parsePageNumber(value: string | null): number | undefined {
+  if (value === null || value === '') return undefined;
+  const parsed = Number(value);
+  if (!Number.isSafeInteger(parsed)) throw new HttpError(400, 'A whole number is required');
+  return parsed;
+}
+
+function parseCreateSchedule(body: Record<string, unknown>): ScheduleCreateRequest {
+  return {
+    title: body.title as string,
+    prompt: body.prompt as string,
+    timing: body.timing as ScheduleTiming,
+    ...(body.target === undefined ? {} : { target: body.target as ScheduleTargetRequest }),
+  };
+}
+
+function parseSchedulePatch(value: unknown): SchedulePatch {
+  if (typeof value !== 'object' || value === null || Array.isArray(value)) {
+    throw new HttpError(400, 'A schedule update patch is required');
+  }
+  return value as SchedulePatch;
+}
+
+function actorSessionId(body: Record<string, unknown>): string | undefined {
+  const value = body.actorSessionId;
+  if (value === undefined) return undefined;
+  if (typeof value !== 'string' || value.length === 0 || value.length > 256) {
+    throw new HttpError(400, 'A valid actor session id is required');
+  }
+  return value;
+}
+
+function optionalStringOrNull(value: unknown, name: string): string | null | undefined {
+  if (value === undefined || value === null || value === '') return undefined;
+  if (typeof value !== 'string') throw new HttpError(400, `${name} must be a string`);
+  return value;
 }
 
 function publicAgentEvent(event: AgentEvent): unknown {
@@ -758,6 +1495,11 @@ async function getSession(
 ): Promise<WebSession> {
   const modelKey = runtime === undefined ? '' : JSON.stringify(runtime.modelBinding);
   const runtimeKey = runtime?.revision;
+  const shared = options.liveSessions?.get(key);
+  if (shared !== undefined && shared.preset === permissions.preset
+    && shared.modelKey === modelKey && shared.runtimeKey === runtimeKey) {
+    return shared.session as WebSession;
+  }
   let cached = sessions.get(key);
   if (cached && cached.preset === permissions.preset && cached.modelKey === modelKey && cached.runtimeKey === runtimeKey) {
     sessions.delete(key);
@@ -772,6 +1514,15 @@ async function getSession(
     if (!options.createRuntimeSession) throw new HttpError(500, 'Runtime session composition is unavailable');
     pending = Promise.resolve(options.createRuntimeSession(workspace, handle, permissions, runtime));
   }
+  pending = pending.then((session) => {
+    options.liveSessions?.set(key, {
+      session,
+      preset: permissions.preset,
+      modelKey,
+      ...(runtimeKey === undefined ? {} : { runtimeKey }),
+    });
+    return session;
+  });
   cached = { preset: permissions.preset, modelKey, ...(runtimeKey === undefined ? {} : { runtimeKey }), pending };
   sessions.set(key, cached);
   const current = cached;
@@ -797,6 +1548,7 @@ function agentSummary(runtime: ResolvedSessionRuntime): AgentSummary {
     role: runtime.agent.role,
     usage: runtime.agent.usage,
     profile: runtime.agent.profile,
+    builtIn: runtime.agent.sourcePath.startsWith('builtin:'),
     valid: true,
     warnings: [],
   };
@@ -816,6 +1568,17 @@ function resolvedModelSummary(runtime: ResolvedSessionRuntime): Record<string, u
   };
 }
 
+function modeRuntimeOverride(handle: SessionHandle): {
+  id: string;
+  tools: '*' | readonly string[];
+  skills: '*' | readonly string[];
+} | undefined {
+  const mode = projectModeSelection(handle.events);
+  return mode.status === 'selected'
+    ? { id: mode.selection.mode, tools: mode.selection.tools, skills: mode.selection.skills }
+    : undefined;
+}
+
 async function describeSelection(
   options: WebHostOptions,
   workspace: Workspace,
@@ -824,11 +1587,12 @@ async function describeSelection(
   agent: AgentSummary | null;
   model: ModelBinding | null;
   resolvedModel: Record<string, unknown> | null;
+  agentSkills: Array<{ name: string; description: string }>;
   agentError: string | null;
   agentWarnings: string[];
 }> {
   if (!options.runtime) {
-    return { agent: null, model: null, resolvedModel: null, agentError: null, agentWarnings: [] };
+    return { agent: null, model: null, resolvedModel: null, agentSkills: [], agentError: null, agentWarnings: [] };
   }
   const agent = projectAgentSelection(handle.events);
   const binding = projectModelSelection(handle.events);
@@ -838,6 +1602,7 @@ async function describeSelection(
       agent: null,
       model,
       resolvedModel: null,
+      agentSkills: [],
       agentError: agent.status === 'invalid'
         ? 'The session agent selection is invalid; select an agent again.'
         : 'An agent must be selected before this session can run.',
@@ -849,6 +1614,7 @@ async function describeSelection(
       agent: null,
       model: null,
       resolvedModel: null,
+      agentSkills: [],
       agentError: binding.status === 'invalid'
         ? 'The session model binding is invalid; select a model again.'
         : 'A model binding must be selected before this session can run.',
@@ -861,11 +1627,13 @@ async function describeSelection(
       agentId: agent.agent,
       binding: binding.binding,
       isRoot: true,
+      ...(modeRuntimeOverride(handle) === undefined ? {} : { mode: modeRuntimeOverride(handle) }),
     });
     return {
       agent: agentSummary(runtime),
       model,
       resolvedModel: resolvedModelSummary(runtime),
+      agentSkills: runtime.skills.map((skill) => ({ name: skill.name, description: skill.description })),
       agentError: null,
       agentWarnings: runtime.warnings,
     };
@@ -874,6 +1642,7 @@ async function describeSelection(
       agent: null,
       model,
       resolvedModel: null,
+      agentSkills: [],
       agentError: error instanceof Error ? error.message : 'The session agent is unavailable.',
       agentWarnings: [],
     };
@@ -891,19 +1660,61 @@ async function openSession(store: WebHostOptions['store'], workspace: Workspace,
   }
 }
 
-function summarize(handle: SessionHandle): SessionSummary {
-  const agent = projectAgentSelection(handle.events);
+/**
+ * Clone a session's transcript and configuration into a new root session.
+ *
+ * The fork is unlinked from the source's subagent tree: it is a new root
+ * conversation with copied events, not a child. The user-visible title keeps a
+ * `(fork)` suffix so two identical origins stay distinguishable in the list.
+ */
+async function forkSession(
+  store: WebHostOptions['store'],
+  source: SessionHandle,
+  workspace: Workspace,
+): Promise<SessionHandle> {
+  const sourceTitle = foldSessionTitle(source.events);
+  const events = source.events
+    .filter((event) => event.type !== SESSION_TITLE_EVENT
+      && event.type !== SESSION_PIN_EVENT
+      && event.type !== SESSION_FORK_EVENT)
+    .map(({ type, data, ts }) => ({ type, data, ts }));
+  if (sourceTitle !== undefined) {
+    const title = truncateTitleUtf8(sourceTitle.title, DEFAULT_SESSION_TITLE_LIMITS.maxTitleBytes - 7) + ' (fork)';
+    events.push({
+      type: SESSION_TITLE_EVENT,
+      ts: Date.now(),
+      data: { title, messageSeqs: [], source: { kind: 'user' } },
+    });
+  }
+  events.push({ ...createSessionForkEvent(source.id), ts: Date.now() });
+  return store.create({ workspace: workspace.path, cwd: source.header.cwd, events });
+}
+
+/** Case-insensitive LIKE-style filter used by the session reference menu. */
+function likeMatches(values: readonly string[], query: string): boolean {
+  const terms = query.trim().toLowerCase().split(/\s+/u).filter(Boolean);
+  if (terms.length === 0) return true;
+  return terms.every((term) => values.some((value) => value.toLowerCase().includes(term)));
+}
+
+function summarize(handle: SessionHandle): SessionSummary {  const agent = projectAgentSelection(handle.events);
+  const mode = projectModeSelection(handle.events);
+  const title = foldSessionTitle(handle.events);
   return {
     id: handle.id,
     ...(agent.status === 'selected' ? { agent: agent.agent } : {}),
+    ...(mode.status === 'selected' ? { mode: mode.selection.mode } : {}),
     ...(handle.header.agentId === undefined ? {} : { agentId: handle.header.agentId }),
     ...(handle.header.parentSessionId === undefined ? {} : { parentSessionId: handle.header.parentSessionId }),
     ...(handle.header.depth === undefined ? {} : { depth: handle.header.depth }),
     ...(handle.header.description === undefined ? {} : { description: handle.header.description }),
+    ...(title === undefined ? {} : { title: title.title, titleSource: title.source }),
+    ...(foldSessionPinned(handle.events) ? { pinned: true } : {}),
+    blank: !hasHumanMessage(handle.events),
     workspace: handle.header.workspace,
     cwd: handle.header.cwd,
     createdAt: handle.header.createdAt,
-    updatedAt: handle.events.at(-1)?.ts ?? handle.header.createdAt,
+    updatedAt: lastActivityTime(handle.events, handle.header.createdAt),
     eventCount: handle.events.length,
   };
 }
@@ -920,11 +1731,11 @@ function json(response: ServerResponse, status: number, payload: unknown): void 
   response.end(JSON.stringify(payload));
 }
 
-async function readJson(request: IncomingMessage): Promise<Record<string, unknown>> {
+async function readJson(request: IncomingMessage, maxBytes = MAX_BODY_BYTES): Promise<Record<string, unknown>> {
   const contentType = request.headers['content-type']?.split(';')[0]?.trim().toLowerCase();
   if (contentType !== 'application/json') throw new HttpError(415, 'Content-Type must be application/json');
   const length = Number(request.headers['content-length']);
-  if (Number.isFinite(length) && length > MAX_BODY_BYTES) throw new HttpError(413, 'Request body is too large');
+  if (Number.isFinite(length) && length > maxBytes) throw new HttpError(413, 'Request body is too large');
   const chunks: Buffer[] = [];
   let bytes = 0;
   const iterator = request.iterator({ destroyOnReturn: false });
@@ -933,7 +1744,7 @@ async function readJson(request: IncomingMessage): Promise<Record<string, unknow
     if (next.done) break;
     const buffer = Buffer.from(next.value as Uint8Array);
     bytes += buffer.length;
-    if (bytes > MAX_BODY_BYTES) {
+    if (bytes > maxBytes) {
       void drainRequest(iterator);
       throw new HttpError(413, 'Request body is too large');
     }
@@ -946,6 +1757,69 @@ async function readJson(request: IncomingMessage): Promise<Record<string, unknow
   } catch {
     throw new HttpError(400, 'Invalid JSON object');
   }
+}
+
+const IMAGE_MEDIA_TYPES = new Set(['image/png', 'image/jpeg', 'image/webp', 'image/gif']);
+
+function parseSendAttachments(value: unknown): SendAttachment[] {
+  if (value === undefined) return [];
+  if (!Array.isArray(value) || value.length > MAX_ATTACHMENTS) {
+    throw new HttpError(400, `Up to ${MAX_ATTACHMENTS} attachments are allowed`);
+  }
+  return value.map((item): SendAttachment => {
+    if (typeof item !== 'object' || item === null || Array.isArray(item)) {
+      throw new HttpError(400, 'Invalid attachment');
+    }
+    const attachment = item as Record<string, unknown>;
+    if (typeof attachment.name !== 'string' || attachment.name.trim() === ''
+      || attachment.name.length > MAX_ATTACHMENT_NAME || /[\u0000-\u001f]/.test(attachment.name)) {
+      throw new HttpError(400, 'Attachment names must be valid file names');
+    }
+    if (attachment.kind === 'image') {
+      if (typeof attachment.mediaType !== 'string' || !IMAGE_MEDIA_TYPES.has(attachment.mediaType)) {
+        throw new HttpError(400, 'Only PNG, JPEG, WebP, and GIF images are supported');
+      }
+      if (typeof attachment.data !== 'string' || attachment.data.length === 0
+        || attachment.data.length > MAX_IMAGE_DATA_BYTES * 2 || !/^[A-Za-z0-9+/]+={0,2}$/.test(attachment.data)) {
+        throw new HttpError(400, 'Invalid image attachment');
+      }
+      return { kind: 'image', name: attachment.name, mediaType: attachment.mediaType, data: attachment.data };
+    }
+    if (attachment.kind === 'text') {
+      if (typeof attachment.text !== 'string'
+        || Buffer.byteLength(attachment.text, 'utf8') > MAX_TEXT_ATTACHMENT_BYTES) {
+        throw new HttpError(400, 'Text attachments are limited to 256 KB');
+      }
+      return {
+        kind: 'text',
+        name: attachment.name,
+        mediaType: typeof attachment.mediaType === 'string' && attachment.mediaType !== ''
+          ? attachment.mediaType
+          : 'text/plain',
+        text: attachment.text,
+      };
+    }
+    throw new HttpError(400, 'Unsupported attachment kind');
+  });
+}
+
+function composeUserContent(text: string, attachments: readonly SendAttachment[]): ContentPart[] {
+  const content: ContentPart[] = [];
+  if (text.trim() !== '') content.push({ type: 'text', text });
+  for (const attachment of attachments) {
+    if (attachment.kind === 'text') {
+      content.push({
+        type: 'text',
+        text: `[Attached file: ${attachment.name} (${attachment.mediaType})]\n${attachment.text ?? ''}\n[End of attached file: ${attachment.name}]`,
+      });
+    }
+  }
+  for (const attachment of attachments) {
+    if (attachment.kind === 'image') {
+      content.push({ type: 'image', mediaType: attachment.mediaType, data: attachment.data! });
+    }
+  }
+  return content;
 }
 
 async function drainRequest(iterator: AsyncIterator<Buffer | string | Uint8Array>): Promise<void> {

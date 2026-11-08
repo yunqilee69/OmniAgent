@@ -120,6 +120,12 @@ export const ConfigSchema = z.object({
   roles: z.record(nonEmpty, role).optional(),
   /** Named tool/skill allowlists referenced by agent Markdown files. */
   agentProfiles: z.record(nonEmpty, agentProfile).optional(),
+  /**
+   * MCP servers keyed by server id. Entries stay opaque here so one broken
+   * server can be repaired from Settings instead of invalidating all config;
+   * `mcp/config.ts` validates the accepted stdio/SSE/HTTP/WebSocket shapes.
+   */
+  mcpServers: z.record(nonEmpty, z.unknown()).optional(),
   reasoningEffort: reasoningEffort.optional(),
   maxTokens: positiveInteger.optional(),
   /** Optional input budget for pre-request compaction; defaults to the model catalog. */

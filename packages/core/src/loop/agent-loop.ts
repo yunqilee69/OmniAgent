@@ -41,6 +41,8 @@ export interface AgentLoopDeps {
   toolSpecs?: () => ToolSpec[];
   /** Drain messages delivered while a turn is running (agent messaging/notices). */
   takeQueuedMessages?: () => Message[];
+  /** One-shot manual compaction request, consumed before the next model request. */
+  takeForceCompact?: () => boolean;
   permissions: PermissionGate;
   /** Trusted host hook: an allowed call carries its own per-call execution policy. */
   prepareToolCall?: (call: ToolCall, signal: AbortSignal) => Promise<PreparedToolCall>;
@@ -77,15 +79,23 @@ export class AgentLoop {
 
       yield { type: 'turn.start', step };
 
-      if (this.deps.contextWindowTokens !== undefined) {
+      const forceCompact = this.deps.takeForceCompact?.() === true;
+      if (this.deps.contextWindowTokens !== undefined || forceCompact) {
         const beforeTokens = estimateMessages(messages);
-        const compacted = await compactMessages(messages, {
-          maxTokens: this.deps.contextWindowTokens,
-          ...(this.deps.retainContextTokens === undefined ? {} : { retainTokens: this.deps.retainContextTokens }),
-        });
-        if (compacted.compacted) {
-          messages.splice(0, messages.length, ...compacted.messages);
-          yield { type: 'context.compacted', beforeTokens, afterTokens: compacted.afterTokens };
+        const maxTokens = forceCompact
+          ? Math.max(1, Math.floor(beforeTokens / 2))
+          : this.deps.contextWindowTokens;
+        if (maxTokens !== undefined) {
+          const compacted = await compactMessages(messages, {
+            maxTokens,
+            ...(forceCompact || this.deps.retainContextTokens === undefined
+              ? {}
+              : { retainTokens: this.deps.retainContextTokens }),
+          });
+          if (compacted.compacted) {
+            messages.splice(0, messages.length, ...compacted.messages);
+            yield { type: 'context.compacted', beforeTokens, afterTokens: compacted.afterTokens };
+          }
         }
       }
 

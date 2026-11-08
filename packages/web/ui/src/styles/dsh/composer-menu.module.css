@@ -1,0 +1,160 @@
+/*
+ * Composer trigger menu, copied from DSH ui-input-trigger MenuView: the
+ * candidate surface floats above the composer card edge to edge and keeps the
+ * textarea focused as the keyboard drives the highlighted row.
+ */
+.menu {
+  position: absolute;
+  bottom: calc(100% + 4px);
+  left: 0;
+  right: 0;
+  z-index: 100;
+  box-sizing: border-box;
+  max-height: min(400px, 52vh);
+  overflow: hidden;
+  --dsh-scrollbar-thumb: var(--dsw-alias-scrollbar-bg-l2);
+  --dsh-scrollbar-thumb-hover: var(--dsw-alias-scrollbar-hover-l2);
+  --dsh-scrollbar-width: 6px;
+  --dsh-scrollbar-thumb-border: 2px;
+  --dsh-scrollbar-track-margin: 12px;
+  padding: 4px;
+  display: flex;
+  flex-direction: column;
+  border: 0;
+  border-radius: var(--dsw-radius-lg);
+  /* Opaque: this surface is not a MenuSurface, so it has no material/backing
+     layer and a translucent fill lets transcript text show through the list. */
+  background: var(--dsw-alias-bg-layer-1);
+  --dsw-elevation-stroke-color: var(--dsw-alias-border-l1);
+  box-shadow: var(--dsw-elevation-prominent);
+}
+
+.viewport {
+  display: flex;
+  flex-direction: column;
+  min-height: 0;
+  overflow-y: auto;
+}
+
+.item {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  width: 100%;
+  min-height: 34px;
+  padding: 6px 8px;
+  border: none;
+  border-radius: var(--dsw-radius-md);
+  background: transparent;
+  cursor: pointer;
+  font-size: 13px;
+  line-height: 20px;
+  color: var(--dsw-alias-label-primary);
+  text-align: left;
+}
+
+.item.active {
+  background: var(--dsw-alias-interactive-bg-hover);
+}
+
+.item[aria-disabled='true'] {
+  color: var(--dsw-alias-label-dimmed);
+  cursor: default;
+}
+
+.sectionTitle {
+  flex: none;
+  min-height: 23px;
+  padding: 5px 8px 2px;
+  color: var(--dsw-alias-label-tertiary);
+  font-size: 11px;
+  font-weight: 500;
+  line-height: 16px;
+}
+
+.sectionTitle:not(:first-child) {
+  margin-top: 3px;
+}
+
+.itemIcon {
+  display: inline-flex;
+  flex: none;
+  width: 16px;
+  height: 16px;
+  align-items: center;
+  justify-content: center;
+  color: var(--dsw-alias-menu-icon);
+}
+
+.itemIcon svg {
+  width: 15px;
+  height: 15px;
+}
+
+.itemName {
+  flex: none;
+  max-width: 46%;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.itemAlias {
+  flex: none;
+  max-width: 22%;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+  color: var(--dsw-alias-label-tertiary);
+  font-size: 12px;
+  line-height: 18px;
+}
+
+.itemDescription {
+  flex: 1;
+  min-width: 0;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+  text-align: right;
+  color: var(--dsw-alias-label-tertiary);
+  font-size: 12px;
+  line-height: 18px;
+}
+
+.trailing {
+  flex: none;
+  display: inline-flex;
+  align-items: center;
+  margin-left: auto;
+  color: var(--dsw-alias-menu-icon);
+}
+
+.empty,
+.loading {
+  padding: 14px 10px;
+  color: var(--dsw-alias-label-tertiary);
+  font-size: 13px;
+  line-height: 20px;
+}
+
+.footer {
+  flex: none;
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  padding: 5px 8px 3px;
+  margin-top: 2px;
+  border-top: 0.5px solid var(--dsw-alias-border-l1);
+  color: var(--dsw-alias-label-caption);
+  font-size: 11px;
+  line-height: 16px;
+}
+
+.footer kbd {
+  padding: 0 4px;
+  border-radius: var(--dsw-radius-xs);
+  background: var(--dsw-alias-interactive-bg-hover);
+  font-family: inherit;
+  font-size: 10px;
+}

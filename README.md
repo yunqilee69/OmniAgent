@@ -11,7 +11,8 @@
 ```bash
 pnpm install    # install dependencies
 pnpm dev        # interactive TUI
-pnpm web        # local Web UI at http://127.0.0.1:4317
+pnpm web        # build the React client, then serve it at http://127.0.0.1:4317
+pnpm web:dev    # Vite HMR client at http://127.0.0.1:4318 (run pnpm web:serve in another terminal)
 pnpm test       # unit and integration tests
 pnpm eval       # run eval tasks
 pnpm typecheck
@@ -32,9 +33,9 @@ TUI 的排版只有一条规则：**四类内容各有自己的左缘**，所以
 
 配色只用 ANSI 16 色前景与属性（无 24 位 RGB、无背景色），内收文字用 `dim`（SGR 2）而不是固定灰，因此浅色与深色终端都能自动重映射，不另设主题；`/color off` 或 `NO_COLOR=1` 关掉颜色，`FORCE_COLOR` 可在管道里强制开启。角色表见 [ADR-0003](docs/adr/0003-tui-visual-hierarchy.md)。
 
-plan 模式会将调研约束注入系统提示，并要求模型通过 `exit_plan_mode` 提交计划供你批准；`todo_write` 会持久化整份任务清单，TUI 在每次更新后展示。`create_goal` 可以把长期目标登记到会话中，之后由自动续轮推进，`get_goal` / `update_goal` 负责读取、编辑、暂停、恢复和结束目标；每次自动续轮都写入带 goal source 的用户消息，达到轮次上限会自动进入 blocked。Web 工作台支持登记和切换本地工作区、浏览及恢复会话、实时对话、plan 模式开关与计划审批、任务清单、权限、智能体与模型设置、一次性工具审批、子会话显示和轨迹图。智能体配置存放在 `~/.omniagent/agents/*.md`，新建会话或切换智能体时可以从 Web/TUI 选择；子代理会作为独立会话出现在会话列表中，它们继承父会话的工作区、权限预设和 cwd 限制，但按目标智能体的角色选择模型，并可通过 `subagent`、`send_message`、`list_agents`、`wait_agent`、`interrupt_agent` 协作。`list_agents` 返回整棵协作树的根节点、自身和可继续的子代理；`wait_agent` 等待下一步输入（消息、完成通知或用户 steering），而不是轮询某个子代理的最终状态。会话菜单可以复制 Markdown 或下载 JSON 会话摘录；导出可能包含敏感对话和工具输出，分享前应检查。JSON 不是 DSH 的 ZIP/JSONL 归档，也不包含子会话和附件。取消登记工作区不会删除目录或会话；会话按工作区保存在 `~/.omniagent/sessions/` 下。
+plan 模式会将调研约束注入系统提示，并要求模型通过 `exit_plan_mode` 提交计划供你批准；`todo_write` 会持久化整份任务清单，TUI 在每次更新后展示。`create_goal` 可以把长期目标登记到会话中，之后由自动续轮推进，`get_goal` / `update_goal` 负责读取、编辑、暂停、恢复和结束目标；每次自动续轮都写入带 goal source 的用户消息，达到轮次上限会自动进入 blocked。Web 工作台支持登记和切换本地工作区、浏览及恢复会话、实时对话、plan 模式开关与计划审批、任务清单、权限、模型、MCP、模式与智能体设置、一次性工具审批、子会话显示、自动化任务页和轨迹图。输入框支持四类快捷引用：`@` 搜索并插入工作区文件或目录，`#` 打开近期会话（当前工作区优先，可切到其他工作区），`/` 运行内置指令（新建会话、计划模式、设置目标、压缩上下文、权限、智能体、模型、设置、导出、清空和帮助），`$` 只列出当前智能体可调用的 skill；菜单输入按 LIKE 规则过滤，方向键选择、Enter 确认、Esc 关闭。`/goal` 会插入一段让智能体调用 `create_goal` 的请求，`/compact` 会安排在下一次回复前压缩较早上下文。设置弹窗按「通用配置 / 模型配置 / MCP 服务器 / 模式预设 / 智能体」分栏；模型配置维护角色与模型来源，可编辑协议、接口地址、只写 API Key、模型目录（上下文窗口、输出上限、输入类型、思考等级与默认等级），从 OpenAI 兼容或 Anthropic 接口拉取模型并调整顺序，再为模型分配可选角色；MCP 服务器页支持 stdio 与 Streamable HTTP 两种标准传输（旧版 HTTP+SSE 服务器会自动回退，已有配置仍兼容），可配置命令/参数/环境变量或 URL/请求头、启用状态与超时，并在保存前测试连接和查看工具列表，模式和智能体 profile 可以用 `"*"` 或 `mcp__<server>__<tool>` 授权这些工具；模式预设内置标准模式与创造模式，可配置智能体、模型来源、工具和 Skill；智能体页列出默认智能体、创造智能体及自定义定义，可直接填写表单新建、编辑或删除自定义智能体，也可以进入创造模式通过对话生成。新会话先选择模式，智能体、工具和 Skill 由模式固定，模型默认取模式配置但可在创建前覆盖，创建后仍可继续切换；需要不同智能体或工具组合时只能新建会话；创造模式可通过对话创建自动化任务、写入智能体定义并调整 OmniAgent 配置。自动化任务按 Host 维度持久化在 `~/.omniagent/schedules.json`，支持一次、固定间隔、每天、每周、cron 和 RFC 5545 RRULE 规则；投递目标可以是当前会话、首次运行时创建一个新会话，或每次运行都新建会话。Web 的「自动化任务」页可以新建、编辑、暂停/恢复、立即运行、查看投递记录和清理已结束任务。模型侧提供 `schedule_create`、`schedule_list`、`schedule_view`、`schedule_edit` 四个工具；它们只能在主会话中使用，子代理不能创建或修改任务。计划任务唤醒已有会话时会复用进程内的实时 Session 实例；新建会话时使用全局默认权限预设和当前默认模式。服务停止期间错过的多次触发只补投最近一次，进程崩溃时可能重复投递。智能体配置存放在 `~/.omniagent/agents/*.md`；TUI 可以在新建会话或切换智能体时选择，Web 新会话由模式决定使用的智能体；子代理会作为独立会话出现在会话列表中，它们继承父会话的工作区、权限预设和 cwd 限制，但按目标智能体的角色选择模型，并可通过 `subagent`、`send_message`、`list_agents`、`wait_agent`、`interrupt_agent` 协作。`list_agents` 返回整棵协作树的根节点、自身和可继续的子代理；`wait_agent` 等待下一步输入（消息、完成通知或用户 steering），而不是轮询某个子代理的最终状态。会话菜单可以复制 Markdown 或下载 JSON 会话摘录；导出可能包含敏感对话和工具输出，分享前应检查。JSON 不是 DSH 的 ZIP/JSONL 归档，也不包含子会话和附件。取消登记工作区不会删除目录或会话；会话按工作区保存在 `~/.omniagent/sessions/` 下。
 
-Web 仅监听本机，不提供本地用户身份认证；Host/Origin 检查不能限制其他本地进程。会话使用 `read-only`、`workspace-write` 或 `danger-full-access` 权限预设，并将选择持久化在该会话中；旧会话不会从旧 `mode` 或规则猜测权限，须显式选择。普通 `workspace-write` 不逐次询问；只有请求扩大当前调用的沙盒范围时才进行一次性审批。`~/.omniagent/config.json` 中的全局默认值只作用于新会话。Web 与 TUI 都支持会话级智能体和模型切换：智能体选择以 `agent/selected`、模型绑定以 v2 `model/selected` 事件持久化，两者都不含凭据。`.agents/skills` 中的 skill 会在会话系统提示里列出，模型通过 `skill` 工具按需加载完整说明；智能体 profile 可以进一步收窄可见工具和 skill。文件和 shell 限制不隔离网络，且不是完整 OS 安全边界。会话消息、实时 SSE、原始审计文件以及加载的 skill 文本都可能包含敏感内容。设置 `OMNIAGENT_PORT` 可更换监听端口。接口和数据边界见 [Web API](docs/web-api.md)，配置分层与智能体文件格式见 [智能体、角色与模型绑定](docs/agents.md)。
+Web 仅监听本机，不提供本地用户身份认证；Host/Origin 检查不能限制其他本地进程。会话使用 `read-only`、`workspace-write` 或 `danger-full-access` 权限预设，并将选择持久化在该会话中；旧会话不会从旧 `mode` 或规则猜测权限，须显式选择。普通 `workspace-write` 不逐次询问；只有请求扩大当前调用的沙盒范围时才进行一次性审批。`~/.omniagent/config.json` 中的全局默认值只作用于新会话。TUI 支持会话级智能体和模型切换；Web 的新会话在创建时选择模式，模式快照以 `mode/selected` 持久化，agent、tools 和 skills 由模式固定并拒绝切换，模型默认取模式配置且可在创建前选择或在创建后继续切换。智能体选择仍以 `agent/selected`、模型绑定仍以 v2 `model/selected` 事件持久化，这些事件都不含凭据。`.agents/skills` 中的 skill 会在会话系统提示里列出，模型通过 `skill` 工具按需加载完整说明；智能体 profile 可以进一步收窄可见工具和 skill。文件和 shell 限制不隔离网络，且不是完整 OS 安全边界。会话消息、实时 SSE、原始审计文件以及加载的 skill 文本都可能包含敏感内容。设置 `OMNIAGENT_PORT` 可更换监听端口。接口和数据边界见 [Web API](docs/web-api.md)，配置分层与智能体文件格式见 [智能体、角色与模型绑定](docs/agents.md)。
 
 The runtime is implemented without Cordis or the DSH plugin/profile system. See [docs/architecture.md](docs/architecture.md) and [NOTICE](NOTICE) for current boundaries and DSH attribution.
 
@@ -42,13 +43,14 @@ The runtime is implemented without Cordis or the DSH plugin/profile system. See 
 
 ## 模型、角色与智能体配置
 
-配置按四层解析，每一层只回答一个问题：
+配置按五层解析，每一层只回答一个问题：
 
 ```text
 providers / models  →  连到哪里、模型元数据、能力、思考字段映射
 roles               →  一组 provider + model + reasoningEffort
 agentProfiles       →  一个智能体可见的工具和 skill（config.json）
 agents/*.md         →  身份、说明、角色、usage、profile、system prompt
+modes.json          →  Web 新会话的 agent + 模型 + tools + skills 组合
 ```
 
 顶层 `model`、`provider`、`reasoningEffort` 自动合成 `default` 角色；显式 `roles.default` 覆盖顶层字段。智能体文件引用角色，所以切换角色指向的模型后，引用该角色的智能体在下一回合自动使用新模型。
@@ -216,8 +218,10 @@ OmniAgent/
 ```text
 ~/.omniagent/
 ├── config.json                providers、models、roles、agentProfiles、todo、权限默认值
+├── modes.json                 Web 模式预设、内置模式覆盖与默认模式
 ├── agents/                    每个 *.md 是一个智能体
 ├── sessions/                  按工作区和会话 id 保存的 JSONL 事件日志
+├── schedules.json             Host 级自动化任务与投递记录
 ├── workspaces.json            Web 登记的工作区
 └── web-audit/                 Web 审计日志
 ```
@@ -234,8 +238,10 @@ OmniAgent/
 | `exec/` | 执行器：把异常统一转成 observation | 已接入真实工具执行 |
 | `tools/` | 工具契约、注册表、DSH 移植的 read/write/edit/glob/grep/web_fetch、`list_dir`、skill、`bash`、todo/plan/goal/subagent 工具 | 工具 allowlist 与 DSH 权限取交集 |
 | `subagents/` | 子会话启动、消息、整树 list、下一步输入 wait、interrupt、通知与模型/权限继承 | 目标 agent + role；depth/active 上限；懒恢复需有效选择 |
-| `session/` | plan/todo/goal 投影、agent/model 绑定、RuntimeResolver、会话投影与持久化辅助 | goal/change + CAS 与自动续轮；agent/selected v1 与 model/selected v2 |
-| `agents/` | `*.md` 智能体发现、frontmatter、usage/profile 校验和目录渲染 | 内置 default；拒绝符号链接和超限文件 |
+| `schedule/` | Host 级计划任务：时间规则、持久化、定时器、投递记录和模型工具 | 一次/间隔/每日/每周/cron/RRule；错过的触发只补最近一次 |
+| `modes/` | 模式预设存储：内置标准/创造模式、自定义模式、默认模式和工具/skill 校验 | `modes.json` 原子写入；模式快照在创建会话时固化 |
+| `session/` | plan/todo/goal 投影、agent/model 绑定、mode 快照、RuntimeResolver、会话投影与持久化辅助 | goal/change + CAS 与自动续轮；agent/selected v1、model/selected v2、mode/selected v1 |
+| `agents/` | `*.md` 智能体发现、frontmatter、usage/profile 校验和目录渲染 | 内置 default/creator；拒绝符号链接和超限文件 |
 | `store/` | transcript 持久化、JSONL 审计日志 | append 使用跨进程锁、暂存文件、fsync 和原子 rename |
 | `config/` | 加载 providers/models/roles/agentProfiles、模型目录、热加载 ConfigStore | schema 严格校验；内容哈希 revision；失败 fail closed |
 | `context/` | token 计数、截断策略、compaction | 由模型目录或显式配置提供上下文窗口 |

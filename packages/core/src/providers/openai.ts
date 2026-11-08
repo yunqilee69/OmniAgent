@@ -60,6 +60,7 @@ export class OpenAIModel implements ModelClient {
       {
         model: request.model,
         messages: toOpenAIMessages(request.system, request.messages),
+        ...(request.maxTokens !== undefined ? { max_tokens: request.maxTokens } : {}),
         ...(tools.length > 0 ? { tools, tool_choice: 'auto' as const } : {}),
       },
       { signal: request.signal },
@@ -74,6 +75,7 @@ export class OpenAIModel implements ModelClient {
       {
         model: request.model,
         messages: toOpenAIMessages(request.system, request.messages),
+        ...(request.maxTokens !== undefined ? { max_tokens: request.maxTokens } : {}),
         ...(tools.length > 0 ? { tools, tool_choice: 'auto' as const } : {}),
         stream: true,
         // OpenAI 会在最后一个 chunk 带 usage。不支持的兼容端点通常会忽略这个字段。

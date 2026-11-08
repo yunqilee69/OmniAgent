@@ -24,6 +24,8 @@ export interface AgentError {
 
 export type AgentEvent =
   | { type: 'turn.start'; step: number }
+  /** Live-only title update; the durable value is the session/title event. */
+  | { type: 'session.title'; title: string }
   /** 流式思考增量。仅用于实时展示；不是随后 assistant.message 的正文。 */
   | { type: 'assistant.reasoning.delta'; text: string }
   /** 流式文本增量。拼接起来等于随后 assistant.message 的文本内容。 */
