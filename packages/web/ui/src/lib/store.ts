@@ -1,6 +1,7 @@
 import { useSyncExternalStore } from 'react';
+import { auth, authFetch } from './auth.ts';
 import {
-  api,
+  api as wireApi,
   isPermissionPreset,
   jsonOptions,
   normalizePlan,
@@ -70,7 +71,7 @@ import {
 
 export type Theme = 'light' | 'dark';
 export type ProcessDisplay = 'collapsed' | 'expanded';
-export type Tab = 'conversation' | 'observe' | 'automation' | 'settings';
+export type Tab = 'conversation' | 'automation' | 'settings';
 
 export interface QueuedMessage {
   id: string;
@@ -127,6 +128,7 @@ export interface AppState {
   sessions: SessionSummary[];
   sessionsLoading: boolean;
   sessionError: string;
+  sessionsByWorkspace: Record<string, { sessions: SessionSummary[]; loading: boolean; error: string; loaded: boolean }>;
   sessionId: string | null;
   selectedByWorkspace: Record<string, string>;
   entries: Record<string, SessionEntry>;
@@ -389,6 +391,7 @@ export class AppStore {
     sessions: [],
     sessionsLoading: false,
     sessionError: '',
+    sessionsByWorkspace: {},
     sessionId: null,
     selectedByWorkspace: initialSelection(),
     entries: {},
@@ -440,13 +443,35 @@ export class AppStore {
   private listeners = new Set<() => void>();
   private notifyScheduled = false;
   private workspaceRequest = 0;
-  private sessionRequest = 0;
+  private readonly sessionRequests = new Map<string, number>();
   private permissionRequest = 0;
   private subagentsRefreshedAt = 0;
   private draftSequence = 0;
+  private draftRequest = 0;
   private readonly runningPolls = new Map<string, ReturnType<typeof setTimeout>>();
   private readonly flushingQueues = new Set<string>();
   private readonly liveRuns = new Map<string, LiveTurnState>();
+  private disposed = false;
+
+  constructor(private readonly restoreQueued = true) {}
+
+  dispose(): void {
+    this.disposed = true;
+    for (const timer of this.runningPolls.values()) clearTimeout(timer);
+    this.runningPolls.clear();
+    this.liveRuns.clear();
+    this.listeners.clear();
+  }
+
+  private api<T>(path: string, init?: RequestInit): Promise<T> {
+    if (this.disposed) return Promise.reject(new Error('Workspace closed.'));
+    return wireApi<T>(path, init);
+  }
+
+  private fetch(input: RequestInfo | URL, init?: RequestInit): Promise<Response> {
+    if (this.disposed) return Promise.reject(new Error('Workspace closed.'));
+    return authFetch(input, init);
+  }
 
   getSnapshot = (): AppState => this.state;
 
@@ -485,6 +510,27 @@ export class AppStore {
     this.emit();
   }
 
+  private setWorkspaceSessions(workspaceId: string, patch: Partial<AppState['sessionsByWorkspace'][string]>): void {
+    const previous = this.state.sessionsByWorkspace[workspaceId] ?? { sessions: [], loading: false, error: '', loaded: false };
+    const next = { ...previous, ...patch };
+    this.patch({
+      sessionsByWorkspace: { ...this.state.sessionsByWorkspace, [workspaceId]: next },
+      ...(this.state.workspaceId === workspaceId
+        ? { sessions: next.sessions, sessionsLoading: next.loading, sessionError: next.error }
+        : {}),
+    });
+  }
+
+  private updateWorkspaceSessions(workspaceId: string, update: (sessions: SessionSummary[]) => SessionSummary[]): void {
+    this.sessionRequests.set(workspaceId, (this.sessionRequests.get(workspaceId) ?? 0) + 1);
+    const previous = this.state.sessionsByWorkspace[workspaceId];
+    const sessions = previous?.sessions ?? [];
+    this.setWorkspaceSessions(workspaceId, { sessions: update(sessions), loading: false });
+    if (previous?.loading && this.state.workspaces.some((workspace) => workspace.id === workspaceId)) {
+      void this.loadSessions(workspaceId, this.state.workspaceId === workspaceId && this.state.sessionId === null);
+    }
+  }
+
   private patchEntry(key: string, patch: Partial<SessionEntry>): void {
     const entry = this.state.entries[key];
     if (entry === undefined) return;
@@ -495,23 +541,22 @@ export class AppStore {
     this.emit();
   }
 
-  private patchSessionTitle(key: string, sessionId: string, title: string): void {
+  private patchSessionTitle(key: string, workspaceId: string, sessionId: string, title: string): void {
     const entry = this.state.entries[key];
     if (entry === undefined) return;
     this.state = {
       ...this.state,
       entries: { ...this.state.entries, [key]: { ...entry, title, blank: false } },
-      sessions: this.state.sessions.map((session) =>
-        session.id === sessionId ? { ...session, title, blank: false } : session),
     };
-    this.emit();
+    this.updateWorkspaceSessions(workspaceId, (sessions) => sessions.map((session) =>
+      session.id === sessionId ? { ...session, title, blank: false } : session));
   }
 
   private getEntry(workspaceId: string, sessionId: string): SessionEntry {
     const key = sessionKey(workspaceId, sessionId);
     let entry = this.state.entries[key];
     if (entry === undefined) {
-      entry = { ...emptyEntry(), queued: readQueued(workspaceId, sessionId) };
+      entry = { ...emptyEntry(), queued: this.restoreQueued ? readQueued(workspaceId, sessionId) : [] };
       this.state = { ...this.state, entries: { ...this.state.entries, [key]: entry } };
     }
     return entry;
@@ -552,7 +597,7 @@ export class AppStore {
   async loadSchedules(silent = false): Promise<void> {
     if (!silent) this.patch({ schedulesLoading: true, schedulesError: '' });
     try {
-      const body = await api<{ schedules?: unknown[] }>('/api/schedules?limit=500');
+      const body = await this.api<{ schedules?: unknown[] }>('/api/schedules?limit=500');
       const schedules = (Array.isArray(body.schedules) ? body.schedules : []).map(validateScheduleEntry);
       this.patch({ schedules, schedulesLoading: false, schedulesError: '' });
     } catch (error) {
@@ -570,7 +615,7 @@ export class AppStore {
     if (this.state.scheduleSaving) return null;
     this.patch({ scheduleSaving: true });
     try {
-      const body = await api<{ schedule?: unknown }>('/api/schedules', jsonOptions('POST', request));
+      const body = await this.api<{ schedule?: unknown }>('/api/schedules', jsonOptions('POST', request));
       const created = validateScheduleEntry(body.schedule);
       this.patch({
         scheduleSaving: false,
@@ -588,7 +633,7 @@ export class AppStore {
     if (this.state.scheduleSaving) return null;
     this.patch({ scheduleSaving: true });
     try {
-      const body = await api<{ schedule?: unknown }>(`/api/schedules/${encodeURIComponent(id)}`, jsonOptions('PATCH', {
+      const body = await this.api<{ schedule?: unknown }>(`/api/schedules/${encodeURIComponent(id)}`, jsonOptions('PATCH', {
         patch,
         ...(expectedUpdatedAt === undefined ? {} : { expectedUpdatedAt }),
       }));
@@ -612,7 +657,7 @@ export class AppStore {
       const query = expectedUpdatedAt === undefined || expectedUpdatedAt === null
         ? ''
         : `?expectedUpdatedAt=${encodeURIComponent(expectedUpdatedAt)}`;
-      await api(`/api/schedules/${encodeURIComponent(id)}${query}`, { method: 'DELETE' });
+      await this.api(`/api/schedules/${encodeURIComponent(id)}${query}`, { method: 'DELETE' });
       this.patch({ scheduleSaving: false, schedules: this.state.schedules.filter((item) => item.id !== id) });
       return true;
     } catch (error) {
@@ -626,7 +671,7 @@ export class AppStore {
     if (this.state.scheduleSaving) return null;
     this.patch({ scheduleSaving: true });
     try {
-      const body = await api<{ schedule?: unknown }>(`/api/schedules/${encodeURIComponent(id)}/run`, jsonOptions('POST', {}));
+      const body = await this.api<{ schedule?: unknown }>(`/api/schedules/${encodeURIComponent(id)}/run`, jsonOptions('POST', {}));
       const updated = validateScheduleEntry(body.schedule);
       this.patch({
         scheduleSaving: false,
@@ -642,7 +687,7 @@ export class AppStore {
 
   async clearEndedSchedules(): Promise<number> {
     try {
-      const body = await api<{ deleted?: number }>('/api/schedules/clear-ended', jsonOptions('POST', {}));
+      const body = await this.api<{ deleted?: number }>('/api/schedules/clear-ended', jsonOptions('POST', {}));
       await this.loadSchedules(true);
       return typeof body.deleted === 'number' ? body.deleted : 0;
     } catch (error) {
@@ -655,7 +700,7 @@ export class AppStore {
     try {
       const params = new URLSearchParams({ limit: String(limit) });
       if (before !== undefined) params.set('before', before);
-      const body = await api<{ history?: unknown }>(`/api/schedules/${encodeURIComponent(id)}/history?${params.toString()}`);
+      const body = await this.api<{ history?: unknown }>(`/api/schedules/${encodeURIComponent(id)}/history?${params.toString()}`);
       const page = validateScheduleHistory(body.history);
       this.patch({ scheduleHistory: { ...this.state.scheduleHistory, [id]: page } });
       return page;
@@ -726,7 +771,7 @@ export class AppStore {
   async loadModes(): Promise<void> {
     this.patch({ modesLoading: true, modesError: '' });
     try {
-      const body = await api<{ modes?: unknown[]; defaultMode?: unknown }>('/api/modes');
+      const body = await this.api<{ modes?: unknown[]; defaultMode?: unknown }>('/api/modes');
       const modes = (body.modes ?? []).map(validateModeSummary);
       this.patch({
         modes,
@@ -743,7 +788,7 @@ export class AppStore {
     const workspaceId = this.state.workspaceId;
     try {
       const query = workspaceId === null ? '' : `?workspaceId=${encodeURIComponent(workspaceId)}`;
-      const body = await api<unknown>(`/api/modes/options${query}`);
+      const body = await this.api<unknown>(`/api/modes/options${query}`);
       this.patch({ modeOptions: validateModeOptions(body) });
     } catch {
       this.patch({ modeOptions: { tools: [], skills: [] } });
@@ -752,7 +797,7 @@ export class AppStore {
 
   async saveMode(id: string, input: unknown): Promise<string | null> {
     try {
-      await api(`/api/modes/${encodeURIComponent(id)}`, jsonOptions('PUT', input));
+      await this.api(`/api/modes/${encodeURIComponent(id)}`, jsonOptions('PUT', input));
       await this.loadModes();
       return null;
     } catch (error) {
@@ -764,7 +809,7 @@ export class AppStore {
 
   async deleteMode(id: string): Promise<string | null> {
     try {
-      await api(`/api/modes/${encodeURIComponent(id)}`, { method: 'DELETE' });
+      await this.api(`/api/modes/${encodeURIComponent(id)}`, { method: 'DELETE' });
       await this.loadModes();
       return null;
     } catch (error) {
@@ -776,7 +821,7 @@ export class AppStore {
 
   async setDefaultMode(id: string): Promise<string | null> {
     try {
-      await api('/api/settings/default-mode', jsonOptions('PUT', { mode: id }));
+      await this.api('/api/settings/default-mode', jsonOptions('PUT', { mode: id }));
       await this.loadModes();
       return null;
     } catch (error) {
@@ -789,7 +834,7 @@ export class AppStore {
   async loadModelSources(): Promise<void> {
     this.patch({ modelSourcesLoading: true, modelSourcesError: '' });
     try {
-      const body = await api<unknown>('/api/settings/model-sources');
+      const body = await this.api<unknown>('/api/settings/model-sources');
       const list = validateModelSourceList(body);
       this.patch({
         modelSources: list.sources,
@@ -809,7 +854,7 @@ export class AppStore {
 
   async saveModelSource(id: string, input: ModelSourceWrite): Promise<string | null> {
     try {
-      await api(`/api/settings/model-sources/${encodeURIComponent(id)}`, jsonOptions('PUT', input));
+      await this.api(`/api/settings/model-sources/${encodeURIComponent(id)}`, jsonOptions('PUT', input));
       await Promise.all([
         this.loadModelSources(),
         this.loadCatalogs(),
@@ -826,7 +871,7 @@ export class AppStore {
 
   async deleteModelSource(id: string): Promise<string | null> {
     try {
-      await api(`/api/settings/model-sources/${encodeURIComponent(id)}`, { method: 'DELETE' });
+      await this.api(`/api/settings/model-sources/${encodeURIComponent(id)}`, { method: 'DELETE' });
       await Promise.all([
         this.loadModelSources(),
         this.loadCatalogs(),
@@ -842,14 +887,14 @@ export class AppStore {
   }
 
   async discoverModels(input: Record<string, unknown>): Promise<DiscoveredModel[]> {
-    const body = await api<unknown>('/api/settings/model-sources/discover', jsonOptions('POST', input));
+    const body = await this.api<unknown>('/api/settings/model-sources/discover', jsonOptions('POST', input));
     return validateDiscoveredModels(body);
   }
 
   async loadMcpServers(): Promise<void> {
     this.patch({ mcpServersLoading: true, mcpServersError: '' });
     try {
-      const body = await api<unknown>('/api/settings/mcp-servers');
+      const body = await this.api<unknown>('/api/settings/mcp-servers');
       const list = validateMcpServerList(body);
       this.patch({
         mcpServers: list.servers,
@@ -868,7 +913,7 @@ export class AppStore {
 
   async saveMcpServer(id: string, input: McpServerWrite): Promise<string | null> {
     try {
-      await api(`/api/settings/mcp-servers/${encodeURIComponent(id)}`, jsonOptions('PUT', input));
+      await this.api(`/api/settings/mcp-servers/${encodeURIComponent(id)}`, jsonOptions('PUT', input));
       await this.loadMcpServers();
       void this.loadModeOptions();
       return null;
@@ -881,7 +926,7 @@ export class AppStore {
 
   async deleteMcpServer(id: string): Promise<string | null> {
     try {
-      await api(`/api/settings/mcp-servers/${encodeURIComponent(id)}`, { method: 'DELETE' });
+      await this.api(`/api/settings/mcp-servers/${encodeURIComponent(id)}`, { method: 'DELETE' });
       await this.loadMcpServers();
       void this.loadModeOptions();
       return null;
@@ -893,7 +938,7 @@ export class AppStore {
   }
 
   async testMcpServer(id: string, server?: McpServerWrite): Promise<McpProbeResult> {
-    const body = await api<unknown>('/api/settings/mcp-servers/test', jsonOptions('POST', {
+    const body = await this.api<unknown>('/api/settings/mcp-servers/test', jsonOptions('POST', {
       id,
       ...(server === undefined ? {} : { server }),
     }));
@@ -902,7 +947,7 @@ export class AppStore {
 
   async loadRoleEntries(): Promise<void> {
     try {
-      const body = await api<{ roles?: unknown[] }>('/api/settings/roles');
+      const body = await this.api<{ roles?: unknown[] }>('/api/settings/roles');
       this.patch({ roleEntries: (body.roles ?? []).map(validateRoleEntry), rolesError: '' });
     } catch (error) {
       this.patch({ roleEntries: [], rolesError: (error as Error).message });
@@ -911,7 +956,7 @@ export class AppStore {
 
   async saveRole(id: string, input: unknown): Promise<boolean> {
     try {
-      await api(`/api/settings/roles/${encodeURIComponent(id)}`, jsonOptions('PUT', input));
+      await this.api(`/api/settings/roles/${encodeURIComponent(id)}`, jsonOptions('PUT', input));
       await Promise.all([this.loadRoleEntries(), this.loadCatalogs()]);
       return true;
     } catch (error) {
@@ -922,7 +967,7 @@ export class AppStore {
 
   async deleteRole(id: string): Promise<boolean> {
     try {
-      await api(`/api/settings/roles/${encodeURIComponent(id)}`, { method: 'DELETE' });
+      await this.api(`/api/settings/roles/${encodeURIComponent(id)}`, { method: 'DELETE' });
       await Promise.all([this.loadRoleEntries(), this.loadCatalogs()]);
       return true;
     } catch (error) {
@@ -938,10 +983,10 @@ export class AppStore {
   async loadAgentDefinition(id: string | null): Promise<{ agent: AgentDefinitionDetail | null; profiles: string[] } | null> {
     try {
       if (id === null) {
-        const body = await api<{ profiles?: unknown }>('/api/settings/agents');
+        const body = await this.api<{ profiles?: unknown }>('/api/settings/agents');
         return { agent: null, profiles: validateAgentProfiles(body.profiles) };
       }
-      const body = await api<{ agent?: unknown; profiles?: unknown }>(
+      const body = await this.api<{ agent?: unknown; profiles?: unknown }>(
         `/api/settings/agents/${encodeURIComponent(id)}`,
       );
       return {
@@ -956,7 +1001,7 @@ export class AppStore {
 
   async saveAgentDefinition(id: string, input: AgentDefinitionWrite): Promise<boolean> {
     try {
-      await api(`/api/settings/agents/${encodeURIComponent(id)}`, jsonOptions('PUT', input));
+      await this.api(`/api/settings/agents/${encodeURIComponent(id)}`, jsonOptions('PUT', input));
       await this.loadCatalogs();
       return true;
     } catch (error) {
@@ -967,7 +1012,7 @@ export class AppStore {
 
   async deleteAgentDefinition(id: string): Promise<boolean> {
     try {
-      await api(`/api/settings/agents/${encodeURIComponent(id)}`, { method: 'DELETE' });
+      await this.api(`/api/settings/agents/${encodeURIComponent(id)}`, { method: 'DELETE' });
       await this.loadCatalogs();
       return true;
     } catch (error) {
@@ -1013,7 +1058,7 @@ export class AppStore {
     const request = ++this.workspaceRequest;
     this.patch({ workspacesLoading: true, workspaceError: '' });
     try {
-      const body = await api<{ workspaces?: Workspace[] }>('/api/workspaces');
+      const body = await this.api<{ workspaces?: Workspace[] }>('/api/workspaces');
       if (request !== this.workspaceRequest) return;
       const workspaces = Array.isArray(body.workspaces) ? body.workspaces : [];
       const saved = storageGet('omniagent.activeWorkspace');
@@ -1045,12 +1090,15 @@ export class AppStore {
 
   async selectWorkspace(id: string): Promise<void> {
     if (!this.state.workspaces.some((workspace) => workspace.id === id)) return;
+    this.draftRequest += 1;
     this.discardDraft();
+    const cached = this.state.sessionsByWorkspace[id];
     this.patch({
       workspaceId: id,
       sessionId: null,
-      sessions: [],
-      sessionError: '',
+      sessions: cached?.sessions ?? [],
+      sessionsLoading: cached?.loading ?? false,
+      sessionError: cached?.error ?? '',
       alert: '',
       tab: 'conversation',
       permissionsError: '',
@@ -1060,17 +1108,19 @@ export class AppStore {
   }
 
   async loadSessions(workspaceId: string, restore: boolean): Promise<void> {
-    const request = ++this.sessionRequest;
-    this.patch({ sessionsLoading: true, sessionError: '' });
+    const request = (this.sessionRequests.get(workspaceId) ?? 0) + 1;
+    this.sessionRequests.set(workspaceId, request);
+    const draftRequest = this.draftRequest;
+    this.setWorkspaceSessions(workspaceId, { loading: true, error: '' });
     try {
-      const body = await api<{ sessions?: SessionSummary[] }>(sessionApiPath(workspaceId));
-      if (request !== this.sessionRequest || this.state.workspaceId !== workspaceId) return;
-      const sessions = sortSessions(Array.isArray(body.sessions) ? body.sessions : []);
-      this.state = { ...this.state, sessions, sessionsLoading: false };
-      this.emit();
-      if (restore) {
+      const body = await this.api<{ sessions?: SessionSummary[] }>(sessionApiPath(workspaceId));
+      if (this.disposed || request !== this.sessionRequests.get(workspaceId)) return;
+      if (!Array.isArray(body.sessions)) throw new Error('The server did not return a session list.');
+      const sessions = sortSessions(body.sessions);
+      this.setWorkspaceSessions(workspaceId, { sessions, loading: false, loaded: true });
+      if (restore && this.state.workspaceId === workspaceId) {
         const current = this.state.sessionId;
-        if (current !== null && this.state.entries[sessionKey(workspaceId, current)]?.draft === true) return;
+        if (draftRequest !== this.draftRequest || current !== null) return;
         const wanted = this.state.selectedByWorkspace[workspaceId];
         const found = sessions.find((item) => item.id === wanted) ?? sessions[0];
         if (found !== undefined) this.selectSession(found.id);
@@ -1080,28 +1130,35 @@ export class AppStore {
           this.state = { ...this.state, sessionId: null, selectedByWorkspace: selected };
           this.persistSelection();
           this.emit();
+          await this.createDraftSession({ workspaceId }, () =>
+            !this.disposed && request === this.sessionRequests.get(workspaceId) && this.state.workspaceId === workspaceId
+            && this.state.sessionId === null && this.state.sessions.length === 0);
         }
       }
     } catch (error) {
-      if (request !== this.sessionRequest || this.state.workspaceId !== workspaceId) return;
+      if (this.disposed || request !== this.sessionRequests.get(workspaceId)) return;
       const message = (error as Error).message;
-      this.patch({ sessionsLoading: false, sessionError: message });
-      this.showAlert(translator(this.state.locale)('Could not load sessions: {message}', { message }));
+      this.setWorkspaceSessions(workspaceId, { loading: false, error: message });
+      if (this.state.workspaceId === workspaceId) this.showAlert(translator(this.state.locale)('Could not load sessions: {message}', { message }));
     }
   }
 
-  selectSession(id: string): void {
-    const workspaceId = this.state.workspaceId;
-    if (workspaceId === null) return;
+  selectSession(id: string, workspaceId = this.state.workspaceId): void {
+    if (workspaceId === null || !this.state.workspaces.some((workspace) => workspace.id === workspaceId)) return;
     if (this.state.entries[sessionKey(workspaceId, id)]?.draft === true) return;
+    this.draftRequest += 1;
     this.discardDraft();
     const key = sessionKey(workspaceId, id);
     const entry = this.getEntry(workspaceId, id);
     this.state = {
       ...this.state,
+      workspaceId,
+      sessions: this.state.sessionsByWorkspace[workspaceId]?.sessions ?? [],
+      sessionsLoading: this.state.sessionsByWorkspace[workspaceId]?.loading ?? false,
+      sessionError: this.state.sessionsByWorkspace[workspaceId]?.error ?? '',
       sessionId: id,
       selectedByWorkspace: { ...this.state.selectedByWorkspace, [workspaceId]: id },
-      tab: this.state.tab === 'observe' ? 'observe' : 'conversation',
+      tab: 'conversation',
       alert: '',
     };
     this.persistSelection();
@@ -1120,12 +1177,11 @@ export class AppStore {
     this.selectSession(sessionId);
   }
 
-  async renameSession(id: string, title: string): Promise<boolean> {
-    const workspaceId = this.state.workspaceId;
+  async renameSession(id: string, title: string, workspaceId = this.state.workspaceId): Promise<boolean> {
     const trimmed = title.trim();
     if (workspaceId === null || trimmed === '') return false;
     try {
-      const body = await api<{ title?: unknown }>(
+      const body = await this.api<{ title?: unknown }>(
         sessionApiPath(workspaceId, id),
         jsonOptions('PATCH', { title: trimmed }),
       );
@@ -1138,11 +1194,10 @@ export class AppStore {
       this.state = {
         ...this.state,
         ...(entry === undefined ? {} : { entries: { ...this.state.entries, [key]: { ...entry, title: normalized } } }),
-        sessions: this.state.sessions.map((session) => session.id === id
-          ? { ...session, title: normalized, titleSource: { kind: 'user' }, blank: false }
-          : session),
       };
-      this.emit();
+      this.updateWorkspaceSessions(workspaceId, (sessions) => sessions.map((session) => session.id === id
+        ? { ...session, title: normalized, titleSource: { kind: 'user' }, blank: false }
+        : session));
       return true;
     } catch (error) {
       this.showAlert(translator(this.state.locale)('Could not rename session: {message}', { message: (error as Error).message }));
@@ -1150,22 +1205,17 @@ export class AppStore {
     }
   }
 
-  async setSessionPinned(id: string, pinned: boolean): Promise<boolean> {
-    const workspaceId = this.state.workspaceId;
+  async setSessionPinned(id: string, pinned: boolean, workspaceId = this.state.workspaceId): Promise<boolean> {
     if (workspaceId === null) return false;
     try {
-      const body = await api<{ pinned?: unknown }>(
+      const body = await this.api<{ pinned?: unknown }>(
         sessionApiPath(workspaceId, id, 'pin'),
         jsonOptions('POST', { pinned }),
       );
       if (body.pinned !== pinned) throw new Error(translator(this.state.locale)('The server returned a different pin state.'));
-      this.state = {
-        ...this.state,
-        sessions: sortSessions(this.state.sessions.map((session) => session.id === id
-          ? { ...session, pinned }
-          : session)),
-      };
-      this.emit();
+      this.updateWorkspaceSessions(workspaceId, (sessions) => sortSessions(sessions.map((session) => session.id === id
+        ? { ...session, pinned }
+        : session)));
       return true;
     } catch (error) {
       this.showAlert(translator(this.state.locale)('Could not update session pin: {message}', { message: (error as Error).message }));
@@ -1173,16 +1223,16 @@ export class AppStore {
     }
   }
 
-  async forkSession(id: string): Promise<string | null> {
-    const workspaceId = this.state.workspaceId;
+  async forkSession(id: string, workspaceId = this.state.workspaceId): Promise<string | null> {
     if (workspaceId === null) return null;
+    const selection = { workspaceId: this.state.workspaceId, sessionId: this.state.sessionId };
     const entry = this.state.entries[sessionKey(workspaceId, id)];
     if (entry?.run !== undefined || entry?.running === true) {
       this.showAlert(translator(this.state.locale)('Stop the active turn before forking this session.'));
       return null;
     }
     try {
-      const body = await api<{ session?: SessionSummary }>(
+      const body = await this.api<{ session?: SessionSummary }>(
         sessionApiPath(workspaceId, id, 'fork'),
         jsonOptions('POST', {}),
       );
@@ -1190,13 +1240,10 @@ export class AppStore {
       if (typeof session?.id !== 'string' || session.id === '') {
         throw new Error(translator(this.state.locale)('The server did not return a session ID.'));
       }
-      if (this.state.workspaceId !== workspaceId) return session.id;
-      this.state = {
-        ...this.state,
-        sessions: sortSessions([session, ...this.state.sessions.filter((item) => item.id !== session.id)]),
-      };
-      this.emit();
-      this.selectSession(session.id);
+      this.updateWorkspaceSessions(workspaceId, (sessions) => sortSessions([session, ...sessions.filter((item) => item.id !== session.id)]));
+      if (this.state.workspaceId === selection.workspaceId && this.state.sessionId === selection.sessionId) {
+        this.selectSession(session.id, workspaceId);
+      }
       return session.id;
     } catch (error) {
       this.showAlert(translator(this.state.locale)('Could not fork session: {message}', { message: (error as Error).message }));
@@ -1204,8 +1251,7 @@ export class AppStore {
     }
   }
 
-  async deleteSession(id: string): Promise<boolean> {
-    const workspaceId = this.state.workspaceId;
+  async deleteSession(id: string, workspaceId = this.state.workspaceId): Promise<boolean> {
     if (workspaceId === null) return false;
     const key = sessionKey(workspaceId, id);
     const entry = this.state.entries[key];
@@ -1214,8 +1260,8 @@ export class AppStore {
       return false;
     }
     try {
-      await api(sessionApiPath(workspaceId, id), { method: 'DELETE' });
-      const sessions = this.state.sessions.filter((session) => session.id !== id);
+      await this.api(sessionApiPath(workspaceId, id), { method: 'DELETE' });
+      const sessions = (this.state.sessionsByWorkspace[workspaceId]?.sessions ?? []).filter((session) => session.id !== id);
       const entries = { ...this.state.entries };
       delete entries[key];
       this.clearRunningPoll(key);
@@ -1226,17 +1272,16 @@ export class AppStore {
         if (sessions[0] === undefined) delete selected[workspaceId];
         else selected[workspaceId] = sessions[0].id;
       }
-      const wasSelected = this.state.sessionId === id;
+      const wasSelected = this.state.workspaceId === workspaceId && this.state.sessionId === id;
       const nextId = wasSelected ? selected[workspaceId] ?? null : this.state.sessionId;
       this.state = {
         ...this.state,
-        sessions,
         entries,
         selectedByWorkspace: selected,
         ...(wasSelected ? { sessionId: nextId } : {}),
       };
       this.persistSelection();
-      this.emit();
+      this.updateWorkspaceSessions(workspaceId, () => sessions);
       if (wasSelected && nextId !== null) this.selectSession(nextId);
       return true;
     } catch (error) {
@@ -1252,7 +1297,7 @@ export class AppStore {
     const request = ++entry.request;
     this.patchEntry(key, { loading: true, error: '' });
     try {
-      const body = await api<Record<string, unknown>>(sessionApiPath(workspaceId, sessionId));
+      const body = await this.api<Record<string, unknown>>(sessionApiPath(workspaceId, sessionId));
       if (this.state.entries[key]?.request !== request) return false;
       if (typeof body.permission !== 'object' || body.permission === null
         || !Object.hasOwn(body.permission, 'preset')
@@ -1320,10 +1365,24 @@ export class AppStore {
    * its mode, permission and plan settings are written.
    */
   async startDraftSession(options?: string | { modeId?: string; workspaceId?: string }): Promise<string | null> {
+    return this.createDraftSession(options);
+  }
+
+  private async createDraftSession(
+    options?: string | { modeId?: string; workspaceId?: string },
+    isStillWanted: () => boolean = () => true,
+  ): Promise<string | null> {
+    const draftRequest = ++this.draftRequest;
     const t = translator(this.state.locale);
     const request = typeof options === 'string' ? { modeId: options } : options ?? {};
     if (this.state.modes.length === 0) await this.loadModes();
     if (this.state.permissions === null) await this.loadPermissions();
+    if (this.disposed || draftRequest !== this.draftRequest || !isStillWanted()) return null;
+    if (this.state.permissions === null) {
+      const message = t('Could not create session: {message}', { message: this.state.permissionsError || 'Permission settings are unavailable.' });
+      this.showAlert(message);
+      return message;
+    }
     const workspaceId = request.workspaceId ?? this.state.workspaceId ?? this.state.workspaces[0]?.id;
     if (workspaceId === undefined || !this.state.workspaces.some((workspace) => workspace.id === workspaceId)) {
       const message = t('Could not create session: no workspace is selected.');
@@ -1354,7 +1413,13 @@ export class AppStore {
     const switched = this.state.workspaceId !== workspaceId;
     this.state = {
       ...this.state,
-      ...(switched ? { workspaceId, sessions: [] as SessionSummary[], sessionError: '', permissionsError: '' } : {}),
+      ...(switched ? {
+        workspaceId,
+        sessions: this.state.sessionsByWorkspace[workspaceId]?.sessions ?? [],
+        sessionsLoading: this.state.sessionsByWorkspace[workspaceId]?.loading ?? false,
+        sessionError: this.state.sessionsByWorkspace[workspaceId]?.error ?? '',
+        permissionsError: '',
+      } : {}),
       sessionId: draftId,
       entries: {
         ...this.state.entries,
@@ -1470,7 +1535,7 @@ export class AppStore {
       : undefined;
     this.patch({ creatingSession: true });
     try {
-      const body = await api<{ session?: SessionSummary }>(
+      const body = await this.api<{ session?: SessionSummary }>(
         sessionApiPath(workspaceId),
         jsonOptions('POST', {
           mode: mode.mode,
@@ -1484,7 +1549,7 @@ export class AppStore {
       let setupError: Error | null = null;
       if (isPermissionPreset(entry.permission)) {
         try {
-          await api(
+          await this.api(
             sessionApiPath(workspaceId, session.id, 'permission'),
             jsonOptions('POST', { preset: entry.permission }),
           );
@@ -1494,7 +1559,7 @@ export class AppStore {
       }
       if (setupError === null && entry.plan.active) {
         try {
-          await api(
+          await this.api(
             sessionApiPath(workspaceId, session.id, 'plan'),
             jsonOptions('POST', { active: true }),
           );
@@ -1531,7 +1596,7 @@ export class AppStore {
     if (!entry.loaded || entry.loading || entry.permissionSaving || entry.agentSaving || entry.modelSaving
       || !isPermissionPreset(entry.permission) || entry.agent === null || entry.binding === null) return false;
     try {
-      const response = await fetch(sessionApiPath(workspaceId, sessionId, 'messages'), jsonOptions('POST', {
+      const response = await this.fetch(sessionApiPath(workspaceId, sessionId, 'messages'), jsonOptions('POST', {
         text,
         ...(attachments.length === 0 ? {} : { attachments }),
         mode: 'steer',
@@ -1652,9 +1717,6 @@ export class AppStore {
         this.state = {
           ...this.state,
           entries,
-          ...(this.state.workspaceId === workspaceId
-            ? { sessions: [created.session, ...this.state.sessions.filter((item) => item.id !== targetId)] }
-            : {}),
           ...(this.state.workspaceId === workspaceId && this.state.sessionId === sessionId
             ? {
               sessionId: targetId,
@@ -1663,10 +1725,10 @@ export class AppStore {
             : {}),
         };
         if (this.state.workspaceId === workspaceId && this.state.sessionId === targetId) this.persistSelection();
-        this.emit();
+        this.updateWorkspaceSessions(workspaceId, (sessions) => sortSessions([created.session, ...sessions.filter((item) => item.id !== targetId)]));
         if (created.setupError !== null) throw created.setupError;
       }
-      const response = await fetch(sessionApiPath(workspaceId, targetId, 'messages'), jsonOptions('POST', {
+      const response = await this.fetch(sessionApiPath(workspaceId, targetId, 'messages'), jsonOptions('POST', {
         text,
         ...(attachments.length === 0 ? {} : { attachments }),
       }));
@@ -1688,8 +1750,9 @@ export class AppStore {
 
   /** Send the oldest queued message once the session is no longer running. */
   private async flushQueue(workspaceId: string, sessionId: string): Promise<void> {
+    const generation = auth.getGeneration();
     const key = sessionKey(workspaceId, sessionId);
-    if (this.flushingQueues.has(key)) return;
+    if (this.disposed || this.flushingQueues.has(key)) return;
     const entry = this.state.entries[key];
     if (entry === undefined || !entry.loaded || entry.loading || entry.draft
       || entry.run !== undefined || entry.running || entry.queued.length === 0) return;
@@ -1700,7 +1763,7 @@ export class AppStore {
     writeQueued(workspaceId, sessionId, rest);
     try {
       const accepted = await this.startTurn(workspaceId, sessionId, next.text, next.attachments);
-      if (!accepted) {
+      if (!accepted && !this.disposed && generation === auth.getGeneration()) {
         const current = this.state.entries[key];
         if (current !== undefined) {
           const restored = [next, ...current.queued];
@@ -1716,7 +1779,7 @@ export class AppStore {
   /** Refresh a turn that another tab owns until it settles, then drain the queue. */
   private scheduleRunningPoll(workspaceId: string, sessionId: string): void {
     const key = sessionKey(workspaceId, sessionId);
-    if (this.runningPolls.has(key) || this.state.entries[key]?.run !== undefined) return;
+    if (this.disposed || this.runningPolls.has(key) || this.state.entries[key]?.run !== undefined) return;
     const timer = setTimeout(() => {
       this.runningPolls.delete(key);
       const entry = this.state.entries[key];
@@ -1752,7 +1815,7 @@ export class AppStore {
         const title = typeof (event as { title?: unknown }).title === 'string'
           ? (event as { title: string }).title.trim()
           : '';
-        if (title !== '') this.patchSessionTitle(key, sessionId, title);
+        if (title !== '') this.patchSessionTitle(key, workspaceId, sessionId, title);
       }
       if (type === 'tool.result') {
         const result = (event as { result?: { name?: unknown } }).result;
@@ -1796,6 +1859,7 @@ export class AppStore {
       parserError = error as Error;
       this.showAlert(translator(this.state.locale)('Could not complete turn: {message}', { message: parserError.message }));
     } finally {
+      if (this.disposed) return;
       const entry = this.state.entries[key];
       if (entry !== undefined) {
         const outcome = run.outcome === 'interrupted'
@@ -1837,7 +1901,7 @@ export class AppStore {
       || (run !== undefined && (run.stopping === true || run.finishing === true))) return;
     if (run !== undefined) this.patchEntry(key, { run: { ...run, stopping: true } });
     try {
-      await api(sessionApiPath(workspaceId, sessionId, 'interrupt'), jsonOptions('POST', {}));
+      await this.api(sessionApiPath(workspaceId, sessionId, 'interrupt'), jsonOptions('POST', {}));
       if (run === undefined) this.scheduleRunningPoll(workspaceId, sessionId);
     } catch (error) {
       if (run !== undefined) this.patchEntry(key, { run: { ...run, stopping: false } });
@@ -1853,7 +1917,7 @@ export class AppStore {
     if (entry?.draft === true || entry?.running === true || entry?.run !== undefined) return;
     const t = translator(this.state.locale);
     try {
-      await api(sessionApiPath(workspaceId, sessionId, 'compact'), jsonOptions('POST', {}));
+      await this.api(sessionApiPath(workspaceId, sessionId, 'compact'), jsonOptions('POST', {}));
       this.showAlert(t('Older context will be compacted before your next message.'));
     } catch (error) {
       this.showAlert(t('Could not compact context: {message}', { message: (error as Error).message }));
@@ -1870,7 +1934,7 @@ export class AppStore {
     if (run === undefined || approval === undefined || approval.pending === true || run.stopping === true || run.finishing === true) return;
     this.patchEntry(key, { run: { ...run, approval: { ...approval, pending: true, error: '' } } });
     try {
-      await api(sessionApiPath(workspaceId, sessionId, 'approvals'), jsonOptions('POST', {
+      await this.api(sessionApiPath(workspaceId, sessionId, 'approvals'), jsonOptions('POST', {
         requestId: approval.requestId,
         decision,
       }));
@@ -1899,7 +1963,7 @@ export class AppStore {
     const trimmed = feedback.trim().slice(0, 4000);
     this.patchEntry(key, { run: { ...run, planReview: { ...review, pending: true, error: '', feedback: trimmed } } });
     try {
-      await api(sessionApiPath(workspaceId, sessionId, 'plan-review'), jsonOptions('POST', {
+      await this.api(sessionApiPath(workspaceId, sessionId, 'plan-review'), jsonOptions('POST', {
         requestId: review.requestId,
         approved,
         ...(trimmed === '' ? {} : { feedback: trimmed }),
@@ -1932,7 +1996,7 @@ export class AppStore {
     }
     this.patchEntry(key, { planSaving: true, planError: '' });
     try {
-      const body = await api<{ plan?: unknown }>(sessionApiPath(workspaceId, sessionId, 'plan'), jsonOptions('POST', { active }));
+      const body = await this.api<{ plan?: unknown }>(sessionApiPath(workspaceId, sessionId, 'plan'), jsonOptions('POST', { active }));
       this.patchEntry(key, { plan: normalizePlan(body.plan), planSaving: false });
     } catch (error) {
       this.patchEntry(key, { planSaving: false, planError: translator(this.state.locale)('Could not change plan mode: {message}', { message: (error as Error).message }) });
@@ -1941,7 +2005,7 @@ export class AppStore {
 
   async refreshSessionBrief(workspaceId: string, sessionId: string): Promise<void> {
     try {
-      const body = await api<{ plan?: unknown; todos?: unknown }>(sessionApiPath(workspaceId, sessionId));
+      const body = await this.api<{ plan?: unknown; todos?: unknown }>(sessionApiPath(workspaceId, sessionId));
       const key = sessionKey(workspaceId, sessionId);
       const entry = this.state.entries[key];
       if (entry === undefined) return;
@@ -1955,11 +2019,7 @@ export class AppStore {
     if (Date.now() - this.subagentsRefreshedAt < 750) return;
     this.subagentsRefreshedAt = Date.now();
     try {
-      const body = await api<{ sessions?: SessionSummary[] }>(sessionApiPath(workspaceId));
-      if (this.state.workspaceId !== workspaceId) return;
-      this.patch({
-        sessions: sortSessions(Array.isArray(body.sessions) ? body.sessions : []),
-      });
+      await this.loadSessions(workspaceId, false);
     } catch {
       // Keep the existing list.
     }
@@ -1970,7 +2030,7 @@ export class AppStore {
     const request = ++this.permissionRequest;
     this.patch({ permissionsLoading: true, permissionsError: '' });
     try {
-      const body = await api<{ settings?: unknown }>('/api/settings/permissions');
+      const body = await this.api<{ settings?: unknown }>('/api/settings/permissions');
       if (request !== this.permissionRequest) return;
       this.patch({ permissions: validatePermissionSettings(body.settings), permissionsLoading: false });
     } catch (error) {
@@ -1986,7 +2046,7 @@ export class AppStore {
     this.permissionRequest += 1;
     this.patch({ permissionsSaving: true });
     try {
-      const body = await api<{ settings?: unknown }>('/api/settings/permissions', jsonOptions('PUT', { defaultPreset: preset }));
+      const body = await this.api<{ settings?: unknown }>('/api/settings/permissions', jsonOptions('PUT', { defaultPreset: preset }));
       this.patch({ permissions: validatePermissionSettings(body.settings), permissionsSaving: false });
       this.showAlert('');
     } catch (error) {
@@ -2007,7 +2067,7 @@ export class AppStore {
     }
     this.patchEntry(key, { permissionSaving: true, permissionError: '' });
     try {
-      const body = await api<{ permission?: { preset?: unknown } }>(
+      const body = await this.api<{ permission?: { preset?: unknown } }>(
         sessionApiPath(workspaceId, sessionId, 'permission'),
         jsonOptions('POST', { preset }),
       );
@@ -2021,9 +2081,9 @@ export class AppStore {
   async loadCatalogs(): Promise<void> {
     this.patch({ modelsLoading: true, agentsLoading: true, rolesLoading: true, modelsError: '', agentsError: '', rolesError: '' });
     const [modelsResult, agentsResult, rolesResult] = await Promise.allSettled([
-      api<{ models?: unknown[] }>('/api/models'),
-      api<{ agents?: unknown[] }>('/api/agents'),
-      api<{ roles?: unknown[] }>('/api/roles'),
+      this.api<{ models?: unknown[] }>('/api/models'),
+      this.api<{ agents?: unknown[] }>('/api/agents'),
+      this.api<{ roles?: unknown[] }>('/api/roles'),
     ]);
     let models: ModelSummary[] = [];
     let modelsError = '';
@@ -2127,7 +2187,7 @@ export class AppStore {
     if (!this.state.agents.some((agent) => agent.id === value && agent.valid && agent.usage !== 'subagent')) return;
     this.patchEntry(key, { agentSaving: true, agentError: '' });
     try {
-      const body = await api<{ agent?: unknown }>(sessionApiPath(workspaceId, sessionId, 'agent'), jsonOptions('POST', { agent: value }));
+      const body = await this.api<{ agent?: unknown }>(sessionApiPath(workspaceId, sessionId, 'agent'), jsonOptions('POST', { agent: value }));
       const agent = validateAgent(body.agent);
       if (agent === null || agent.id !== value) throw new Error('The server returned a different agent selection.');
       this.patchEntry(key, {
@@ -2170,7 +2230,7 @@ export class AppStore {
     if (JSON.stringify(entry.binding) === JSON.stringify(binding)) return;
     this.patchEntry(key, { modelSaving: true, modelError: '' });
     try {
-      const body = await api<{ model?: unknown; resolvedModel?: unknown }>(
+      const body = await this.api<{ model?: unknown; resolvedModel?: unknown }>(
         sessionApiPath(workspaceId, sessionId, 'model'),
         jsonOptions('POST', binding),
       );
@@ -2191,7 +2251,7 @@ export class AppStore {
     if (workspaceId === null || sessionId === null) return;
     if (this.state.entries[sessionKey(workspaceId, sessionId)]?.draft === true) return;
     try {
-      const response = await fetch(`${sessionApiPath(workspaceId, sessionId, 'export')}?format=${format}`);
+      const response = await this.fetch(`${sessionApiPath(workspaceId, sessionId, 'export')}?format=${format}`);
       if (!response.ok) throw new Error(await responseError(response));
       if (format === 'markdown') {
         const text = await response.text();
@@ -2213,7 +2273,7 @@ export class AppStore {
 
   async addWorkspace(path: string, name: string): Promise<boolean> {
     try {
-      const body = await api<{ workspace?: Workspace }>('/api/workspaces', jsonOptions('POST', {
+      const body = await this.api<{ workspace?: Workspace }>('/api/workspaces', jsonOptions('POST', {
         path,
         ...(name === '' ? {} : { name }),
       }));
@@ -2228,7 +2288,7 @@ export class AppStore {
 
   async removeWorkspace(workspaceId: string): Promise<boolean> {
     try {
-      await api(`/api/workspaces/${encodeURIComponent(workspaceId)}`, { method: 'DELETE' });
+      await this.api(`/api/workspaces/${encodeURIComponent(workspaceId)}`, { method: 'DELETE' });
       const selected = { ...this.state.selectedByWorkspace };
       delete selected[workspaceId];
       const entries = { ...this.state.entries };
@@ -2239,10 +2299,12 @@ export class AppStore {
           // Ignore malformed keys.
         }
       }
-      this.state = { ...this.state, selectedByWorkspace: selected, entries };
+      const sessionsByWorkspace = { ...this.state.sessionsByWorkspace };
+      delete sessionsByWorkspace[workspaceId];
+      this.sessionRequests.set(workspaceId, (this.sessionRequests.get(workspaceId) ?? 0) + 1);
+      this.state = { ...this.state, selectedByWorkspace: selected, entries, sessionsByWorkspace };
       if (this.state.workspaceId === workspaceId) {
-        this.state = { ...this.state, workspaceId: null, sessionId: null, sessions: [] };
-        this.sessionRequest += 1;
+        this.state = { ...this.state, workspaceId: null, sessionId: null, sessions: [], sessionsLoading: false, sessionError: '' };
       }
       this.persistSelection();
       this.emit();
@@ -2255,7 +2317,12 @@ export class AppStore {
   }
 }
 
-export const store = new AppStore();
+export let store = new AppStore();
+
+export function resetStore(): void {
+  store.dispose();
+  store = new AppStore(false);
+}
 
 export function useApp(): AppState {
   return useSyncExternalStore(store.subscribe, store.getSnapshot, store.getSnapshot);

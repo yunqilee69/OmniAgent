@@ -170,6 +170,17 @@ async function create(url: string, body: unknown = {}): Promise<{ sessionUrl: st
 }
 
 describe('configured session API', () => {
+  it('reports the effective compaction window and its source', async () => {
+    const { url, configDir } = await setup();
+    const { sessionUrl } = await create(url);
+    const model = await (await fetch(`${sessionUrl}/context`)).json() as { estimatedMessageTokens: number; window: unknown };
+    expect(model.estimatedMessageTokens).toBe(0);
+    expect(model.window).toEqual({ tokens: 1_048_576, source: 'model' });
+    await writeFile(join(configDir, 'config.json'), JSON.stringify({ ...CONFIG, contextWindowTokens: 1234 }));
+    const configured = await (await fetch(`${sessionUrl}/context`)).json() as { window: unknown };
+    expect(configured.window).toEqual({ tokens: 1234, source: 'config' });
+  });
+
   it('exposes agents, roles, and credential-free model capabilities', async () => {
     const { host } = await setup();
     const base = host.address()!;

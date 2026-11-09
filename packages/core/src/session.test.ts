@@ -171,15 +171,13 @@ describe('Session', () => {
     expect(events.at(-1)).toEqual({ type: 'turn.end', reason: 'end_turn' });
   });
 
-  it('denies calls without a DSH snapshot despite legacy bypass and allow rules', async () => {
+  it('denies calls without a DSH snapshot', async () => {
     const execute = vi.fn(async () => ({ content: 'ok' }));
     const approve = vi.fn(async () => 'allow' as const);
     const session = new Session({
       cwd: process.cwd(),
       model: new FakeModel([toolCallResponse([{ id: 'c1', name: 'noop', args: {} }]), textResponse('done')]),
       tools: new ToolRegistry().register({ ...noopTool, execute }),
-      mode: 'bypass',
-      rules: [{ raw: '*', tool: '*', source: 'session', decision: 'allow', anchor: process.cwd() }],
       approve,
     });
 

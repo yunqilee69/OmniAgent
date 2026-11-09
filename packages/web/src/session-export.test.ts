@@ -193,7 +193,6 @@ describe('exportSession', () => {
       const session = new Session({
         cwd: workspace,
         model: new FakeModel([toolResponse, textResponse('Done')]),
-        rules: [{ raw: 'SECRET PERMISSION RULE', tool: 'read_file', source: 'session', decision: 'deny', anchor: workspace }],
         approve: async () => 'deny',
         session: handle,
       });
@@ -201,7 +200,6 @@ describe('exportSession', () => {
       await handle.append({ type: 'trace/internal', data: { details: 'SECRET INTERNAL TRACE' } });
       const reopened = await new SessionStore(join(root, 'sessions')).open(workspace, 'same-id');
       const persisted = await readFile(sessionPath(join(root, 'sessions'), workspace, 'same-id'), 'utf8');
-      expect(persisted).not.toContain('SECRET PERMISSION RULE');
       expect(persisted).toContain('DSH permission selection is required');
       expect(persisted).toContain('SECRET ARGUMENT');
       expect(persisted).toContain('SECRET DSH REPLAY');
@@ -247,40 +245,12 @@ describe('exportSession', () => {
     await log.append({ type: 'trace/permission.decided', data: { callId: 'other', decision: 'allow' } });
     await log.append({ type: 'trace/permission.decided', data: { callId: 'duplicate', decision: 'allow' } });
     await log.append({ type: 'message/tool-result', data: { result: { callId: 'other', name: 'tool', ok: true, content: 'other output' } } });
-    await log.append({ type: 'message/tool-result', data: { result: { callId: 'duplicate', name: 'tool', ok: false, content: 'private rule' } } });
+    await log.append({ type: 'message/tool-result', data: { result: { callId: 'duplicate', name: 'tool', ok: false, content: 'private detail' } } });
     await log.append({ type: 'message/tool-result', data: { result: { callId: 'duplicate', name: 'tool', ok: true, content: 'later output' } } });
     const results = JSON.parse(exportSession(log, 'json').text).entries;
     expect(results.map((entry: { content: string | null }) => entry.content)).toEqual(['other output', null, 'later output']);
     expect(results[1].contentOmitted).toBe('permission');
-    expect(exportSession(log, 'json').text).not.toContain('private rule');
-  });
-
-  it('withholds recognizable legacy permission denials even when the trace is absent', async () => {
-    const log = new SessionLog({ id: 'legacy', workspace: '/workspace', cwd: '/workspace', createdAt: 1 });
-    await log.append({ type: 'tool/result', data: { callId: 'a', name: 'tool', ok: false,
-      content: '调用被权限策略拒绝（命中 deny 规则 SECRET RULE）。不要重试同一调用，换一种方式或向用户说明。', truncated: false } });
-    expect(JSON.stringify(log.events)).toContain('SECRET RULE');
-    const json = exportSession(log, 'json').text;
-    expect(json).not.toContain('SECRET RULE');
-    expect(JSON.parse(json).entries[0]).toMatchObject({ content: null, contentOmitted: 'permission' });
-    const markdown = exportSession(log, 'markdown').text;
-    expect(markdown).toContain('**Output:** withheld (permission denial)');
-    expect(markdown).not.toContain('SECRET RULE');
-  });
-
-  it('withholds legacy denial output when its success status is missing or null', async () => {
-    const log = new SessionLog({ id: 'legacy', workspace: '/workspace', cwd: '/workspace', createdAt: 1 });
-    const content = '调用被权限策略拒绝（命中 deny 规则 SECRET RULE）。不要重试同一调用。';
-    await log.append({ type: 'tool/result', data: { callId: 'a', name: 'tool', content } });
-    await log.append({ type: 'message/tool-result', data: { result: { callId: 'b', name: 'tool', ok: null, content } } });
-    for (const format of ['json', 'markdown'] as const) {
-      const text = exportSession(log, format).text;
-      expect(text).not.toContain('SECRET RULE');
-    }
-    expect(JSON.parse(exportSession(log, 'json').text).entries).toMatchObject([
-      { content: null, contentOmitted: 'permission' },
-      { content: null, contentOmitted: 'permission' },
-    ]);
+    expect(exportSession(log, 'json').text).not.toContain('private detail');
   });
 
   it('does not export explicitly injected non-user context', async () => {
@@ -302,10 +272,10 @@ describe('exportSession', () => {
     await log.append({ type: 'trace/turn.start', data: { step: 0 } });
     await log.append({ type: 'trace/permission.decided', data: { callId: 'same', decision: 'deny' } });
     await log.append({ type: 'message/tool-result', data: { result: {
-      callId: 'same', name: 'tool', ok: false, content: 'SECRET RULE', truncated: false,
+      callId: 'same', name: 'tool', ok: false, content: 'SECRET DETAIL', truncated: false,
     } } });
     const json = exportSession(log, 'json').text;
-    expect(json).not.toContain('SECRET RULE');
+    expect(json).not.toContain('SECRET DETAIL');
     expect(JSON.parse(json).entries[0]).toMatchObject({ content: null, contentOmitted: 'permission' });
   });
 });

@@ -148,7 +148,7 @@ async function readDefaultPreset(configDir: string): Promise<DshPermissionSettin
       }
     }
   }
-  return resolveDshDefaultPreset(Object.hasOwn(config, 'mode') || Object.hasOwn(config, 'permissions') ? null : undefined);
+  return resolveDshDefaultPreset(undefined);
 }
 
 /** 命令输出沿用与正文相同的两空格缩进，保证「终端里所有内容同一列起」。 */

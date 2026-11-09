@@ -35,7 +35,23 @@ TUI 的排版只有一条规则：**四类内容各有自己的左缘**，所以
 
 plan 模式会将调研约束注入系统提示，并要求模型通过 `exit_plan_mode` 提交计划供你批准；`todo_write` 会持久化整份任务清单，TUI 在每次更新后展示。`create_goal` 可以把长期目标登记到会话中，之后由自动续轮推进，`get_goal` / `update_goal` 负责读取、编辑、暂停、恢复和结束目标；每次自动续轮都写入带 goal source 的用户消息，达到轮次上限会自动进入 blocked。Web 工作台支持登记和切换本地工作区、浏览及恢复会话、实时对话、plan 模式开关与计划审批、任务清单、权限、模型、MCP、模式与智能体设置、一次性工具审批、子会话显示、自动化任务页和轨迹图。输入框支持四类快捷引用：`@` 搜索并插入工作区文件或目录，`#` 打开近期会话（当前工作区优先，可切到其他工作区），`/` 运行内置指令（新建会话、计划模式、设置目标、压缩上下文、权限、智能体、模型、设置、导出、清空和帮助），`$` 只列出当前智能体可调用的 skill；菜单输入按 LIKE 规则过滤，方向键选择、Enter 确认、Esc 关闭。`/goal` 会插入一段让智能体调用 `create_goal` 的请求，`/compact` 会安排在下一次回复前压缩较早上下文。设置弹窗按「通用配置 / 模型配置 / MCP 服务器 / 模式预设 / 智能体」分栏；模型配置维护角色与模型来源，可编辑协议、接口地址、只写 API Key、模型目录（上下文窗口、输出上限、输入类型、思考等级与默认等级），从 OpenAI 兼容或 Anthropic 接口拉取模型并调整顺序，再为模型分配可选角色；MCP 服务器页支持 stdio 与 Streamable HTTP 两种标准传输（旧版 HTTP+SSE 服务器会自动回退，已有配置仍兼容），可配置命令/参数/环境变量或 URL/请求头、启用状态与超时，并在保存前测试连接和查看工具列表，模式和智能体 profile 可以用 `"*"` 或 `mcp__<server>__<tool>` 授权这些工具；模式预设内置标准模式与创造模式，可配置智能体、模型来源、工具和 Skill；智能体页列出默认智能体、创造智能体及自定义定义，可直接填写表单新建、编辑或删除自定义智能体，也可以进入创造模式通过对话生成。新会话先选择模式，智能体、工具和 Skill 由模式固定，模型默认取模式配置但可在创建前覆盖，创建后仍可继续切换；需要不同智能体或工具组合时只能新建会话；创造模式可通过对话创建自动化任务、写入智能体定义并调整 OmniAgent 配置。自动化任务按 Host 维度持久化在 `~/.omniagent/schedules.json`，支持一次、固定间隔、每天、每周、cron 和 RFC 5545 RRULE 规则；投递目标可以是当前会话、首次运行时创建一个新会话，或每次运行都新建会话。Web 的「自动化任务」页可以新建、编辑、暂停/恢复、立即运行、查看投递记录和清理已结束任务。模型侧提供 `schedule_create`、`schedule_list`、`schedule_view`、`schedule_edit` 四个工具；它们只能在主会话中使用，子代理不能创建或修改任务。计划任务唤醒已有会话时会复用进程内的实时 Session 实例；新建会话时使用全局默认权限预设和当前默认模式。服务停止期间错过的多次触发只补投最近一次，进程崩溃时可能重复投递。智能体配置存放在 `~/.omniagent/agents/*.md`；TUI 可以在新建会话或切换智能体时选择，Web 新会话由模式决定使用的智能体；子代理会作为独立会话出现在会话列表中，它们继承父会话的工作区、权限预设和 cwd 限制，但按目标智能体的角色选择模型，并可通过 `subagent`、`send_message`、`list_agents`、`wait_agent`、`interrupt_agent` 协作。`list_agents` 返回整棵协作树的根节点、自身和可继续的子代理；`wait_agent` 等待下一步输入（消息、完成通知或用户 steering），而不是轮询某个子代理的最终状态。会话菜单可以复制 Markdown 或下载 JSON 会话摘录；导出可能包含敏感对话和工具输出，分享前应检查。JSON 不是 DSH 的 ZIP/JSONL 归档，也不包含子会话和附件。取消登记工作区不会删除目录或会话；会话按工作区保存在 `~/.omniagent/sessions/` 下。
 
-Web 仅监听本机，不提供本地用户身份认证；Host/Origin 检查不能限制其他本地进程。会话使用 `read-only`、`workspace-write` 或 `danger-full-access` 权限预设，并将选择持久化在该会话中；旧会话不会从旧 `mode` 或规则猜测权限，须显式选择。普通 `workspace-write` 不逐次询问；只有请求扩大当前调用的沙盒范围时才进行一次性审批。`~/.omniagent/config.json` 中的全局默认值只作用于新会话。TUI 支持会话级智能体和模型切换；Web 的新会话在创建时选择模式，模式快照以 `mode/selected` 持久化，agent、tools 和 skills 由模式固定并拒绝切换，模型默认取模式配置且可在创建前选择或在创建后继续切换。智能体选择仍以 `agent/selected`、模型绑定仍以 v2 `model/selected` 事件持久化，这些事件都不含凭据。`.agents/skills` 中的 skill 会在会话系统提示里列出，模型通过 `skill` 工具按需加载完整说明；智能体 profile 可以进一步收窄可见工具和 skill。文件和 shell 限制不隔离网络，且不是完整 OS 安全边界。会话消息、实时 SSE、原始审计文件以及加载的 skill 文本都可能包含敏感内容。设置 `OMNIAGENT_PORT` 可更换监听端口。接口和数据边界见 [Web API](docs/web-api.md)，配置分层与智能体文件格式见 [智能体、角色与模型绑定](docs/agents.md)。
+Web 启动时创建并登记 `~/.omniagent/default-workspace` 作为不可移除的默认工作区，同时继续登记启动时的当前目录；两者指向同一目录时只保留一条记录。其他工作区仍可取消登记，不会删除目录或会话。
+
+Web 默认监听 `127.0.0.1:4317`，认证默认关闭。可在 `~/.omniagent/config.json` 中配置：
+
+```json
+{
+  "web": {
+    "host": "127.0.0.1",
+    "port": 4317,
+    "auth": { "enabled": false, "username": "", "password": "" }
+  }
+}
+```
+
+启用认证时，将 `web.auth.enabled` 设为 `true` 并填写非空账号和密码；浏览器支持登录、查看登录状态和退出。认证开启后，所有业务 API（包括 SSE）都需要有效的登录 cookie。账号和密码明文存放在配置中，建议将配置文件权限设为 `0600`（例如 `chmod 600 ~/.omniagent/config.json`），但同一系统用户的其他进程仍可能读取配置或访问敏感数据，认证不是同用户进程间的安全边界。Web 使用 HTTP，账号、cookie 和业务数据不受传输加密保护，只能用于可信网络。`web.host` 和 `web.port` 控制监听地址和端口，`OMNIAGENT_PORT` 覆盖配置的端口；修改 Web 配置后需重启服务。Host 和 Origin 的允许规则见 [Web API](docs/web-api.md)。
+
+会话使用 `read-only`、`workspace-write` 或 `danger-full-access` 权限预设，并将选择持久化在该会话中；缺少有效权限预设的会话须显式选择。普通 `workspace-write` 不逐次询问；只有请求扩大当前调用的沙盒范围时才进行一次性审批。`~/.omniagent/config.json` 中的全局默认值只作用于新会话。TUI 支持会话级智能体和模型切换；Web 的新会话在创建时选择模式，模式快照以 `mode/selected` 持久化，agent、tools 和 skills 由模式固定并拒绝切换，模型默认取模式配置且可在创建前选择或在创建后继续切换。智能体选择仍以 `agent/selected`、模型绑定仍以 v2 `model/selected` 事件持久化，这些事件都不含凭据。`.agents/skills` 中的 skill 会在会话系统提示里列出，模型通过 `skill` 工具按需加载完整说明；智能体 profile 可以进一步收窄可见工具和 skill。文件和 shell 限制不隔离网络，且不是完整 OS 安全边界。会话消息、实时 SSE、原始审计文件以及加载的 skill 文本都可能包含敏感内容。接口和数据边界见 [Web API](docs/web-api.md)，配置分层与智能体文件格式见 [智能体、角色与模型绑定](docs/agents.md)。
 
 The runtime is implemented without Cordis or the DSH plugin/profile system. See [docs/architecture.md](docs/architecture.md) and [NOTICE](NOTICE) for current boundaries and DSH attribution.
 
@@ -136,7 +152,7 @@ profile: search-only
 
 模型绑定 `kind: "agent"` 跟随当前智能体的角色；`kind: "role"` 使用指定角色；`kind: "model"` 直接指定模型。最终 effort 顺序是 binding 显式值 → role 值 → 模型默认值。v1 的 `model/selected` 事件视为 invalid，不迁移、不猜测；缺少 agent 或模型选择的旧会话需要显式重新选择后才能运行。
 
-配置和智能体文件在新回合开始前重新读取，内容变化通过内容哈希 revision 生效；运行中的回合保留旧快照。无效 JSON、schema 错误、未知 role/profile、未知模型、不支持的 effort、图片能力不足都会明确失败，不回退到旧配置或默认模型，也不会删除既有会话。
+配置和智能体文件在新回合开始前重新读取，内容变化通过内容哈希 revision 生效；运行中的回合保留旧快照。Web 监听和认证配置例外，修改后须重启 Web 服务。无效 JSON、schema 错误、未知 role/profile、未知模型、不支持的 effort、图片能力不足都会明确失败，不回退到旧配置或默认模型，也不会删除既有会话。
 
 Provider 连接：
 
@@ -145,11 +161,11 @@ Provider 连接：
 - 旧的 OpenAI-compatible `provider` object 仍走原有 Chat Completions endpoint 和 credential 配置，不会把 endpoint 或 key 自动迁移到其他 route。
 - 不设置可用 provider 时，应用使用 FakeModel 演示流程。
 
-Web 的全局默认权限存于 `dsh.permission.defaultPreset`，只用于真正的新会话。值为 `read-only`、`workspace-write` 或 `danger-full-access`。如果配置仅有旧 `mode`/`permissions` 且没有新默认值，用户必须显式选定，不会推断或扩大权限。
+Web 的全局默认权限存于 `dsh.permission.defaultPreset`，只用于真正的新会话。值为 `read-only`、`workspace-write` 或 `danger-full-access`；无法确定有效默认值时必须显式选定。
 
 `subagents.maxDepth` 从根会话的深度 0 开始计数，默认 1；`subagents.maxActive` 限制同一运行时的活动子代理数量，默认 8。子代理继承创建者的权限预设、工作区/受限 cwd，并使用目标智能体的角色解析模型；显式指定的模型也必须存在于当前模型目录。
 
-plan 模式只改变模型指导与 `exit_plan_mode` 的可见性，不是权限或沙盒机制；它不会自动禁止写文件，实际写入仍由当前权限预设和沙盒决定。旧版 `mode` 和 `permissions` schema 字段保留用于读取既有配置，但不会成为 Session 的 DSH 授权来源。
+plan 模式只改变模型指导与 `exit_plan_mode` 的可见性，不是权限或沙盒机制；它不会自动禁止写文件，实际写入仍由当前权限预设和沙盒决定。
 
 模型流式响应由 provider 适配层转换为统一 `ModelClient` 消息和文本增量；工具调用在循环中执行。DeepSeek Messages 与 pi-ai 会话回放元数据保留在内部历史中，不通过公共会话响应或导出接口返回。
 
@@ -159,7 +175,7 @@ plan 模式只改变模型指导与 `exit_plan_mode` 的可见性，不是权限
 
 一句话：**把「agent 遇到某个任务应该做什么」写成可重复运行、可断言的用例集。**
 
-改 prompt、换模型、调权限规则之后，靠肉眼看几条对话判断「有没有变差」是不可靠的。eval harness 提供三样东西：
+改 prompt、换模型、调整权限预设之后，靠肉眼看几条对话判断「有没有变差」是不可靠的。eval harness 提供三样东西：
 
 1. **隔离环境**：每个 case 一个临时工作区，fixture 现场铺，跑完清理。
 2. **可控模型**：可以塞 `FakeModel` 剧本（稳定、零 token，测循环和权限），也可以接真实 provider（测模型能力）。
@@ -189,14 +205,14 @@ pnpm eval -- --keep    # 失败时保留临时工作区，方便看现场
 }
 ```
 
-`permissionPreset` 是 eval 的唯一授权来源。旧 `mode`/`permissions` 字段可以作为兼容输入保留，但不会给 Session 授权。`decisions: ['allow']` 只表示调用通过了 DSH 工具准入；只读写入仍会在真实文件围栏处返回失败结果。
+`permissionPreset` 是 eval 的唯一授权来源；未指定预设时工具调用会被拒绝。`decisions: ['allow']` 只表示调用通过了 DSH 工具准入；只读写入仍会在真实文件围栏处返回失败结果。
 
 ### 两种 eval，别混在一起
 
 - **能力 eval**：任务能不能完成。断言工具调用、文件内容、最终回答。真实模型有随机性，要跑多次看通过率。
-- **权限 eval**：某次工具调用该 allow / ask / deny。它本质是分类问题，最重要的是 **false allow**（该拒却放行），不是总体准确率。`auto` 权限模式必须先有这类标注用例，否则无从判断分类器准不准。
+- **权限 eval**：验证 DSH 预设、一次性审批和沙盒围栏在允许与拒绝场景中的实际行为，重点检查不应放行的操作。
 
-现在这套 harness 先覆盖能力和权限决策；专门评估分类器的混淆矩阵（precision / recall / false-allow）是下一步。设计细节见 [docs/spec/eval-harness.md](docs/spec/eval-harness.md)。
+现在这套 harness 覆盖能力和权限决策，也可以通过文件断言验证沙盒结果。设计细节见 [docs/spec/eval-harness.md](docs/spec/eval-harness.md)。
 
 ---
 
@@ -234,7 +250,7 @@ OmniAgent/
 | `protocol/` | core 与 UI 的契约：事件流、命令、权限决策 | DSH execution policy 由 Session 组合 |
 | `providers/` | DeepSeek Messages、pi-ai、legacy OpenAI 路由和剧本化假模型 | 模型目录提供 capabilities 与思考字段映射；凭据不进入目录 |
 | `loop/` | 主循环、停止条件、步数上限和上下文压缩 hook | DSH-shaped loop 已接入 |
-| `permissions/` | DSH preset、持久事件和一次性 escalation | 三种 preset；旧 mode/rules 不授权 |
+| `permissions/` | DSH preset、持久事件和一次性 escalation | 三种 preset |
 | `exec/` | 执行器：把异常统一转成 observation | 已接入真实工具执行 |
 | `tools/` | 工具契约、注册表、DSH 移植的 read/write/edit/glob/grep/web_fetch、`list_dir`、skill、`bash`、todo/plan/goal/subagent 工具 | 工具 allowlist 与 DSH 权限取交集 |
 | `subagents/` | 子会话启动、消息、整树 list、下一步输入 wait、interrupt、通知与模型/权限继承 | 目标 agent + role；depth/active 上限；懒恢复需有效选择 |
@@ -281,7 +297,7 @@ export type ToolCall = z.infer<typeof ToolCallSchema>;
 
 ### 2. 对外契约 → `protocol/`
 
-事件流（`AgentEvent`）、发回 core 的指令（`AgentCommand`）、权限决策形状（`Rule`、`PermissionRequest`）。
+事件流（`AgentEvent`）、发回 core 的指令（`AgentCommand`）、权限审批请求（`PermissionRequest`）。
 
 判断标准很简单：**换一个 UI 还要用它的，就是协议。** 现在 TUI 消费它，以后 web 和 Electron 也消费同一套。
 
@@ -300,13 +316,13 @@ export type AgentEvent =
 
 ### 3. 模块内部接口 → 就放在那个模块里
 
-`ModelClient` 在 `providers/types.ts`，`Tool` 在 `domain/tool.ts`，`PermissionGate` 在 `protocol/permission.ts`。
+`ModelClient` 在 `providers/types.ts`，`Tool` 在 `domain/tool.ts`，`DshPermissionPreset` 在 `permissions/dsh-permissions.ts`。
 
 不要为了「整齐」把它们集中到某个 `interfaces.ts`：那会让本来没有关系的两个模块产生假耦合——你改 `Tool` 的签名，却要去动一个装着 20 个无关接口的文件。
 
 ### 两条附带的规矩
 
-- **DSH 权限选择使用显式 preset。** `PERMISSION_MODES` 仅为旧源兼容保留，不能用来推断当前 Session 的授权。
+- **DSH 权限选择使用显式 preset。** 会话必须拥有有效预设才能授权工具调用。
 - **barrel 文件只放在包边界。** 只有 `src/index.ts` 用 `export ...` 汇总；模块之间直接相对引用，不要 `export *` 满天飞，否则循环依赖和打包体积都会失控。
 
 ---
@@ -325,6 +341,17 @@ export type AgentEvent =
 
 文件围栏会解析符号链接并拒绝硬链接目标，但仍有检查与系统调用之间的 TOCTOU 限制。Seatbelt、bubblewrap 和 Landlock 主要限制文件写入；它们不提供网络隔离、完整读取隔离或虚拟机边界。`danger-full-access` 绕过 DSH 文件沙盒，但不表示模型请求的额外审批会被自动批准。
 
+Linux 优先使用 `/usr/bin/bwrap`；没有可用的 bubblewrap 时，可由管理员从可信源码构建并安装 Landlock 启动器到 `/usr/local/libexec/omniagent/landlock-run` 或 `/usr/libexec/omniagent/landlock-run`。安装目录及其祖先必须受保护，不能让沙盒内进程或不可信用户替换启动器；不要将它安装在工作区或共享临时目录。Landlock 需要 Linux 内核 ABI 5 或更新，以及支持 seccomp 和 `openat2` 的系统。以下命令需要 C 编译器和管理员权限：
+
+```bash
+cc -std=c11 -O2 -Wall -Wextra -Werror packages/core/native/linux/landlock-run.c -o ./landlock-run
+sudo install -d -m 755 /usr/local/libexec/omniagent
+sudo install -o root -g root -m 755 ./landlock-run /usr/local/libexec/omniagent/landlock-run
+/usr/local/libexec/omniagent/landlock-run --probe
+```
+
+输出应为 `landlock: fully enforced`。若探测失败，错误会列出各后端的具体原因；不要改用 `danger-full-access` 来掩盖沙盒不可用。bubblewrap 通常提供私有可写 `/tmp`；若工作区或其他可写根位于 `/tmp` 内，则保留宿主 `/tmp` 的只读视图，仅指定根可写。Landlock 后备方案会在所有目录（包括工作区）拒绝显式修改权限、所有者、时间戳和扩展属性，以及 `io_uring`；文件系统特定 ioctl、已开放的 IPC 等不构成完整隔离。其 seccomp 过滤器支持原生 x86-64、i386、AArch64 和 RISC-V 64，其他或兼容 ABI 会被拒绝。嵌入式宿主还可以通过 `SessionOptions.dshSandbox.landlockLauncher` 指定受信任的绝对路径。Windows 原生受限 shell 和工作区文件围栏尚不可用，仍然 fail closed；使用 WSL2 时可以配置 Linux 后端。可通过 `OMNI_TEST_LANDLOCK=1 python3 packages/core/native/linux/test_landlock.py` 和 `OMNI_TEST_LANDLOCK=1 pnpm exec vitest run packages/core/src/tools/builtin/dsh-shell.test.ts` 运行原生验证。
+
 ---
 
 ## 验收进度
@@ -341,11 +368,11 @@ export type AgentEvent =
 - `read-only`/`workspace-write` 的 Seatbelt、bubblewrap 和 Landlock 执行器限制文件写入；它们不隔离网络、不限制所有读取，也不是虚拟机。没有可用受限后端时，shell 执行 fail closed。Windows 等未支持平台不会伪装成已隔离。
 - 同一会话的 append 通过 `<session>.lock` 协调多个 OmniAgent 进程，并在 rename 前 fsync 文件和目录；锁只约束协作写入者，非协作的外部进程修改仍会在元数据校验时被拒绝。工作区 registry 仍只保证单进程写入。
 - Web 审计日志保存在 `~/.omniagent/web-audit/`；Observe API 每个会话最多返回最近 1,000 条记录，并只读取文件尾部 2 MiB。旧版或 TUI 写在工作区内的 `.omniagent/audit.jsonl` 不会被自动读取或迁移。TUI 新建审计目录/文件使用 `0700/0600`，但不会修改既有路径的权限；指向符号链接或非普通文件的审计路径会被拒绝。
-- Web loopback 不做本地用户认证；活动 turn 或 session 创建期间，权限/default/模型修改和新建 session 返回 `409`，这只是防止运行中权限竞态，不是身份认证。实时 SSE 和原始会话/审计记录可能包含工具参数、结果或其他敏感内容，不能当作脱敏导出格式。
+- Web 认证默认关闭；启用后也不能隔离同一系统用户的其他进程。活动 turn 或 session 创建期间，权限/default/模型修改和新建 session 返回 `409`，这只是防止运行中权限竞态。实时 SSE 和原始会话/审计记录可能包含工具参数、结果或其他敏感内容，不能当作脱敏导出格式。
 - 上下文窗口优先取 `contextWindowTokens` 配置，否则取会话所选模型目录中的上下文长度；两者都不可用时不做自动压缩。`read_file` 默认和单次最多返回 2,000 行，单行最多 2,000 字符、选中内容最多 50 KiB，达到 10 MiB 的文件走流式读取；`glob` 最多展示 100 个路径，`grep` 最多 250 条匹配、单行预览 2,000 字节，`web_fetch` 响应体最多 5 MB、正文 100,000 字符、完整输出 200,000 字符。工具输出仍会截断，不存在可回读的完整输出引用。
 - 智能体 profile 和 skill allowlist 只是减少暴露面，不是安全隔离。被允许的工具仍受 DSH 权限预设和沙盒约束，被加载的 skill 文本也属于模型上下文，不能视为可信指令。
 - `capabilities.imageInput` 是当前唯一的模型能力标记。模型不支持图片时，包含图片历史的回合会在请求前失败，不会静默丢弃图片。
-- 配置和智能体文件按内容哈希热加载；运行中的回合使用旧快照，变化从下一回合生效。无效配置或 agent 文件会 fail closed，不回退到旧配置、其他模型或其他智能体，也不会删除既有会话。
+- 运行时配置和智能体文件按内容哈希热加载；运行中的回合使用旧快照，变化从下一回合生效。Web 监听和认证配置需重启 Web 服务。无效配置或 agent 文件会 fail closed，不回退到旧配置、其他模型或其他智能体，也不会删除既有会话。
 - v1 `model/selected` 和缺少 agent 选择的旧会话需要显式重新选择。这是有意的不兼容：不会猜测旧模型的 reasoning effort，也不会把旧会话自动绑定到当前默认 agent。
 - 子代理懒恢复要求会话中存在有效的 `agent/selected` 和 v2 模型绑定；缺失或 invalid 时拒绝恢复，不回退到父模型或默认模型。活动中的子代理保留创建时快照。
 - Web 的一次性审批不是权限预设本身：`workspace-write` 普通文件写入不弹窗，只有显式更宽的 `sandbox_permissions` 请求才进入审批；断线、中断、超时或异常时待处理请求默认拒绝。

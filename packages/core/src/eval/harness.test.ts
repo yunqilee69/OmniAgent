@@ -80,28 +80,6 @@ describe('eval harness', () => {
     expect(result.passed).toBe(true);
   });
 
-  it('does not translate legacy permission fields into DSH permission grants', async () => {
-    const legacyPermissionFields = {
-      mode: 'acceptEdits' as const,
-      permissions: { allow: ['write_file'] },
-    };
-    const result = await runEvalCase({
-      name: 'legacy-rules-do-not-authorize',
-      permissionPreset: 'read-only',
-      steps: [
-        toolCallResponse([{ name: 'write_file', args: { file_path: 'out.txt', content: 'hello' } }]),
-        textResponse('拒绝了。'),
-      ],
-      ...legacyPermissionFields,
-      expect: { decisions: ['allow'], absentFiles: ['out.txt'] },
-    });
-
-    expect(result.failures).toEqual([]);
-    expect(result.events.filter((event) => event.type === 'tool.result').map((event) =>
-      event.type === 'tool.result' ? event.result.ok : undefined,
-    )).toEqual([false]);
-  });
-
   it('suite 汇总通过数', async () => {
     const suite = await runEvalSuite([
       { name: 'pass', steps: [textResponse('ok')], expect: {} },

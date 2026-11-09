@@ -40,6 +40,7 @@ export interface ResolvedSessionRuntime {
   todoAllowParallelInProgress: boolean;
   system: string;
   contextWindowTokens?: number;
+  contextWindowSource?: 'config' | 'model';
   warnings: string[];
   revision: string;
 }
@@ -189,7 +190,10 @@ export class RuntimeResolver {
       capabilities: resolvedModel.model?.capabilities ?? { imageInput: false },
       todoAllowParallelInProgress,
       system,
-      ...(contextWindowTokens === undefined ? {} : { contextWindowTokens }),
+      ...(contextWindowTokens === undefined ? {} : {
+        contextWindowTokens,
+        contextWindowSource: configSnapshot.config.contextWindowTokens === undefined ? 'model' as const : 'config' as const,
+      }),
       warnings,
       revision,
     };

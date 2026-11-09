@@ -44,7 +44,7 @@ export function isDshPermissionPreset(value: unknown): value is DshPermissionPre
   return typeof value === 'string' && (DSH_PERMISSION_PRESETS as readonly string[]).includes(value);
 }
 
-/** Pass undefined only when no existing legacy permission configuration is present. */
+/** An absent setting uses the default; invalid values require an explicit selection. */
 export function resolveDshDefaultPreset(value: unknown): DshPermissionSettings {
   if (value === undefined) return { defaultPreset: DSH_DEFAULT_PRESET, requiresSelection: false };
   return isDshPermissionPreset(value)

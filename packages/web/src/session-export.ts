@@ -21,7 +21,7 @@ export type SessionTranscriptEntry =
  * bytes are replaced by `{ type: 'image', omitted: true }`. Unknown tool IDs,
  * statuses, output, and truncation flags are `null`; a missing name is
  * `'unknown'`. `contentOmitted: 'permission'` means denial output was withheld
- * because it can contain the permission rule, not that output was unrecorded.
+ * because permission denial details may be sensitive, not because output was unrecorded.
  *
  * Only allowlisted conversation fields are included. System/injected context,
  * metadata, tool arguments, internal output references, trace and audit records
@@ -127,10 +127,7 @@ function transcriptEntries(events: readonly SessionEvent[]): SessionTranscriptEn
       if (!result) continue;
       const callId = typeof result.callId === 'string' ? result.callId : null;
       const decision = callId === null ? undefined : decisions.get(callId)?.shift();
-      // Older logs may lack the permission trace but retain core's denial message.
-      const legacyDenial = result.ok !== true && typeof result.content === 'string'
-        && result.content.startsWith('调用被权限策略拒绝（');
-      const withheld = decision === 'deny' || legacyDenial;
+      const withheld = decision === 'deny';
       entries.push({
         type: 'tool_result',
         callId,

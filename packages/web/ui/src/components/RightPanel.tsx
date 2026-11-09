@@ -3,6 +3,7 @@ import clsx from 'clsx';
 import {
   GuideArtworkFiles,
   IconChevronLeftOutlineRegular,
+  IconClockOutlineRegular,
   IconCompareSplitOutlineRegular,
   IconDatabaseOutlineRegular,
   IconDownloadOutlineRegular,
@@ -18,12 +19,14 @@ import {
   Tooltip,
   type MenuEntry,
 } from '../../vendor/primitives/index.ts';
+import { authFetch } from '../lib/auth.ts';
 import { store, useApp } from '../lib/store.ts';
 import { translator, type Translate } from '../lib/i18n.ts';
 import { workspaceApiPath, type WorkspaceFileEntry } from '../lib/wire.ts';
+import { TrajectoryView } from './TrajectoryView.tsx';
 import css from '../styles/dsh/right-panel.module.css';
 
-type RightView = 'guide' | 'files' | 'terminal';
+export type RightView = 'guide' | 'files' | 'terminal' | 'observe';
 
 function CompassGlyph({ size = 16, className }: { size?: number; className?: string }): ReactNode {
   return (
@@ -49,6 +52,7 @@ function MoreToolsGlyph(): ReactNode {
 function viewTitle(view: RightView, t: Translate): string {
   if (view === 'files') return t('Workspace files');
   if (view === 'terminal') return t('Terminal');
+  if (view === 'observe') return t('Observe');
   return t('Start');
 }
 
@@ -73,14 +77,15 @@ function EntryCard({ icon, title, description, onClick }: EntryCardProps): React
   );
 }
 
-export function RightPanel({ fullscreen, onClose, onToggleFullscreen }: {
+export function RightPanel({ fullscreen, view, onViewChange: setView, onClose, onToggleFullscreen }: {
   fullscreen: boolean;
+  view: RightView;
+  onViewChange: (view: RightView) => void;
   onClose: () => void;
   onToggleFullscreen: () => void;
 }): ReactNode {
   const app = useApp();
   const t = useMemo(() => translator(app.locale), [app.locale]);
-  const [view, setView] = useState<RightView>('guide');
   const [directory, setDirectory] = useState('');
   const [search, setSearch] = useState('');
   const [files, setFiles] = useState<WorkspaceFileEntry[]>([]);
@@ -91,7 +96,6 @@ export function RightPanel({ fullscreen, onClose, onToggleFullscreen }: {
   const moreAnchor = useRef<HTMLButtonElement | null>(null);
 
   useEffect(() => {
-    setView('guide');
     setDirectory('');
     setSearch('');
     setCopied('');
@@ -105,7 +109,7 @@ export function RightPanel({ fullscreen, onClose, onToggleFullscreen }: {
       setFilesError('');
       const query = `${directory}${search}`;
       const params = new URLSearchParams({ query, limit: '50' });
-      void fetch(workspaceApiPath(app.workspaceId!, `files?${params.toString()}`), { signal: controller.signal })
+      void authFetch(workspaceApiPath(app.workspaceId!, `files?${params.toString()}`), { signal: controller.signal })
         .then(async (response) => {
           if (!response.ok) throw new Error(t('Request failed ({status}).', { status: response.status }));
           return await response.json() as { entries?: unknown };
@@ -155,7 +159,7 @@ export function RightPanel({ fullscreen, onClose, onToggleFullscreen }: {
   const crumb = directory === '' ? t('Workspace') : directory.replace(/\/$/, '');
 
   return (
-    <aside className={clsx(css.root, fullscreen && css.fullscreen)} aria-label={t('Start')} data-right-panel="">
+    <aside id="right-panel" className={clsx(css.root, fullscreen && css.fullscreen)} aria-label={viewTitle(view, t)} data-right-panel="">
       <div className={css.tabStrip}>
         <div className={css.stripTabs}>
           <button type="button" className={css.tab} onClick={() => { setView('guide'); }}>
@@ -185,6 +189,11 @@ export function RightPanel({ fullscreen, onClose, onToggleFullscreen }: {
       {view === 'guide' && (
         <div className={css.guide}>
           <span className={css.guideHero} aria-hidden="true"><CompassGlyph size={56} /></span>
+          <EntryCard
+            icon={<IconClockOutlineRegular size={26} />}
+            title={t('Observe')}
+            onClick={() => { setView('observe'); }}
+          />
           <EntryCard
             icon={<GuideArtworkFiles size={26} />}
             title={t('Workspace files')}
@@ -229,6 +238,8 @@ export function RightPanel({ fullscreen, onClose, onToggleFullscreen }: {
           </div>
         </div>
       )}
+
+      {view === 'observe' && <TrajectoryView />}
 
       {view === 'files' && (
         <div className={css.files}>

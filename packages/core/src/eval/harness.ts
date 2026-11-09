@@ -6,7 +6,6 @@ import { assistantText } from '../domain/message';
 import type { AgentEvent, StopReason } from '../protocol/events';
 import type {
   ApprovalResponse,
-  PermissionMode,
   PermissionRequest,
 } from '../protocol/permission';
 import {
@@ -35,12 +34,6 @@ import { resolveInside } from '../tools/paths';
 
 export type FileExpectation = string | RegExp | ((content: string) => boolean);
 
-export interface EvalPermissions {
-  allow?: string[];
-  ask?: string[];
-  deny?: string[];
-}
-
 export interface EvalExpectations {
   /** 最后一次 turn 的结束原因。 */
   stopReason?: StopReason;
@@ -66,10 +59,6 @@ export interface EvalCase {
   steps?: FakeStep[];
   /** The only permission source used by the eval runtime. */
   permissionPreset?: DshPermissionPreset;
-  /** Legacy fields remain type-compatible but never authorize execution. */
-  mode?: PermissionMode;
-  /** Legacy rule fields are recorded only as compatibility input. */
-  permissions?: EvalPermissions;
   /** 权限确认的默认回答。不填时一律 allow。 */
   approve?: (request: PermissionRequest) => ApprovalResponse | Promise<ApprovalResponse>;
   expect: EvalExpectations;

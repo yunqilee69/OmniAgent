@@ -1,7 +1,7 @@
 import { createElement } from 'react';
 import { createRoot } from 'react-dom/client';
 import { ICON_SYMBOLS, type IconSymbolId } from '../vendor/primitives/icons/artwork.ts';
-import { App } from './app.tsx';
+import { AuthGate } from './components/AuthGate.tsx';
 import './styles/global.css';
 
 const SVG_NS = 'http://www.w3.org/2000/svg';
@@ -45,4 +45,4 @@ try {
   document.documentElement.lang = 'zh-CN';
 }
 mountIconSprite();
-createRoot(document.getElementById('root')!).render(createElement(App));
+createRoot(document.getElementById('root')!).render(createElement(AuthGate));

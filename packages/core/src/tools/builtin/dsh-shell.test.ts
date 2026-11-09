@@ -1,3 +1,5 @@
+import { execFileSync, spawnSync } from 'node:child_process';
+import { fileURLToPath } from 'node:url';
 import { link, mkdir, mkdtemp, readFile, realpath, rm, stat, writeFile } from 'node:fs/promises';
 import { homedir, tmpdir } from 'node:os';
 import { join } from 'node:path';
@@ -109,6 +111,41 @@ describe('DSH shell execution', () => {
     )).rejects.toThrow(/escalation/i);
     expect((await tool.execute({ command: 'printf tool-ok' }, { cwd: workdir, signal: new AbortController().signal })).content)
       .toContain('tool-ok');
+  });
+
+  it.runIf(process.platform === 'linux' && process.env.OMNI_TEST_LANDLOCK === '1')('enforces the native Landlock fallback through the shell', async () => {
+    const launcher = join(workdir, 'landlock-run');
+    const source = fileURLToPath(new URL('../../../native/linux/landlock-run.c', import.meta.url));
+    execFileSync('cc', ['-std=c11', '-O2', '-Wall', '-Wextra', '-Werror', source, '-o', launcher]);
+    const sandbox = {
+      platform: 'linux', landlockLauncher: launcher,
+      runProbe: (argv: readonly string[], timeoutMs: number) => {
+        if (argv[0] === '/usr/bin/bwrap') return { status: 1, stdout: '' };
+        const result = spawnSync(argv[0]!, argv.slice(1), { encoding: 'utf8', timeout: timeoutMs });
+        return { status: result.status, stdout: result.stdout ?? '', stderr: result.stderr ?? '' };
+      },
+    };
+    const capability = probeDshSandbox(sandbox);
+    if (capability.selected !== 'landlock') {
+      throw new Error(`Landlock native test requires a usable backend: ${JSON.stringify(capability.attempts)}`);
+    }
+    const workspace = join(workdir, 'workspace');
+    const outsideRoot = await realpath(await mkdtemp(join(homedir(), '.omni-dsh-landlock-')));
+    const outside = join(outsideRoot, 'denied');
+    await mkdir(workspace);
+    try {
+      const result = await executeDshShell({
+        command: 'printf allowed > "$1"; if printf denied > "$2"; then exit 1; fi',
+        cwd: workspace, policy: { mode: 'workspace-write', workspaceRoot: workspace }, sandbox,
+        shellArgs: ['--', join(workspace, 'allowed'), outside],
+      });
+      expect(result.backend).toBe('landlock');
+      expect(result.exitCode, result.stderr).toBe(0);
+      expect(await readFile(join(workspace, 'allowed'), 'utf8')).toBe('allowed');
+      await expect(stat(outside)).rejects.toMatchObject({ code: 'ENOENT' });
+    } finally {
+      await rm(outsideRoot, { recursive: true, force: true });
+    }
   });
 
   it('allows workspace writes and denies sibling writes outside temporary grants', async (context) => {

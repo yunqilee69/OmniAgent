@@ -190,8 +190,8 @@ describe('DSH permissions through Session and AgentLoop', () => {
     expect(model.requests[1]?.messages.at(-1)).toMatchObject({ role: 'tool', results: [{ callId: 'rejected', ok: false }] });
   });
 
-  it.each(['bypass', 'default', 'acceptEdits', 'dontAsk', 'plan', 'not-a-preset'])(
-    'fails closed for unknown or legacy DSH permission %s',
+  it.each(['not-a-preset'])(
+    'fails closed for unknown DSH permission %s',
     async (selection) => {
       const target = join(workspace, 'invalid-preset.txt');
       const approve = vi.fn(async () => 'allow' as const);

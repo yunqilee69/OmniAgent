@@ -2,8 +2,6 @@
  * @omniagent/core 的公共出口。
  *
  * 只导出「边界上的东西」：类型契约 + 组合根 + 几个需要被外部构造的实现。
- * 内部模块（rules / bash / evaluate 的具体函数）也导出，是因为这个阶段
- * 你就是要拿它们写测试；等 API 稳定后再收紧。
  */
 
 // 领域数据
@@ -39,21 +37,13 @@ export type {
   AgentEventHandler,
   StopReason,
 } from './protocol/events';
-export {
-  DECISIONS,
-  PERMISSION_MODES,
-  RULE_SOURCES,
-} from './protocol/permission';
+export { DECISIONS } from './protocol/permission';
 export type {
   ApprovalHandler,
   ApprovalResponse,
   Decision,
   PermissionGate,
-  PermissionMode,
   PermissionRequest,
-  Rule,
-  RuleBasedResult,
-  RuleSource,
 } from './protocol/permission';
 
 // 模型
@@ -149,31 +139,6 @@ export type {
   McpTransport,
   ParsedMcpServers,
 } from './mcp';
-
-// 权限
-export { decide } from './permissions/evaluate';
-export type { DecideInput } from './permissions/evaluate';
-export { RuleBasedGate } from './permissions/gate';
-export {
-  globToRegExp,
-  matchesCall,
-  matchesToolName,
-  parseRule,
-  parseRuleSet,
-  resolveRulePath,
-} from './permissions/rules';
-export {
-  matchesAllSubcommands,
-  matchesAnySubcommand,
-  matchesBashRule,
-  splitCommand,
-  stripLeadingWrappers,
-} from './permissions/bash';
-export {
-  PROTECTED_PATH_SEGMENTS,
-  isEditTool,
-  touchesProtectedPath,
-} from './permissions/modes';
 
 // 循环
 export { AgentLoop, DEFAULT_MAX_STEPS } from './loop/agent-loop';
@@ -317,6 +282,7 @@ export type {
 
 // Context
 export { compactMessages, estimateMessageTokens, estimateMessages } from './context/compaction';
+export { estimateModelHistory } from './session';
 export type { CompactionOptions, CompactionResult } from './context/compaction';
 
 // Sandbox and skills
@@ -435,7 +401,6 @@ export { formatEvalResults, runEvalCase, runEvalSuite } from './eval/harness';
 export type {
   EvalCase,
   EvalExpectations,
-  EvalPermissions,
   EvalResult,
   EvalRunOptions,
   EvalSuiteResult,

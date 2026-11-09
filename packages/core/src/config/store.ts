@@ -2,6 +2,7 @@ import { createHash } from 'node:crypto';
 import { constants } from 'node:fs';
 import { open } from 'node:fs/promises';
 import { dirname } from 'node:path';
+import { ZodError } from 'zod';
 import { ConfigSchema, defaultConfigPath } from './load';
 import type { Config } from './load';
 import { buildConfigCatalog } from './models';
@@ -91,10 +92,17 @@ export class ConfigStore {
       this.raw = raw;
       return this.current;
     } catch (error) {
-      throw new ConfigError(
-        error instanceof Error ? `Invalid config.json: ${error.message}` : 'Invalid config.json',
-        error,
-      );
+      if (error instanceof ZodError) {
+        const allowedFields = new Set(['web', 'host', 'port', 'auth', 'enabled', 'username', 'password', 'model', 'provider',
+          'providers', 'roles', 'agentProfiles', 'mcpServers', 'reasoningEffort', 'maxTokens', 'contextWindowTokens',
+          'retainContextTokens', 'dsh', 'maxSteps', 'subagents', 'maxDepth', 'maxActive', 'todo', 'allowParallelInProgress', 'system']);
+        const issues = error.issues.map((issue) => {
+          const path = issue.path.map((part) => typeof part === 'string' && allowedFields.has(part) ? part : '*').join('.');
+          return `${path || '<root>'}: ${issue.code}`;
+        });
+        throw new ConfigError(`Invalid config.json: ${issues.join('; ')}`);
+      }
+      throw new ConfigError('Invalid config.json: invalid JSON');
     }
   }
 }

@@ -122,7 +122,322 @@ afterEach(() => {
   vi.unstubAllGlobals();
 });
 
+describe('workspace session isolation', () => {
+  it('loads concurrent workspace lists independently and never drafts for a background empty list', async () => {
+    let resolveA!: (response: Response) => void;
+    let resolveB!: (response: Response) => void;
+    const a = new Promise<Response>((resolve) => { resolveA = resolve; });
+    const b = new Promise<Response>((resolve) => { resolveB = resolve; });
+    vi.stubGlobal('fetch', sessionFetcher((url) => {
+      if (url === '/api/workspaces') return json({ workspaces: [{ id: 'a', name: 'Alpha', path: '/a' }, { id: 'b', name: 'Beta', path: '/b' }] });
+      if (url === '/api/workspaces/a/sessions') return a;
+      if (url === '/api/workspaces/b/sessions') return b;
+      if (url === '/api/workspaces/a/sessions/shared') return json(detail());
+      return undefined;
+    }));
+    const store = new AppStore();
+    const booting = store.bootstrap();
+    await waitFor(() => store.getSnapshot().sessionsLoading);
+    const background = store.loadSessions('b', false);
+    resolveB(json({ sessions: [] }));
+    await background;
+    expect(store.getSnapshot().workspaceId).toBe('a');
+    expect(store.getSnapshot().sessionId).toBeNull();
+    expect(store.getSnapshot().sessionsByWorkspace.b).toMatchObject({ loaded: true, sessions: [] });
+    expect(Object.values(store.getSnapshot().entries).some((entry) => entry.draft)).toBe(false);
+    resolveA(json({ sessions: [{ id: 'shared' }] }));
+    await booting;
+    expect(store.getSnapshot().sessionId).toBe('shared');
+    expect(store.getSnapshot().sessionsByWorkspace.a?.sessions.map((session) => session.id)).toEqual(['shared']);
+  });
+
+  it('reloads the full list when a mutation finishes during its first load', async () => {
+    let resolveOld!: (response: Response) => void;
+    const oldList = new Promise<Response>((resolve) => { resolveOld = resolve; });
+    let listCalls = 0;
+    const store = await boot(sessionFetcher((url, init) => {
+      if (url === '/api/workspaces') return json({ workspaces: [{ id: 'a', name: 'Alpha', path: '/a' }, { id: 'b', name: 'Beta', path: '/b' }] });
+      if (url === '/api/workspaces/a/sessions/shared') return json(detail());
+      if (url === '/api/workspaces/b/sessions/shared' && init?.method === 'PATCH') return json({ title: 'Renamed' });
+      if (url === '/api/workspaces/b/sessions') {
+        listCalls += 1;
+        return listCalls === 1 ? oldList : json({ sessions: [{ id: 'shared', title: 'Renamed' }, { id: 'other' }] });
+      }
+      return undefined;
+    }));
+    const pending = store.loadSessions('b', false);
+    await store.renameSession('shared', 'Renamed', 'b');
+    await waitFor(() => store.getSnapshot().sessionsByWorkspace.b?.loaded === true);
+    resolveOld(json({ sessions: [{ id: 'shared', title: 'Old' }] }));
+    await pending;
+    expect(store.getSnapshot().sessionsByWorkspace.b?.sessions).toEqual([{ id: 'shared', title: 'Renamed' }, { id: 'other' }]);
+    expect(listCalls).toBe(2);
+  });
+
+  it('keeps newer list results and workspace-scoped mutations despite delayed responses', async () => {
+    let resolveOld!: (response: Response) => void;
+    let resolveRename!: (response: Response) => void;
+    let deferList = false;
+    let deferredOnce = false;
+    const calls: string[] = [];
+    const oldList = new Promise<Response>((resolve) => { resolveOld = resolve; });
+    const rename = new Promise<Response>((resolve) => { resolveRename = resolve; });
+    const store = await boot(sessionFetcher((url, init) => {
+      const method = init?.method ?? 'GET';
+      calls.push(`${method} ${url}`);
+      if (url === '/api/workspaces') return json({ workspaces: [{ id: 'a', name: 'Alpha', path: '/a' }, { id: 'b', name: 'Beta', path: '/b' }] });
+      if (url === '/api/workspaces/a/sessions/shared') return json(detail());
+      if (url === '/api/workspaces/b/sessions/shared' && method === 'PATCH') return rename;
+      if (url === '/api/workspaces/b/sessions/shared' && method === 'DELETE') return json({ deleted: true });
+      if (url === '/api/workspaces/b/sessions/shared/pin') return json({ pinned: true });
+      if (url === '/api/workspaces/b/sessions/shared') return json(detail({ text: 'Beta' }));
+      if (url === '/api/workspaces/b/sessions') {
+        if (deferList && !deferredOnce) { deferredOnce = true; return oldList; }
+        return json({ sessions: [{ id: 'shared', title: deferList ? 'Renamed' : 'Beta' }, { id: 'next' }] });
+      }
+      return undefined;
+    }));
+    await store.loadSessions('b', false);
+    deferList = true;
+    const stale = store.loadSessions('b', false);
+    const pendingRename = store.renameSession('shared', 'Renamed', 'b');
+    store.selectSession('shared', 'b');
+    store.selectSession('shared', 'a');
+    resolveRename(json({ title: 'Renamed' }));
+    await pendingRename;
+    await waitFor(() => !store.getSnapshot().sessionsByWorkspace.b?.loading);
+    resolveOld(json({ sessions: [{ id: 'shared', title: 'Stale' }] }));
+    await stale;
+    expect(store.getSnapshot().sessionsByWorkspace.b?.sessions[0]?.title).toBe('Renamed');
+    expect(store.getSnapshot().sessions[0]?.title).not.toBe('Renamed');
+    await store.setSessionPinned('shared', true, 'b');
+    expect(store.getSnapshot().sessionsByWorkspace.b?.sessions[0]?.pinned).toBe(true);
+    expect(store.getSnapshot().sessions[0]?.pinned).not.toBe(true);
+    await store.deleteSession('shared', 'b');
+    expect(store.getSnapshot().workspaceId).toBe('a');
+    expect(store.getSnapshot().sessionId).toBe('shared');
+    expect(store.getSnapshot().sessionsByWorkspace.b?.sessions.map((session) => session.id)).toEqual(['next']);
+    expect(calls).toContain('PATCH /api/workspaces/b/sessions/shared');
+    expect(calls).toContain('DELETE /api/workspaces/b/sessions/shared');
+  });
+});
+
 describe('workbench store', () => {
+  it('keeps the automatic draft when its first session creation fails', async () => {
+    let attempts = 0;
+    const store = await boot(sessionFetcher((url, init) => {
+      if (url === '/api/modes') return json({ modes: [standardMode], defaultMode: 'standard' });
+      if (url === '/api/workspaces/a/sessions' && init?.method === 'POST') {
+        attempts += 1;
+        return json({ error: 'creation failed' }, 500);
+      }
+      if (url === '/api/workspaces/a/sessions') return json({ sessions: [] });
+      return undefined;
+    }));
+    const draft = store.getSnapshot().sessionId;
+    await expect(store.sendMessage('Hello')).resolves.toBe(false);
+    expect(attempts).toBe(1);
+    expect(store.getSnapshot().sessionId).toBe(draft);
+    expect(store.currentEntry()).toMatchObject({ draft: true, loaded: true });
+    expect(store.getSnapshot().alert).not.toBe('');
+  });
+
+  it('does not replace a session selected while automatic creation awaits modes', async () => {
+    let resolveModes!: (response: Response) => void;
+    const modes = new Promise<Response>((resolve) => { resolveModes = resolve; });
+    vi.stubGlobal('fetch', sessionFetcher((url) => {
+      if (url === '/api/modes') return modes.then((response) => response.clone());
+      if (url === '/api/workspaces/a/sessions') return json({ sessions: [] });
+      if (url === '/api/workspaces/a/sessions/shared') return json(detail());
+      return undefined;
+    }));
+    const store = new AppStore();
+    const bootstrap = store.bootstrap();
+    await waitFor(() => store.getSnapshot().workspaceId === 'a' && !store.getSnapshot().sessionsLoading);
+    store.selectSession('shared');
+    resolveModes(json({ modes: [standardMode], defaultMode: 'standard' }));
+    await bootstrap;
+    expect(store.getSnapshot().sessionId).toBe('shared');
+    expect(Object.values(store.getSnapshot().entries).some((entry) => entry.draft)).toBe(false);
+  });
+
+  it('opens an empty workspace as a local draft and persists only on first send', async () => {
+    const posts: Array<{ url: string; body: unknown }> = [];
+    let controller!: ReadableStreamDefaultController<Uint8Array>;
+    const stream = new ReadableStream<Uint8Array>({ start(value) { controller = value; } });
+    const store = await boot(sessionFetcher((url, init) => {
+      if (url === '/api/modes') return json({ modes: [standardMode], defaultMode: 'standard' });
+      if (url === '/api/workspaces/a/sessions' && (init?.method ?? 'GET') === 'GET') return json({ sessions: [] });
+      if (init?.method === 'POST') {
+        posts.push({ url, body: JSON.parse(String(init.body)) });
+        if (url === '/api/workspaces/a/sessions') return json({ session: { id: 'fresh', updatedAt: 2 } }, 201);
+        if (url === '/api/workspaces/a/sessions/fresh/permission') return json({ permission: { preset: 'workspace-write' } });
+        if (url === '/api/workspaces/a/sessions/fresh/messages') return new Response(stream);
+      }
+      if (url === '/api/workspaces/a/sessions/fresh') return json(detail({ text: 'Hello' }));
+      return undefined;
+    }));
+
+    expect(store.getSnapshot().sessionId).toMatch(/^draft-/);
+    expect(store.getSnapshot().sessions).toEqual([]);
+    expect(store.currentEntry()).toMatchObject({ draft: true, loaded: true, permission: 'workspace-write', mode: { mode: 'standard' } });
+    expect(posts).toEqual([]);
+    await expect(store.sendMessage('Hello')).resolves.toBe(true);
+    expect(posts).toEqual([
+      { url: '/api/workspaces/a/sessions', body: { mode: 'standard' } },
+      { url: '/api/workspaces/a/sessions/fresh/permission', body: { preset: 'workspace-write' } },
+      { url: '/api/workspaces/a/sessions/fresh/messages', body: { text: 'Hello' } },
+    ]);
+    controller.enqueue(new TextEncoder().encode('data: {"type":"turn.end","reason":"end_turn"}\n\n'));
+    controller.close();
+    await waitFor(() => store.currentEntry()?.run === undefined);
+  });
+
+  it('restores the saved session when the workspace has existing sessions', async () => {
+    const values = new Map([['omniagent.activeSessions', JSON.stringify({ a: 'older' })]]);
+    vi.stubGlobal('localStorage', {
+      getItem: (key: string) => values.get(key) ?? null,
+      setItem: (key: string, value: string) => values.set(key, value),
+      removeItem: (key: string) => values.delete(key),
+    });
+    const store = await boot(sessionFetcher((url) => {
+      if (url === '/api/workspaces/a/sessions') return json({ sessions: [{ id: 'shared', updatedAt: 2 }, { id: 'older', updatedAt: 1 }] });
+      if (url === '/api/workspaces/a/sessions/older') return json(detail());
+      return undefined;
+    }));
+    expect(store.getSnapshot().sessionId).toBe('older');
+    expect(store.currentEntry()?.draft).toBe(false);
+  });
+
+  it.each([
+    ['request failure', json({ error: 'sessions unavailable' }, 500)],
+    ['invalid response', json({})],
+  ])('does not create a draft on session list %s and permits retry', async (_name, failedResponse) => {
+    let fail = true;
+    const store = new AppStore();
+    vi.stubGlobal('fetch', sessionFetcher((url, init) => {
+      if (url === '/api/modes') return json({ modes: [standardMode], defaultMode: 'standard' });
+      if (url === '/api/workspaces/a/sessions' && (init?.method ?? 'GET') === 'GET') return fail ? failedResponse : json({ sessions: [] });
+      return undefined;
+    }));
+    await store.bootstrap();
+    expect(store.getSnapshot().sessionId).toBeNull();
+    expect(store.getSnapshot().sessionError).not.toBe('');
+    fail = false;
+    await store.loadSessions('a', true);
+    expect(store.currentEntry()?.draft).toBe(true);
+  });
+
+  it('does not replace a session selected while the list is loading', async () => {
+    let resolveList!: (response: Response) => void;
+    const list = new Promise<Response>((resolve) => { resolveList = resolve; });
+    vi.stubGlobal('fetch', sessionFetcher((url) => {
+      if (url === '/api/workspaces/a/sessions') return list;
+      if (url === '/api/workspaces/a/sessions/shared') return json(detail());
+      return undefined;
+    }));
+    const store = new AppStore();
+    const bootstrap = store.bootstrap();
+    await waitFor(() => store.getSnapshot().sessionsLoading);
+    store.selectSession('shared');
+    resolveList(json({ sessions: [] }));
+    await bootstrap;
+    expect(store.getSnapshot().sessionId).toBe('shared');
+    expect(store.currentEntry()?.draft).toBe(false);
+  });
+
+  it('does not replace a manual draft while automatic creation awaits modes', async () => {
+    let resolveModes!: (response: Response) => void;
+    const modes = new Promise<Response>((resolve) => { resolveModes = resolve; });
+    vi.stubGlobal('fetch', sessionFetcher((url) => {
+      if (url === '/api/modes') return modes.then((response) => response.clone());
+      if (url === '/api/workspaces/a/sessions') return json({ sessions: [] });
+      return undefined;
+    }));
+    const store = new AppStore();
+    const bootstrap = store.bootstrap();
+    await waitFor(() => store.getSnapshot().workspaceId === 'a' && !store.getSnapshot().sessionsLoading);
+    const manual = store.startDraftSession();
+    resolveModes(json({ modes: [standardMode], defaultMode: 'standard' }));
+    await Promise.all([bootstrap, manual]);
+    expect(store.currentEntry()?.draft).toBe(true);
+    expect(Object.values(store.getSnapshot().entries).filter((entry) => entry.draft)).toHaveLength(1);
+  });
+
+  it('does not create a draft in a workspace left while modes are loading', async () => {
+    let resolveModes!: (response: Response) => void;
+    const modes = new Promise<Response>((resolve) => { resolveModes = resolve; });
+    vi.stubGlobal('fetch', sessionFetcher((url) => {
+      if (url === '/api/modes') return modes.then((response) => response.clone());
+      if (url === '/api/workspaces') return json({ workspaces: [{ id: 'a', name: 'Alpha', path: '/a' }, { id: 'b', name: 'Beta', path: '/b' }] });
+      if (url === '/api/workspaces/a/sessions') return json({ sessions: [] });
+      if (url === '/api/workspaces/b/sessions') return json({ sessions: [{ id: 'other', updatedAt: 1 }] });
+      if (url === '/api/workspaces/b/sessions/other') return json(detail());
+      return undefined;
+    }));
+    const store = new AppStore();
+    const bootstrap = store.bootstrap();
+    await waitFor(() => store.getSnapshot().workspaceId === 'a' && !store.getSnapshot().sessionsLoading);
+    await store.selectWorkspace('b');
+    resolveModes(json({ modes: [standardMode], defaultMode: 'standard' }));
+    await bootstrap;
+    expect(store.getSnapshot().workspaceId).toBe('b');
+    expect(store.getSnapshot().sessionId).toBe('other');
+    expect(Object.values(store.getSnapshot().entries).some((entry) => entry.draft)).toBe(false);
+  });
+
+  it('reports mode failure without creating a session and retries on a later list load', async () => {
+    let fail = true;
+    vi.stubGlobal('fetch', sessionFetcher((url) => {
+      if (url === '/api/modes') return fail ? json({ error: 'modes unavailable' }, 500) : json({ modes: [standardMode], defaultMode: 'standard' });
+      if (url === '/api/workspaces/a/sessions') return json({ sessions: [] });
+      return undefined;
+    }));
+    const store = new AppStore();
+    await store.bootstrap();
+    expect(store.getSnapshot().sessionId).toBeNull();
+    expect(store.getSnapshot().modesError).not.toBe('');
+    expect(store.getSnapshot().alert).not.toBe('');
+    fail = false;
+    await store.loadSessions('a', true);
+    expect(store.currentEntry()?.draft).toBe(true);
+  });
+
+  it('reports permission settings failure and retries without persisting a session', async () => {
+    let fail = true;
+    const posts: string[] = [];
+    vi.stubGlobal('fetch', sessionFetcher((url, init) => {
+      if (init?.method === 'POST') posts.push(url);
+      if (url === '/api/modes') return json({ modes: [standardMode], defaultMode: 'standard' });
+      if (url === '/api/settings/permissions') return fail
+        ? json({ error: 'permissions unavailable' }, 500)
+        : json({ settings: { defaultPreset: 'workspace-write', requiresSelection: false } });
+      if (url === '/api/workspaces/a/sessions') return json({ sessions: [] });
+      return undefined;
+    }));
+    const store = new AppStore();
+    await store.bootstrap();
+    expect(store.getSnapshot().sessionId).toBeNull();
+    expect(store.getSnapshot().permissionsError).not.toBe('');
+    expect(store.getSnapshot().alert).not.toBe('');
+    expect(posts).toEqual([]);
+    fail = false;
+    await store.loadSessions('a', true);
+    expect(store.currentEntry()).toMatchObject({ draft: true, permission: 'workspace-write' });
+    expect(posts).toEqual([]);
+  });
+
+  it('retains a draft when the user must explicitly select a permission', async () => {
+    const store = await boot(sessionFetcher((url) => {
+      if (url === '/api/modes') return json({ modes: [standardMode], defaultMode: 'standard' });
+      if (url === '/api/settings/permissions') return json({ settings: { defaultPreset: null, requiresSelection: true } });
+      if (url === '/api/workspaces/a/sessions') return json({ sessions: [] });
+      return undefined;
+    }));
+    expect(store.currentEntry()).toMatchObject({ draft: true, permission: null });
+    await expect(store.sendMessage('Blocked')).resolves.toBe(false);
+  });
+
   it('loads the configured model catalog and persists a session model switch', async () => {
     const binding = { version: 2, kind: 'model', provider: 'provider-a', model: 'model-2' };
     const switches: unknown[] = [];

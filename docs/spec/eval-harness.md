@@ -4,7 +4,7 @@
 
 ## 它解决什么问题
 
-改一句 system prompt、换一个模型、加一条权限规则，agent 的行为都可能变。靠手动聊几条来判断「有没有变差」有两个问题：
+改一句 system prompt、换一个模型、调整权限预设，agent 的行为都可能变。靠手动聊几条来判断「有没有变差」有两个问题：
 
 1. 不可重复：每次输入、环境、文件状态都不同。
 2. 不可比较：没有断言，就没有「通过率」这种东西。
@@ -17,7 +17,7 @@ eval harness 把行为写成用例：给定工作区和模型输出，agent 应�
 mkdtemp 建临时工作区
   -> 写入 fixture 文件
   -> 构造 FakeModel（或使用传入的真实 provider）
-  -> 构造 Session（mode + rules + approve 回调）
+  -> 构造 Session（DSH 权限预设 + approve 回调）
   -> 依次 send 输入，收集事件和消息
   -> 断言
   -> 删除工作区（--keep 时保留）
@@ -33,9 +33,8 @@ interface EvalCase {
   files?: Record<string, string>;     // 初始工作区
   input?: string | string[];          // 多轮对话
   steps?: FakeStep[];                 // 剧本化模型
-  mode?: PermissionMode;              // 默认 default
-  permissions?: { allow?: string[]; ask?: string[]; deny?: string[] };
-  approve?: (request) => 'allow' | 'deny';
+  permissionPreset?: DshPermissionPreset; // read-only / workspace-write / danger-full-access
+  approve?: (request) => 'allow' | 'deny'; // 可返回 Promise
   expect: EvalExpectations;
 }
 ```
@@ -64,22 +63,15 @@ const suite = await runEvalSuite(cases, { model });
 
 真实模型有随机性，单次通过不代表稳定。正确做法是同一个 case 跑 N 次，统计通过率，并在温度 0 的前提下比较不同 prompt / 模型。当前 v0 还没有做重复运行和统计聚合。
 
-## 权限 eval 与 auto 模式
+## 权限 eval
 
-`permissions/modes.ts` 里没做 `auto` 模式，原因就在这里：auto 需要一个分类器决定 allow / ask / deny，而分类器的质量只能用标注数据衡量。
+使用 `permissionPreset` 显式指定 `read-only`、`workspace-write` 或 `danger-full-access`；未指定时工具调用会被拒绝。`approve` 控制一次性沙盒范围扩大的审批回答，默认允许，不会改变会话预设。
 
-最低限度要有的指标：
-
-- **false allow**：应该拒绝却放行了。安全上最致命，优先级最高。
-- **false deny**：应该放行却拒绝了。影响体验，但不会造成破坏。
-- **ask 的覆盖率**：拿不准时是否愿意交给用户确认。
-
-这需要另一套更窄的 harness：输入是 `ToolCall` + 上下文，输出是 `Decision`，对照人工标注算混淆矩阵。现有的 agent-level harness 可以断言权限决策，但不能替代分类器评测。
+`decisions` 断言工具准入结果，不等于工具实际执行成功。例如 `read-only` 下写入调用可以通过准入，但会被文件围栏拒绝。应结合 `files` 或 `absentFiles` 验证最终结果，并覆盖越界写入和审批拒绝等场景。
 
 ## 现在没做的
 
 - 重复运行、通过率、置信区间。
 - 真实模型的成本 / 延迟统计。
 - LLM-as-judge（主观回答质量）。
-- 分类器专用混淆矩阵。
 - 并行执行与失败重试。

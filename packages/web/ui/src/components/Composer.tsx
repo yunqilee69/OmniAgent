@@ -52,6 +52,7 @@ import {
   type SendAttachment,
   type WorkspaceFileEntry,
 } from '../lib/wire.ts';
+import { authFetch } from '../lib/auth.ts';
 import { store, useApp, useSessionEntry, sessionKey } from '../lib/store.ts';
 import type { SessionEntry } from '../lib/store.ts';
 import {
@@ -66,6 +67,7 @@ import { relativeDate } from '../lib/trajectory.ts';
 import { translator, type Translate } from '../lib/i18n.ts';
 import { SelectMenu } from './SelectMenu.tsx';
 import { ModelPicker } from './ModelPicker.tsx';
+import { ContextMeter } from './ContextMeter.tsx';
 import { SessionStats } from './SessionStats.tsx';
 import { permissionIcon } from './permission-icon.tsx';
 import css from '../styles/dsh/input-bar.module.css';
@@ -293,7 +295,7 @@ export function Composer({ hero = false }: { hero?: boolean }): ReactNode {
       setFilesLoading(true);
       setFilesError('');
       const query = new URLSearchParams({ query: trigger.query, limit: '24' });
-      void fetch(workspaceApiPath(app.workspaceId!, `files?${query.toString()}`), { signal: controller.signal })
+      void authFetch(workspaceApiPath(app.workspaceId!, `files?${query.toString()}`), { signal: controller.signal })
         .then(async (response) => {
           if (!response.ok) throw new Error(t('Request failed ({status}).', { status: response.status }));
           return await response.json() as { entries?: unknown };
@@ -343,7 +345,7 @@ export function Composer({ hero = false }: { hero?: boolean }): ReactNode {
     setRecentError('');
     const timer = window.setTimeout(() => {
       const search = new URLSearchParams({ workspaceId, query, limit: '50' });
-      void fetch(`/api/sessions/recent?${search.toString()}`, { signal: controller.signal })
+      void authFetch(`/api/sessions/recent?${search.toString()}`, { signal: controller.signal })
         .then(async (response) => {
           if (!response.ok) throw new Error(t('Request failed ({status}).', { status: response.status }));
           return await response.json() as { sessions?: unknown };
@@ -957,6 +959,10 @@ export function Composer({ hero = false }: { hero?: boolean }): ReactNode {
                       {agentLabel}
                     </SelectMenu>
                   )}
+                  <ContextMeter workspaceId={app.workspaceId} sessionId={app.sessionId}
+                    draft={draftSession} busy={busy} refreshing={entry?.loading === true}
+                    revision={entry?.request ?? 0} modelSaving={entry?.modelSaving === true}
+                    modelKey={JSON.stringify(binding)} locale={app.locale} />
                   <ModelPicker
                     binding={binding}
                     models={app.models}

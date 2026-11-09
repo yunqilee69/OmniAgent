@@ -86,7 +86,12 @@ async function readSnapshot(path: string, home?: TrustedHome): Promise<ConfigFil
   if (text === undefined || text.trim() === '') {
     return { raw: {}, config: ConfigSchema.parse({}) };
   }
-  const raw: unknown = JSON.parse(text);
+  let raw: unknown;
+  try {
+    raw = JSON.parse(text);
+  } catch {
+    throw new ConfigFileError('Invalid configuration');
+  }
   if (!isObject(raw)) throw new ConfigFileError('Invalid configuration');
   return { text, raw, config: ConfigSchema.parse(raw) };
 }

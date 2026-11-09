@@ -7,7 +7,6 @@
 
 | 编号 | 决定 |
 | --- | --- |
-| [0001](0001-permission-first-sandbox-later.md) | 先做权限层，沙盒后置 |
 | [0002](0002-core-tui-seam.md) | core 与 TUI 分包，用事件流通信 |
 | [0003](0003-tui-visual-hierarchy.md) | TUI 用角色调色板 + 三块左缘，不引入全屏终端框架 |
 

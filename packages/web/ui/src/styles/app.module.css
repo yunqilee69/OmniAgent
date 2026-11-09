@@ -88,10 +88,26 @@
   display: none;
 }
 
+.rightMask {
+  position: fixed;
+  inset: 0;
+  z-index: 60;
+  background: rgb(0 0 0 / 0.28);
+}
+
+.app[data-right-overlay] .rightCol {
+  position: fixed;
+  inset: 0 0 0 auto;
+  z-index: 70;
+  width: min(100%, 640px);
+  box-shadow: var(--dsw-elevation-prominent);
+}
+
 .app[data-right-fullscreen] .rightCol {
   position: absolute;
   inset: 0;
   z-index: 70;
+  width: auto;
   border-left: none;
   box-shadow: var(--dsw-elevation-prominent);
 }
@@ -128,8 +144,7 @@
   transform: scaleX(-1);
 }
 
-/* Conversation header: 76px with its rule, matching the right panel's strip
-   plus its body header. Title row 30px; view tabs 25px with a 10px margin. */
+/* Conversation header. */
 .header {
   position: relative;
   z-index: 20;
@@ -137,8 +152,8 @@
   grid-template-columns: auto minmax(0, 1fr);
   flex: none;
   box-sizing: border-box;
-  min-height: 76px;
-  padding: 10px 28px 0 20px;
+  min-height: 50px;
+  padding: 10px 28px 10px 20px;
   border-bottom: 0.5px solid var(--dsw-alias-border-l3);
   background: var(--dsw-alias-bg-base);
 }
@@ -325,59 +340,6 @@
   margin-right: -16px;
 }
 
-.tabs {
-  grid-column: 1 / -1;
-  display: flex;
-  width: 100%;
-  min-width: 0;
-  align-items: flex-start;
-  flex-wrap: wrap;
-  margin-top: 10px;
-  padding-left: 8px;
-}
-
-.viewTabs {
-  display: flex;
-  flex-wrap: wrap;
-  gap: 32px;
-  min-width: 0;
-  min-height: 25px;
-}
-
-.tab {
-  position: relative;
-  box-sizing: border-box;
-  min-height: 35px;
-  margin: -10px -10px 0;
-  padding: 10px 10px 9px;
-  border: none;
-  background: transparent;
-  color: var(--dsw-alias-label-tertiary);
-  font-size: 13px;
-  font-weight: 500;
-  line-height: 16px;
-  cursor: pointer;
-}
-
-.tab::after {
-  content: '';
-  position: absolute;
-  right: 10px;
-  bottom: -1px;
-  left: 10px;
-  height: 2px;
-  border-radius: 2px;
-  background: transparent;
-}
-
-.tabActive {
-  color: var(--dsw-alias-state-business-primary);
-}
-
-.tabActive::after {
-  background: var(--dsw-alias-state-business-primary);
-}
-
 .alert {
   flex: none;
   display: flex;
@@ -417,7 +379,6 @@
 }
 
 .conversationArea,
-.observeArea,
 .automationArea,
 .settingsArea {
   flex: 1;
@@ -619,11 +580,10 @@
   max-width: var(--dsh-composer-card-max-width);
 }
 
-/* New-session hero: workspace chip on the left, mode chip on the right,
-   both sitting just above the composer card. */
 .heroChips {
   display: flex;
   align-items: center;
+  gap: 8px;
   min-width: 0;
   width: 100%;
   max-width: var(--dsh-composer-card-max-width);
@@ -631,12 +591,16 @@
   margin-bottom: 4px;
 }
 
+.heroChips > *,
+.heroOptions > * {
+  min-width: 0;
+}
+
 .heroOptions {
   display: flex;
   align-items: center;
   gap: 2px;
   min-width: 0;
-  margin-left: auto;
 }
 
 .modeStar {
@@ -1162,7 +1126,7 @@
 
 @media (max-width: 720px) {
   .header {
-    padding: 8px 14px 0 12px;
+    padding: 8px 14px 8px 12px;
   }
 
   .titleRow {
@@ -1190,7 +1154,6 @@
     display: none;
   }
 
-  .crumbs .crumb:first-child,
   .crumbSep {
     display: none;
   }
@@ -1198,10 +1161,6 @@
   .crumb {
     max-width: 180px;
     padding-left: 4px;
-  }
-
-  .tabs {
-    padding-left: 0;
   }
 
   .heroArea {

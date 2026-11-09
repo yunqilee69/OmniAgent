@@ -53,7 +53,13 @@ describe('DSH configuration', () => {
     expect(ConfigSchema.parse(input)).toMatchObject(input);
   });
 
-  it('loads DSH settings from disk without manufacturing legacy permission rules', async () => {
+  it('does not add permission settings to defaults', () => {
+    const config = ConfigSchema.parse({});
+    expect(config).not.toHaveProperty('mode');
+    expect(config).not.toHaveProperty('permissions');
+  });
+
+  it('loads DSH settings from disk', async () => {
     const dir = await mkdtemp(join(tmpdir(), 'omni-dsh-config-'));
     const path = join(dir, 'config.json');
     const input = { model: 'deepseek-flash', provider: 'deepseek-official',
@@ -62,7 +68,7 @@ describe('DSH configuration', () => {
       await writeFile(path, JSON.stringify(input));
       const loaded = await loadConfig(path);
       expect(loaded.config).toMatchObject(input);
-      expect(loaded.rules).toEqual([]);
+      expect(loaded).not.toHaveProperty('rules');
       expect(JSON.parse(await readFile(path, 'utf8'))).toEqual(input);
     } finally {
       await rm(dir, { recursive: true, force: true });

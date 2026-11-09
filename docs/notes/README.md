@@ -11,9 +11,4 @@
 | [codex-sandbox.md](codex-sandbox.md) | Codex 的沙盒、approval policy、execpolicy |
 | [claude-permissions.md](claude-permissions.md) | Claude Code 的权限规则、模式、沙盒运行时 |
 
-代码里的对应落点：
-
-- 权限规则形状 → `packages/core/src/permissions/rules.ts`
-- 复合命令拆解 → `packages/core/src/permissions/bash.ts`
-- 求值顺序 → `packages/core/src/permissions/evaluate.ts`
-- 沙盒（M3）→ `packages/core/src/sandbox/`
+OmniAgent 当前权限实现以 DSH 权限预设和执行沙盒为准，见 [架构文档](../architecture.md)。这些笔记描述的是外部产品，不是本项目的配置契约。

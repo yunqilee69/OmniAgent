@@ -1,4 +1,5 @@
 import type { AgentEvent, StopReason } from '@omniagent/core';
+import { authFetch } from './auth.ts';
 
 export type PermissionPreset = 'read-only' | 'workspace-write' | 'danger-full-access';
 export type ReasoningEffort = 'off' | 'minimal' | 'low' | 'medium' | 'high' | 'xhigh' | 'max';
@@ -8,6 +9,7 @@ export interface Workspace {
   name?: string;
   path: string;
   lastUsedAt?: number;
+  isDefault?: boolean;
 }
 
 export interface SessionSummary {
@@ -484,6 +486,32 @@ export interface PublicMessage {
   toolCalls?: ToolCall[];
   results?: ToolResult[];
   usage?: { inputTokens: number; outputTokens: number };
+}
+
+export interface ContextEstimate {
+  estimatedMessageTokens?: number;
+  window?: { tokens: number; source: 'config' | 'model' };
+}
+
+export function validateContextEstimate(value: unknown): ContextEstimate {
+  if (typeof value !== 'object' || value === null || Array.isArray(value)) throw new Error('Invalid context response.');
+  const data = value as Record<string, unknown>;
+  if (data.estimatedMessageTokens !== undefined
+    && (!Number.isSafeInteger(data.estimatedMessageTokens) || (data.estimatedMessageTokens as number) < 0)) {
+    throw new Error('Invalid context response.');
+  }
+  let window: ContextEstimate['window'];
+  if (data.window !== undefined) {
+    if (typeof data.window !== 'object' || data.window === null || Array.isArray(data.window)) throw new Error('Invalid context response.');
+    const candidate = data.window as Record<string, unknown>;
+    if (!Number.isSafeInteger(candidate.tokens) || (candidate.tokens as number) <= 0
+      || (candidate.source !== 'config' && candidate.source !== 'model')) throw new Error('Invalid context response.');
+    window = { tokens: candidate.tokens as number, source: candidate.source };
+  }
+  return {
+    ...(data.estimatedMessageTokens === undefined ? {} : { estimatedMessageTokens: data.estimatedMessageTokens as number }),
+    ...(window === undefined ? {} : { window }),
+  };
 }
 
 export interface SessionDetail {
@@ -1080,7 +1108,7 @@ export async function responseError(response: Response): Promise<string> {
 }
 
 export async function api<T>(path: string, init?: RequestInit): Promise<T> {
-  const response = await fetch(path, init);
+  const response = await authFetch(path, init);
   if (!response.ok) throw new Error(await responseError(response));
   return response.json() as Promise<T>;
 }

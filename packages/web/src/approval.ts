@@ -100,9 +100,7 @@ export class ApprovalTurn {
       prompt = {
         type: 'permission.requested', requestId: randomUUID(),
         call: { id: request.call.id, name: request.call.name, arguments: args },
-        // Only a recognized DSH escalation reason is shown; legacy rule text
-        // can include paths and command arguments and falls back to a generic
-        // prompt.
+        // Restrict displayed reasons to recognized DSH escalation messages.
         reason: approvalReason(request.reason),
       };
     } catch {

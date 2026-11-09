@@ -455,6 +455,28 @@
 }
 
 .standardControls { display: flex; align-items: center; gap: 12px; min-width: 0; }
+.contextMeter {
+  display: grid;
+  place-items: center;
+  flex: none;
+  width: 18px;
+  height: 18px;
+  border-radius: 50%;
+  background: conic-gradient(var(--dsw-alias-state-business-primary) var(--context-percent), var(--dsw-alias-border-l4) 0);
+  color: var(--dsw-alias-label-secondary);
+}
+.contextMeter[data-known='false'] { background: var(--dsw-alias-border-l4); }
+.contextMeterCenter {
+  display: grid;
+  place-items: center;
+  width: 14px;
+  height: 14px;
+  border-radius: 50%;
+  background: var(--dsw-specific-input-major);
+  font-size: 10px;
+  line-height: 1;
+}
+.contextMeter:focus-visible { outline: 2px solid var(--dsw-alias-state-business-primary); outline-offset: 2px; }
 .tools[hidden], .standardControls[hidden] { display: none; }
 .trailingActive { flex: 1; margin-left: 0; }
 .activity { display: flex; align-items: center; flex: none; }

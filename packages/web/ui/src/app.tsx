@@ -8,11 +8,10 @@ import { Sidebar } from './components/Sidebar.tsx';
 import { ConversationView } from './components/ConversationView.tsx';
 import { Composer } from './components/Composer.tsx';
 import { ApprovalView, PlanReviewDialog } from './components/ApprovalView.tsx';
-import { TrajectoryView } from './components/TrajectoryView.tsx';
 import { AutomationPage } from './components/AutomationPage.tsx';
 import { SettingsPage } from './components/SettingsPage.tsx';
 import { NewSessionDialog } from './components/NewSessionDialog.tsx';
-import { RightPanel } from './components/RightPanel.tsx';
+import { RightPanel, type RightView } from './components/RightPanel.tsx';
 import css from './styles/app.module.css';
 import heroCss from './styles/dsh/hero-shell.module.css';
 
@@ -65,11 +64,12 @@ export function App(): ReactNode {
   const entry = useSessionEntry();
   const mobile = useMediaQuery('(max-width: 900px)');
   const viewportWidth = useViewportWidth();
-  const rightAvailable = viewportWidth >= 1000;
+  const rightOverlay = viewportWidth < 1000;
   const [sidebarOpen, setSidebarOpen] = useState(() => !window.matchMedia('(max-width: 900px)').matches);
-  const [rightOpen, setRightOpen] = useState(() => window.innerWidth >= 1180);
+  const [rightOpen, setRightOpen] = useState(false);
   const [rightFullscreen, setRightFullscreen] = useState(false);
   const [rightWidth, setRightWidth] = useState<number | null>(null);
+  const [rightView, setRightView] = useState<RightView>('guide');
   const booted = useRef(false);
 
   useEffect(() => {
@@ -83,10 +83,13 @@ export function App(): ReactNode {
   }, [mobile]);
 
   useEffect(() => {
-    if (rightAvailable) return;
-    setRightOpen(false);
-    setRightFullscreen(false);
-  }, [rightAvailable]);
+    if (!rightOpen || !rightOverlay) return;
+    const onKey = (event: KeyboardEvent): void => {
+      if (event.key === 'Escape') { setRightOpen(false); setRightFullscreen(false); }
+    };
+    document.addEventListener('keydown', onKey);
+    return () => { document.removeEventListener('keydown', onKey); };
+  }, [rightOpen, rightOverlay]);
 
   useEffect(() => {
     if (!mobile || !sidebarOpen) return;
@@ -99,13 +102,13 @@ export function App(): ReactNode {
 
   const run = entry?.run;
   const drawer = mobile && sidebarOpen;
-  const showConversation = app.tab === 'conversation';
   const hasSession = app.sessionId !== null;
   const draft = entry?.draft === true;
   const sessionBlocked = entry?.error !== undefined && entry.error !== '' && entry?.loaded !== true;
-  const rightActive = rightOpen && rightAvailable && app.tab !== 'automation' && app.tab !== 'settings' && !draft;
-  const effectiveRightWidth = rightActive
-    ? rightWidth ?? Math.max(300, Math.min(Math.round(viewportWidth * 0.45), viewportWidth - 680))
+  const rightActive = rightOpen && app.tab !== 'automation' && app.tab !== 'settings';
+  const maxRightWidth = Math.max(300, viewportWidth - (sidebarOpen && !mobile ? 280 : 0) - 400);
+  const effectiveRightWidth = rightActive && !rightOverlay && !rightFullscreen
+    ? Math.max(300, Math.min(rightWidth ?? Math.round(viewportWidth * 0.45), maxRightWidth))
     : 0;
 
   const shellStyle = {
@@ -119,7 +122,7 @@ export function App(): ReactNode {
     const startWidth = effectiveRightWidth;
     const move = (moveEvent: PointerEvent): void => {
       const next = startWidth + startX - moveEvent.clientX;
-      setRightWidth(Math.max(300, Math.min(Math.round(viewportWidth * 0.7), next)));
+      setRightWidth(Math.max(300, Math.min(maxRightWidth, next)));
     };
     const stop = (): void => {
       document.removeEventListener('pointermove', move);
@@ -138,7 +141,8 @@ export function App(): ReactNode {
       className={css.app}
       data-sidebar={sidebarOpen ? 'open' : 'closed'}
       data-right={rightActive ? 'open' : 'closed'}
-      data-right-fullscreen={rightFullscreen || undefined}
+      data-right-fullscreen={rightActive && rightFullscreen || undefined}
+      data-right-overlay={rightActive && rightOverlay || undefined}
       data-mobile={mobile || undefined}
       style={shellStyle}
     >
@@ -152,8 +156,8 @@ export function App(): ReactNode {
           sidebarOpen={sidebarOpen}
           onToggleSidebar={() => { setSidebarOpen((value) => !value); }}
           rightOpen={rightActive}
-          rightAvailable={rightAvailable}
-          onToggleRight={() => { setRightOpen(true); }}
+          onToggleRight={() => { setRightView('guide'); setRightOpen(true); }}
+          onOpenObserve={() => { setRightView('observe'); setRightOpen(true); }}
         />
 
         {app.alert !== '' && (
@@ -174,8 +178,8 @@ export function App(): ReactNode {
           <div className={css.settingsArea} id="panel-settings" role="tabpanel" aria-label={t('Settings')}>
             <SettingsPage />
           </div>
-        ) : showConversation ? (
-          <div className={css.conversationArea} id="panel-conversation" role="tabpanel" aria-labelledby="tab-conversation">
+        ) : (
+          <div className={css.conversationArea}>
             {!hasSession || draft ? (
               <div className={css.heroArea}>
                 {app.workspacesLoading ? (
@@ -233,16 +237,15 @@ export function App(): ReactNode {
               </div>
             )}
           </div>
-        ) : (
-          <div className={css.observeArea} id="panel-observe" role="tabpanel" aria-labelledby="tab-observe">
-            <TrajectoryView />
-          </div>
         )}
       </div>
 
+      {rightActive && rightOverlay && !rightFullscreen && (
+        <div className={css.rightMask} onClick={() => { setRightOpen(false); }} />
+      )}
       {rightActive && (
         <div className={css.rightCol}>
-          {!rightFullscreen && (
+          {!rightFullscreen && !rightOverlay && (
             <div
               className={css.rightResize}
               role="separator"
@@ -253,6 +256,8 @@ export function App(): ReactNode {
           )}
           <RightPanel
             fullscreen={rightFullscreen}
+            view={rightView}
+            onViewChange={setRightView}
             onClose={() => { setRightOpen(false); setRightFullscreen(false); }}
             onToggleFullscreen={() => { setRightFullscreen((value) => !value); }}
           />

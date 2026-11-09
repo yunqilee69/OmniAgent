@@ -298,7 +298,7 @@ describe('projectTrajectory', () => {
     expect(JSON.stringify(records)).not.toContain('PRIVATE');
   });
 
-  it('projects a real Session trace with no audit duplicates or permission-rule leaks', async () => {
+  it('projects a real Session trace without audit duplicates or private metadata leaks', async () => {
     const root = await mkdtemp(join(tmpdir(), 'omniagent-trajectory-'));
     try {
       const log = await new SessionStore(root).create({ id: 's', workspace: '/private', cwd: '/private' });
@@ -308,7 +308,6 @@ describe('projectTrajectory', () => {
           toolCallResponse([{ id: 'private-id', name: 'read_file', args: { file_path: 'SECRET ARGUMENT' } }]),
           textResponse('SECRET ANSWER'),
         ]),
-        rules: [{ raw: 'SECRET RULE', tool: 'read_file', source: 'session', decision: 'deny', anchor: '/private' }],
         approve: async () => 'deny',
       });
       for await (const _event of session.send('SECRET QUESTION')) { /* Drain the session. */ }

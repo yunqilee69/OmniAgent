@@ -3,6 +3,7 @@ import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { afterEach, describe, expect, it } from 'vitest';
 import { startWebHost } from './server';
+import { WorkspaceRegistry } from './workspaces';
 
 const hosts: Array<Awaited<ReturnType<typeof startWebHost>>> = [];
 const directories: string[] = [];
@@ -45,6 +46,30 @@ async function staticHost(staticDir: string) {
 }
 
 describe('workspace API contract', () => {
+  it('exposes the default marker and rejects its removal while allowing ordinary removal', async () => {
+    const root = await mkdtemp(join(tmpdir(), 'omniagent-workspace-api-'));
+    directories.push(root);
+    const registry = new WorkspaceRegistry(join(root, 'workspaces.json'));
+    const defaultWorkspace = await registry.ensureDefault(join(root, 'default-workspace'));
+    const ordinaryPath = join(root, 'ordinary');
+    await mkdir(ordinaryPath);
+    const ordinary = await registry.add(ordinaryPath);
+    const host = await startWebHost({
+      workspaces: registry,
+      store: {} as never,
+      createSession: async () => { throw new Error('unexpected session creation'); },
+    });
+    hosts.push(host);
+    const list = await fetch(`${host.address()}/api/workspaces`);
+    expect(await list.json()).toEqual({ workspaces: [defaultWorkspace, ordinary] });
+    const denied = await fetch(`${host.address()}/api/workspaces/${defaultWorkspace.id}`, { method: 'DELETE' });
+    expect(denied.status).toBe(403);
+    expect(await registry.get(defaultWorkspace.id)).toEqual(defaultWorkspace);
+    const removed = await fetch(`${host.address()}/api/workspaces/${ordinary.id}`, { method: 'DELETE' });
+    expect(removed.status).toBe(200);
+    expect(await removed.json()).toEqual({ removed: true });
+  });
+
   it('returns registered workspaces from the registry', async () => {
     const workspace = { id: 'work-1', name: 'Project', path: '/tmp/project', lastUsedAt: 1 };
     const host = await startWebHost({

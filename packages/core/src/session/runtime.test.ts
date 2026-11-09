@@ -68,12 +68,23 @@ describe('RuntimeResolver', () => {
     expect(resolved.capabilities).toEqual({ imageInput: true });
     expect(resolved.todoAllowParallelInProgress).toBe(true);
     expect(resolved.contextWindowTokens).toBe(1234);
+    expect(resolved.contextWindowSource).toBe('config');
     expect(resolved.system).toContain('GLOBAL');
     expect(resolved.system).toContain('DEFAULT BODY');
     expect(resolved.system).toContain('allowed-skill');
     expect(resolved.system).toContain('<available_agents>');
     expect(resolved.system).toContain('explorer');
     expect(resolved.revision).toMatch(/^[a-f0-9]{64}$/);
+  });
+
+  it('reports the model window when no context budget is configured', async () => {
+    const { runtime, workspace, configDir } = await fixture();
+    const config = JSON.parse(await readFile(join(configDir, 'config.json'), 'utf8'));
+    delete config.contextWindowTokens;
+    await writeFile(join(configDir, 'config.json'), JSON.stringify(config));
+    const resolved = await runtime.resolve({ cwd: workspace, agentId: 'default', isRoot: true });
+    expect(resolved.contextWindowTokens).toBe(resolved.modelDescriptor?.contextWindow);
+    expect(resolved.contextWindowSource).toBe('model');
   });
 
   it('defaults parallel todos off when the policy is unconfigured', async () => {

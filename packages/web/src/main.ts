@@ -27,7 +27,7 @@ import { ModelSettings } from './model-settings';
 import { LiveSessionRegistry } from './live-sessions';
 import { PermissionSettings } from './permissions';
 import { SessionScheduleHost } from './schedule-host';
-import { startWebHost } from './server';
+import { parseWebPort, startWebHost } from './server';
 import { WorkspaceRegistry } from './workspaces';
 
 async function main(): Promise<void> {
@@ -66,6 +66,7 @@ async function main(): Promise<void> {
     { onExhausted: textResponse('当前未配置模型服务。') },
   );
   const initialConfig = configStore.snapshot.config;
+  const webConfig = initialConfig.web;
   const subagents = new SubagentManager({
     store,
     createModel: () => demo,
@@ -135,6 +136,8 @@ async function main(): Promise<void> {
     }),
     log: (message) => console.error(message),
   });
+  await workspaces.ensureDefault(join(configDir, 'default-workspace'));
+  await workspaces.add(process.cwd());
   await schedules.open();
 
   /**
@@ -182,7 +185,6 @@ async function main(): Promise<void> {
     });
   }
 
-  await workspaces.add(process.cwd());
   const host = await startWebHost({
     workspaces,
     store,
@@ -215,7 +217,9 @@ async function main(): Promise<void> {
     schedule: schedules,
     createRuntimeSession: async (workspace, handle, permissions, resolved) =>
       composeSession(workspace.path, handle, permissions, resolved, true),
-  }, Number(process.env.OMNIAGENT_PORT ?? 4317));
+    host: webConfig.host,
+    auth: webConfig.auth,
+  }, parseWebPort(process.env.OMNIAGENT_PORT, webConfig.port));
   console.log(`OmniAgent Web: ${host.address()}`);
   const shutdown = () => void (async () => {
     await schedules.close();

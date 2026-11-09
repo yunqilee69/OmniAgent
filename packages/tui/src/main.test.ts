@@ -15,13 +15,13 @@ async function waitFor(check: () => boolean): Promise<void> {
 }
 
 describe('TUI session permissions', () => {
-  it('requires selection for legacy configuration and persists an explicit session preset', async () => {
+  it('requires selection for an invalid DSH preset and persists an explicit session preset', async () => {
     const home = await realpath(await mkdtemp(join(tmpdir(), 'omniagent-tui-permissions-')));
     const cwd = join(home, 'workspace');
     const configDir = join(home, '.omniagent');
     await mkdir(cwd);
     await mkdir(configDir);
-    await writeFile(join(configDir, 'config.json'), JSON.stringify({ mode: 'bypass' }));
+    await writeFile(join(configDir, 'config.json'), JSON.stringify({ dsh: { permission: { defaultPreset: 'invalid' } } }));
     const store = new SessionStore(join(configDir, 'sessions'));
     const legacy = await store.create({ id: 'legacy', workspace: cwd, cwd });
     await legacy.append({ type: 'message/user', data: { text: 'old' } });

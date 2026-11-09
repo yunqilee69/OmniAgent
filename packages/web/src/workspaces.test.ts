@@ -30,6 +30,35 @@ async function makeWorkspace(root: string, name: string): Promise<string> {
 }
 
 describe('WorkspaceRegistry', () => {
+  it('creates and persists the default workspace while keeping cwd registered', async () => {
+    const { root, filePath } = await setup();
+    const defaultPath = join(root, 'config', 'default-workspace');
+    const cwd = await makeWorkspace(root, 'cwd');
+    const registry = new WorkspaceRegistry(filePath);
+    const defaultWorkspace = await registry.ensureDefault(defaultPath);
+    const cwdWorkspace = await registry.add(cwd);
+    expect(defaultWorkspace).toMatchObject({ path: await realpath(defaultPath), isDefault: true });
+    expect((await stat(defaultPath)).isDirectory()).toBe(true);
+    expect(await new WorkspaceRegistry(filePath).ensureDefault(defaultPath)).toEqual(defaultWorkspace);
+    expect(await registry.add(defaultPath)).toEqual(defaultWorkspace);
+    await expect(registry.remove(defaultWorkspace.id)).rejects.toThrow(/default workspace cannot be removed/i);
+    expect(await registry.remove(cwdWorkspace.id)).toBe(true);
+    expect(await registry.list()).toEqual([defaultWorkspace]);
+  });
+
+  it('marks an existing canonical record as default without changing its identity or metadata', async () => {
+    const { root, filePath } = await setup();
+    const directory = await makeWorkspace(root, 'default-workspace');
+    const alias = join(root, 'alias');
+    await symlink(directory, alias, 'dir');
+    const registry = new WorkspaceRegistry(filePath);
+    const original = await registry.add(alias, 'Existing name');
+    const marked = await registry.ensureDefault(directory);
+    expect(marked).toEqual({ ...original, isDefault: true });
+    expect(await registry.add(alias)).toEqual(marked);
+    expect(await new WorkspaceRegistry(filePath).list()).toEqual([marked]);
+  });
+
   it('treats a missing registry as empty without creating it', async () => {
     const { filePath } = await setup();
     const registry = new WorkspaceRegistry(filePath);

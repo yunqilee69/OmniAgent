@@ -38,5 +38,5 @@ for await (const event of session.send('帮我看看这个目录')) { ... }
 
 - 好处：核心代码零 I/O 依赖（除了工具和 store），循环测试里没有 stdout mock。换前端 = 换一个消费事件流的函数。
 - 代价：`Session.send` 是 async generator，调用方要用 `for await`，不能用回调风格；对不熟悉生成器的读者有一点门槛。
-- 为 M6 留的余地：`AgentCommand`（`protocol/events.ts`）已经定义了 UI → core 的指令形状。做成 daemon 时，把 `for await` 换成 WS 消息流即可，事件类型不用改。
-- 现在没做的：`approve` 回调是同步阻塞式的（追问 → 等回答）。做成 daemon 后要改成「发 `permission.request` 事件 + 等 `permission.respond` 命令」的异步配对，这需要 request id 和 pending map。已在 `PermissionRequest.id` 预留。
+- 为后续远程前端留出余地：`AgentCommand`（`protocol/events.ts`）定义了 UI → core 的指令形状。
+- Web 通过实时 `permission.requested` 事件和审批接口把一次性请求交给用户，core 仍通过注入回调等待结果。

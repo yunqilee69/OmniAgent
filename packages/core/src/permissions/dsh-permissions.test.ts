@@ -30,7 +30,7 @@ describe('DSH permission presets', () => {
     for (const preset of DSH_PERMISSION_PRESETS) {
       expect(resolveDshDefaultPreset(preset)).toEqual({ defaultPreset: preset, requiresSelection: false });
     }
-    for (const invalid of [null, '', 'default', 'plan', 'bypass', '__proto__', 1, {}]) {
+    for (const invalid of [null, '', 'invalid-preset', '__proto__', 1, {}]) {
       expect(resolveDshDefaultPreset(invalid)).toEqual({ defaultPreset: null, requiresSelection: true });
     }
   });
@@ -41,16 +41,14 @@ describe('DSH permission presets', () => {
         type: 'permission/dsh-preset', data: { version: 1, preset },
       });
     }
-    for (const invalid of [undefined, null, 'default', 'bypass', '__proto__', {}, 1]) {
+    for (const invalid of [undefined, null, 'invalid-preset', '__proto__', {}, 1]) {
       expect(() => createInitialDshPermissionEvent(invalid)).toThrow();
     }
   });
 
-  it('does not infer permissions from an empty or legacy log', () => {
+  it('does not infer permissions from an empty log or unrelated events', () => {
     const legacy = projectDshPermissions([
-      { type: 'permission/mode', data: { mode: 'bypass' } },
-      { type: 'sandbox/mode', data: { mode: 'danger-full-access' } },
-      { type: 'approval/policy', data: { policy: 'never' } },
+      { type: 'message/user', data: { text: 'hello' } },
     ]);
     expect(legacy).toEqual({ status: 'legacy', preset: null });
     expect(projectDshPermissions([])).toEqual({ status: 'legacy', preset: null });
@@ -71,7 +69,7 @@ describe('DSH permission presets', () => {
     null,
     {},
     { version: 2, preset: 'danger-full-access' },
-    { version: 1, preset: 'default' },
+    { version: 1, preset: 'invalid-preset' },
     { version: 1, preset: 'danger-full-access', extra: true },
   ])('fails closed when the latest event is malformed: %j', (data) => {
     const projection = projectDshPermissions([
@@ -91,7 +89,7 @@ describe('DSH permission presets', () => {
     expect(createDshPresetSwitch(selected, 'danger-full-access')).toEqual(
       createInitialDshPermissionEvent('danger-full-access'),
     );
-    for (const invalid of [undefined, null, 'auto', 'custom', 'default', 'bypass', '__proto__', {}]) {
+    for (const invalid of [undefined, null, 'auto', 'custom', 'invalid-preset', '__proto__', {}]) {
       expect(() => createDshPresetSwitch(selected, invalid)).toThrow();
     }
   });
@@ -112,7 +110,7 @@ describe('DSH permission presets', () => {
     expect(snapshotDshPermissions(switched)).toEqual({
       preset: 'danger-full-access', sandbox: 'danger-full-access', approval: 'never',
     });
-    expect(() => snapshotDshPermissions({ status: 'ready', preset: 'bypass' } as never)).toThrow();
+    expect(() => snapshotDshPermissions({ status: 'ready', preset: 'invalid-preset' } as never)).toThrow();
   });
 
   it('persists and restores the selected preset through SessionStore without entering the transcript', async () => {

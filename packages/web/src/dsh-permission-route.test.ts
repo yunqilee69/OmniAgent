@@ -86,7 +86,7 @@ describe('DSH session permission presets', () => {
       .toContainEqual(expect.objectContaining({ type: 'permission/dsh-preset', data: { version: 1, preset: 'read-only' } }));
   });
 
-  it('requires an explicit preset if an old configuration has not been migrated', async () => {
+  it('requires an explicit preset when the configured preset is invalid', async () => {
     const { url, captured } = await setup(null);
     const sessionUrl = await create(url);
     expect((await (await fetch(sessionUrl)).json() as { permission: unknown }).permission).toEqual({ preset: null });
@@ -98,7 +98,7 @@ describe('DSH session permission presets', () => {
     const { url, workspace, store } = await setup();
     const sessionUrl = await create(url);
     const id = sessionUrl.slice(sessionUrl.lastIndexOf('/') + 1);
-    expect((await fetch(`${sessionUrl}/permission`, post({ preset: 'bypass' }))).status).toBe(400);
+    expect((await fetch(`${sessionUrl}/permission`, post({ preset: 'invalid-preset' }))).status).toBe(400);
     expect((await fetch(`${sessionUrl}/permission`, post({ preset: 'workspace-write', extra: true }))).status).toBe(400);
     expect((await fetch(`${sessionUrl}/permission`, post({ preset: 'workspace-write' }))).status).toBe(200);
     expect((await store.open(workspace.path, id)).events.filter((event) => event.type === 'permission/dsh-preset')).toHaveLength(1);

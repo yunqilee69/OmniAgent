@@ -6,7 +6,7 @@ import { join } from 'node:path';
 import { request as httpRequest } from 'node:http';
 import { promisify } from 'node:util';
 import { afterEach, describe, expect, it } from 'vitest';
-import { SessionStore, matchesCall, parseRuleSet } from '@omniagent/core';
+import { SessionStore } from '@omniagent/core';
 import type { DshPermissionSnapshot } from '@omniagent/core';
 import { startWebHost } from './server';
 import type { WebHost, WebHostOptions } from './server';
@@ -75,16 +75,15 @@ describe('permission settings API', () => {
   it('returns only permission settings and preserves unrelated config fields on write', async () => {
     const original = {
       model: 'private-model', provider: { type: 'openai', apiKey: 'SECRET_KEY', headers: { authorization: 'SECRET_HEADER' } },
-      system: 'SECRET_PROMPT', maxSteps: 7, custom: { nested: true }, mode: 'plan',
-      permissions: { allow: ['list_dir'], ask: [], deny: [], customPolicy: { retained: true } },
+      system: 'SECRET_PROMPT', maxSteps: 7, custom: { nested: true },
       dsh: { permission: { other: 'SECRET_POLICY' }, custom: { nested: true } },
     };
     const { base, configPath } = await setup(original);
     const get = await fetch(`${base}/api/settings/permissions`);
     expect(get.status).toBe(200);
     const body = await get.text();
-    expect(JSON.parse(body)).toEqual({ settings: selectionRequired });
-    for (const secret of ['SECRET_KEY', 'SECRET_HEADER', 'SECRET_PROMPT', 'private-model', 'customPolicy', 'SECRET_POLICY']) {
+    expect(JSON.parse(body)).toEqual({ settings: defaults });
+    for (const secret of ['SECRET_KEY', 'SECRET_HEADER', 'SECRET_PROMPT', 'private-model', 'SECRET_POLICY']) {
       expect(body).not.toContain(secret);
     }
 
@@ -100,25 +99,23 @@ describe('permission settings API', () => {
 
   it('returns a cloned full config from the trusted initial read without rereading the file', async () => {
     const original = {
-      model: 'private-model', mode: 'plan', maxSteps: 7, system: 'SECRET_PROMPT',
+      model: 'private-model', maxSteps: 7, system: 'SECRET_PROMPT',
       provider: {
         type: 'openai', baseURL: 'https://model.example/v1', apiKey: 'SECRET_KEY', apiKeyEnv: 'CUSTOM_KEY',
         headers: { authorization: 'SECRET_HEADER' }, timeoutMs: 3000, maxRetries: 2,
       },
-      permissions: { allow: ['list_dir'], ask: [], deny: [] },
     };
     const { base, configPath, settings } = await setup(original);
     await writeFile(configPath, '{invalid external edit');
     const snapshot = settings.configSnapshot();
-    expect(snapshot).toEqual(original);
-    snapshot.mode = 'bypass';
+    expect(snapshot).toEqual({ ...original, web: { host: '127.0.0.1', port: 4317, auth: { enabled: false } } });
+    snapshot.model = 'modified';
     const provider = snapshot.provider;
     assert(provider && typeof provider !== 'string', 'Expected a legacy provider object');
     provider.apiKey = 'modified';
     provider.headers!.authorization = 'modified';
-    snapshot.permissions!.allow.push('write_file');
-    expect(settings.configSnapshot()).toEqual(original);
-    expect(await settings.read()).toEqual(selectionRequired);
+    expect(settings.configSnapshot()).toEqual({ ...original, web: { host: '127.0.0.1', port: 4317, auth: { enabled: false } } });
+    expect(await settings.read()).toEqual(defaults);
     const body = await (await fetch(`${base}/api/settings/permissions`)).text();
     for (const secret of ['SECRET_KEY', 'SECRET_HEADER', 'SECRET_PROMPT', 'private-model']) {
       expect(body).not.toContain(secret);
@@ -127,15 +124,16 @@ describe('permission settings API', () => {
 
   it('returns parsed defaults from the trusted config snapshot when the file is missing', async () => {
     const { settings } = await setup();
-    expect(settings.configSnapshot()).toEqual({ model: 'fake', mode: 'default', maxSteps: 25 });
+    expect(settings.configSnapshot()).toEqual({ model: 'fake', maxSteps: 25, web: { host: '127.0.0.1', port: 4317, auth: { enabled: false } } });
   });
 
   it('updates the trusted full snapshot after a successful permissions write', async () => {
-    const original = { model: 'configured', provider: { type: 'openai', apiKey: 'SECRET' }, mode: 'default' };
+    const original = { model: 'configured', provider: { type: 'openai', apiKey: 'SECRET' } };
     const { settings } = await setup(original);
     await settings.update(preset('read-only'));
     expect(settings.configSnapshot()).toEqual({
-      model: 'configured', mode: 'default', maxSteps: 25,
+      model: 'configured', maxSteps: 25,
+      web: { host: '127.0.0.1', port: 4317, auth: { enabled: false } },
       provider: { type: 'openai', apiKey: 'SECRET', apiKeyEnv: 'OPENAI_API_KEY' },
       dsh: { permission: { defaultPreset: 'read-only' } },
     });
@@ -158,18 +156,16 @@ describe('permission settings API', () => {
     expect(await (await permissionStore(configPath)).read()).toEqual(selected(persisted.dsh.permission.defaultPreset));
   });
 
-  it('distinguishes fresh, legacy, explicit, and invalid persisted presets', async () => {
+  it('distinguishes fresh, explicit, and invalid persisted presets', async () => {
     const root = await mkdtemp(join(tmpdir(), 'omniagent-web-dsh-'));
     const configPath = join(root, 'config.json');
     const cases: Array<[unknown, unknown]> = [
       [{}, defaults],
       [{ provider: { apiKey: 'SECRET' }, dsh: { permission: { other: true } } }, defaults],
-      [{ mode: 'bypass' }, selectionRequired],
-      [{ permissions: {} }, selectionRequired],
-      [{ mode: 'plan', dsh: { permission: { defaultPreset: 'read-only' } } }, selected('read-only')],
-      [{ permissions: {}, dsh: { permission: { defaultPreset: 'danger-full-access' } } }, selected('danger-full-access')],
+      [{ dsh: { permission: { defaultPreset: 'read-only' } } }, selected('read-only')],
+      [{ dsh: { permission: { defaultPreset: 'danger-full-access' } } }, selected('danger-full-access')],
       [{ dsh: { permission: { defaultPreset: 'workspace-write' } } }, defaults],
-      [{ dsh: { permission: { defaultPreset: 'bypass' } } }, selectionRequired],
+      [{ dsh: { permission: { defaultPreset: 'invalid-preset' } } }, selectionRequired],
       [{ dsh: { permission: { defaultPreset: null } } }, selectionRequired],
       [{ dsh: null }, selectionRequired],
       [{ dsh: { permission: [] } }, selectionRequired],
@@ -195,15 +191,13 @@ describe('permission settings API', () => {
     }
     expect(initial).toEqual({ ...defaults, revision: 0 });
     const before = await readFile(configPath, 'utf8');
-    await expect(settings.update({ defaultPreset: 'bypass' })).rejects.toThrow();
+    await expect(settings.update({ defaultPreset: 'invalid-preset' })).rejects.toThrow();
     expect(await readFile(configPath, 'utf8')).toBe(before);
     expect(settings.snapshot()).toEqual({ ...selected('danger-full-access'), revision });
   });
 
   it('requires an explicit selection to replace an invalid stored preset', async () => {
     const config = {
-      mode: 'bypass',
-      permissions: { allow: ['read_file(./../../.env)', 'read_file('], ask: [], deny: [] },
       provider: { apiKey: 'SECRET' },
       dsh: { permission: { defaultPreset: 'bad-preset', unrelated: 'keep' } },
     };
@@ -235,22 +229,14 @@ describe('permission settings API', () => {
   });
 
   it('rejects malformed settings without changing the trusted state or config', async () => {
-    const { base, configPath, settings } = await setup({ mode: 'default', provider: { apiKey: 'SECRET' } });
+    const { base, configPath, settings } = await setup({ provider: { apiKey: 'SECRET' } });
     const before = await readFile(configPath, 'utf8');
     const malformed = [
       {}, { defaultPreset: null }, { defaultPreset: 1 }, { defaultPreset: [] },
-      { defaultPreset: 'bypass' }, { defaultPreset: 'workspace-write ' },
+      { defaultPreset: 'invalid-preset' }, { defaultPreset: 'workspace-write ' },
       { defaultPreset: 'WORKSPACE-WRITE' }, { ...preset('read-only'), extra: true },
       { ...preset('read-only'), requiresSelection: false },
-      { mode: 'bypass', permissions: { allow: [], ask: [], deny: [] } },
-      ...[
-        'read_file()', 'read_file(./../../.omniagent/config.json)', 'read_file(./secret',
-        'unknown(path)', 'read_file\n', '*()', 'read_file(./docs/**/../.env)',
-        'read_file(foo))', 'read_file(foo(bar)', 'read_file(foo)(bar)',
-        'read_file(./../(secrets)/file)',
-      ].map((rule) => ({
-        ...preset('danger-full-access'), permissions: { allow: [rule], ask: [], deny: [] },
-      })),
+      { ...preset('danger-full-access'), unexpected: true },
     ];
     for (const value of malformed) {
       const response = await fetch(`${base}/api/settings/permissions`, put(value));
@@ -258,35 +244,17 @@ describe('permission settings API', () => {
       expect(await response.text()).not.toContain('SECRET');
     }
     expect(await readFile(configPath, 'utf8')).toBe(before);
-    expect(settings.snapshot()).toEqual({ ...selectionRequired, revision: 0 });
-    expect(await (await fetch(`${base}/api/settings/permissions`)).json()).toEqual({ settings: selectionRequired });
+    expect(settings.snapshot()).toEqual({ ...defaults, revision: 0 });
+    expect(await (await fetch(`${base}/api/settings/permissions`)).json()).toEqual({ settings: defaults });
     expect((await fetch(`${base}/api/settings/permissions`, { method: 'PUT', headers: { 'content-type': 'application/json' }, body: '{' })).status).toBe(400);
     expect((await fetch(`${base}/api/settings/permissions`, { method: 'PUT', body: '{}' })).status).toBe(415);
     expect((await fetch(`${base}/api/settings/permissions`, put({ data: 'x'.repeat(70_000) }))).status).toBe(413);
   });
 
-  it.skipIf(process.platform === 'win32')('preserves literal parentheses and backslashes in legacy file rules', async () => {
-    const rules = ['read_file(./docs/(draft)/report.txt)', 'read_file(./docs/foo\\bar.txt)'];
-    const initial = { mode: 'default', permissions: { allow: rules, ask: [], deny: [] } };
-    const { base, configPath, settings, workspace } = await setup(initial);
-    expect(await (await fetch(`${base}/api/settings/permissions`)).json()).toEqual({ settings: selectionRequired });
-    const response = await fetch(`${base}/api/settings/permissions`, put(preset('read-only')));
-    expect(response.status).toBe(200);
-    expect(await response.json()).toEqual({ settings: selected('read-only') });
-    expect(JSON.parse(await readFile(configPath, 'utf8'))).toEqual({
-      ...initial, dsh: { permission: { defaultPreset: 'read-only' } },
-    });
-    const [parentheses, backslash] = parseRuleSet(settings.configSnapshot().permissions!, 'user', workspace.path);
-    expect(matchesCall(parentheses!, { id: 'p', name: 'read_file', arguments: { file_path: './docs/(draft)/report.txt' } }, workspace.path)).toBe(true);
-    expect(matchesCall(backslash!, { id: 'b', name: 'read_file', arguments: { file_path: './docs/foo\\bar.txt' } }, workspace.path)).toBe(true);
-    expect(matchesCall(backslash!, { id: 'n', name: 'read_file', arguments: { file_path: './docs/foo/bar.txt' } }, workspace.path)).toBe(false);
-    expect(await (await permissionStore(configPath)).read()).toEqual(selected('read-only'));
-  });
-
   it('rejects malformed existing configuration and never treats it as defaults', async () => {
     const root = await mkdtemp(join(tmpdir(), 'omniagent-web-permissions-invalid-'));
     const config = join(root, 'config.json');
-    for (const text of ['{', '[]', '{"mode":"not-a-mode"}', '{"provider":{"apiKey":123}}']) {
+    for (const text of ['{', '[]', '{"provider":{"apiKey":123}}']) {
       await writeFile(config, text);
       await expect(permissionStore(config)).rejects.toThrow();
     }
@@ -296,16 +264,16 @@ describe('permission settings API', () => {
     const root = await mkdtemp(join(tmpdir(), 'omniagent-permissions-link-'));
     const target = join(root, 'target.json');
     const link = join(root, 'config.json');
-    await writeFile(target, JSON.stringify({ mode: 'bypass' }));
+    await writeFile(target, JSON.stringify({ dsh: { permission: { defaultPreset: 'danger-full-access' } } }));
     await symlink(target, link);
     await expect(permissionStore(link)).rejects.toThrow();
-    expect(JSON.parse(await readFile(target, 'utf8'))).toEqual({ mode: 'bypass' });
+    expect(JSON.parse(await readFile(target, 'utf8'))).toEqual({ dsh: { permission: { defaultPreset: 'danger-full-access' } } });
   });
 
   it.skipIf(process.platform === 'win32')('rejects a FIFO config without blocking', async () => {
     const root = await mkdtemp(join(tmpdir(), 'omniagent-permissions-fifo-'));
     const config = join(root, 'config.json');
-    await writeFile(config, JSON.stringify({ mode: 'default' }));
+    await writeFile(config, JSON.stringify({ dsh: { permission: { defaultPreset: 'workspace-write' } } }));
     const script = `
       import assert from 'node:assert/strict';
       import { execFileSync } from 'node:child_process';
@@ -317,7 +285,7 @@ describe('permission settings API', () => {
       execFileSync('mkfifo', [path]);
       console.log('FIFO_READY');
       await assert.rejects(settings.update({ defaultPreset: 'danger-full-access' }), /regular file/);
-      assert.deepEqual(await settings.read(), { defaultPreset: null, requiresSelection: true });
+      assert.deepEqual(await settings.read(), { defaultPreset: 'workspace-write', requiresSelection: false });
       await assert.rejects(PermissionSettings.open(path), /regular file/);
     `;
     const result = await promisify(execFile)(process.execPath, ['--import', 'tsx', '--input-type=module', '-e', script, config], {
@@ -337,10 +305,10 @@ describe('permission settings API', () => {
     await mkdir(targetDir);
     await mkdir(workspaceDir);
     const target = join(targetDir, 'config.json');
-    await writeFile(target, JSON.stringify({ mode: 'default' }));
+    await writeFile(target, JSON.stringify({ dsh: { permission: { defaultPreset: 'workspace-write' } } }));
     await symlink(targetDir, linkedDir);
     await expect(permissionStore(join(linkedDir, 'config.json'))).rejects.toThrow();
-    expect(await readFile(target, 'utf8')).toBe(JSON.stringify({ mode: 'default' }));
+    expect(await readFile(target, 'utf8')).toBe(JSON.stringify({ dsh: { permission: { defaultPreset: 'workspace-write' } } }));
   });
 
   it('accepts an explicitly trusted symlinked home for reads and updates', async () => {
@@ -349,7 +317,7 @@ describe('permission settings API', () => {
     const home = join(root, 'home');
     const config = join(home, '.omniagent', 'config.json');
     await mkdir(join(realHome, '.omniagent'), { recursive: true });
-    await writeFile(join(realHome, '.omniagent', 'config.json'), JSON.stringify({ mode: 'default' }));
+    await writeFile(join(realHome, '.omniagent', 'config.json'), JSON.stringify({ dsh: { permission: { defaultPreset: 'workspace-write' } } }));
     await symlink(realHome, home);
 
     await expect(PermissionSettings.open(config)).rejects.toThrow();
@@ -357,7 +325,7 @@ describe('permission settings API', () => {
     const next = preset('read-only');
     await expect(settings.update(next)).resolves.toEqual(selected('read-only'));
     expect(settings.snapshot()).toEqual({ ...selected('read-only'), revision: 1 });
-    expect(JSON.parse(await readFile(config, 'utf8'))).toEqual({ mode: 'default', dsh: { permission: next } });
+    expect(JSON.parse(await readFile(config, 'utf8'))).toEqual({ dsh: { permission: next } });
     expect(await (await PermissionSettings.open(config, { trustedHome: home })).read()).toEqual(selected('read-only'));
   });
 
@@ -387,16 +355,16 @@ describe('permission settings API', () => {
     const configPath = join(home, '.omniagent', 'config.json');
     await mkdir(configDir, { recursive: true });
     await mkdir(target);
-    await writeFile(join(configDir, 'config.json'), JSON.stringify({ mode: 'default' }));
-    await writeFile(join(target, 'config.json'), JSON.stringify({ mode: 'bypass' }));
+    await writeFile(join(configDir, 'config.json'), JSON.stringify({ dsh: { permission: { defaultPreset: 'workspace-write' } } }));
+    await writeFile(join(target, 'config.json'), JSON.stringify({ dsh: { permission: { defaultPreset: 'danger-full-access' } } }));
     await symlink(realHome, home);
     const settings = await PermissionSettings.open(configPath, { trustedHome: home });
     await rename(configDir, join(realHome, 'moved-config'));
     await symlink(target, configDir);
     await expect(PermissionSettings.open(configPath, { trustedHome: home })).rejects.toThrow();
     await expect(settings.update(preset('read-only'))).rejects.toThrow();
-    expect(await settings.read()).toEqual(selectionRequired);
-    expect(JSON.parse(await readFile(join(target, 'config.json'), 'utf8'))).toEqual({ mode: 'bypass' });
+    expect(await settings.read()).toEqual(defaults);
+    expect(JSON.parse(await readFile(join(target, 'config.json'), 'utf8'))).toEqual({ dsh: { permission: { defaultPreset: 'danger-full-access' } } });
   });
 
   it('rejects a trusted home link retargeted after opening', async () => {
@@ -406,16 +374,16 @@ describe('permission settings API', () => {
     const home = join(root, 'home');
     for (const dir of [realHome, redirectedHome]) {
       await mkdir(join(dir, '.omniagent'), { recursive: true });
-      await writeFile(join(dir, '.omniagent', 'config.json'), JSON.stringify({ mode: 'default' }));
+      await writeFile(join(dir, '.omniagent', 'config.json'), JSON.stringify({ dsh: { permission: { defaultPreset: 'workspace-write' } } }));
     }
     await symlink(realHome, home);
     const settings = await PermissionSettings.open(join(home, '.omniagent', 'config.json'), { trustedHome: home });
     await rename(home, join(root, 'old-home-link'));
     await symlink(redirectedHome, home);
     await expect(settings.update(preset('danger-full-access'))).rejects.toThrow();
-    expect(await settings.read()).toEqual(selectionRequired);
+    expect(await settings.read()).toEqual(defaults);
     for (const dir of [realHome, redirectedHome]) {
-      expect(JSON.parse(await readFile(join(dir, '.omniagent', 'config.json'), 'utf8'))).toEqual({ mode: 'default' });
+      expect(JSON.parse(await readFile(join(dir, '.omniagent', 'config.json'), 'utf8'))).toEqual({ dsh: { permission: { defaultPreset: 'workspace-write' } } });
     }
   });
 
@@ -437,13 +405,13 @@ describe('permission settings API', () => {
     await mkdir(redirectedDir);
     const config = join(trustedDir, 'config.json');
     const redirected = join(redirectedDir, 'config.json');
-    await writeFile(config, JSON.stringify({ mode: 'default' }));
-    await writeFile(redirected, JSON.stringify({ mode: 'bypass' }));
+    await writeFile(config, JSON.stringify({ dsh: { permission: { defaultPreset: 'workspace-write' } } }));
+    await writeFile(redirected, JSON.stringify({ dsh: { permission: { defaultPreset: 'danger-full-access' } } }));
     const settings = await permissionStore(config);
     await rename(trustedDir, movedDir);
     await symlink(redirectedDir, trustedDir);
     await expect(settings.update(preset('read-only'))).rejects.toThrow();
-    expect(JSON.parse(await readFile(redirected, 'utf8'))).toEqual({ mode: 'bypass' });
+    expect(JSON.parse(await readFile(redirected, 'utf8'))).toEqual({ dsh: { permission: { defaultPreset: 'danger-full-access' } } });
   });
 
   it('rejects hostile Host and Origin on both settings operations', async () => {
@@ -470,13 +438,13 @@ describe('permission settings API', () => {
   it('keeps the last trusted permissions when workspace or external files are changed', async () => {
     const { base, configPath, workspace } = await setup();
     await mkdir(join(workspace.path, '.omniagent'));
-    await writeFile(join(workspace.path, '.omniagent', 'config.json'), JSON.stringify({ mode: 'bypass' }));
-    await writeFile(configPath, JSON.stringify({ mode: 'bypass' }));
+    await writeFile(join(workspace.path, '.omniagent', 'config.json'), JSON.stringify({ dsh: { permission: { defaultPreset: 'danger-full-access' } } }));
+    await writeFile(configPath, JSON.stringify({ dsh: { permission: { defaultPreset: 'danger-full-access' } } }));
     expect(await (await fetch(`${base}/api/settings/permissions`)).json()).toEqual({ settings: defaults });
     const response = await fetch(`${base}/api/settings/permissions`, put(preset('read-only')));
     expect(response.status).toBe(500);
     expect(await (await fetch(`${base}/api/settings/permissions`)).json()).toEqual({ settings: defaults });
-    expect(JSON.parse(await readFile(configPath, 'utf8'))).toEqual({ mode: 'bypass' });
+    expect(JSON.parse(await readFile(configPath, 'utf8'))).toEqual({ dsh: { permission: { defaultPreset: 'danger-full-access' } } });
   });
 
   it('does not trust files edited through a workspace that contains the global config', async () => {
@@ -485,7 +453,7 @@ describe('permission settings API', () => {
     const configDir = join(workspacePath, '.omniagent');
     await mkdir(configDir, { recursive: true });
     const configPath = join(configDir, 'config.json');
-    await writeFile(configPath, JSON.stringify({ mode: 'default' }));
+    await writeFile(configPath, JSON.stringify({ dsh: { permission: { defaultPreset: 'workspace-write' } } }));
     const settings = await permissionStore(configPath);
     const workspaces = new WorkspaceRegistry(join(root, 'workspaces.json'));
     await workspaces.add(workspacePath);
@@ -494,20 +462,20 @@ describe('permission settings API', () => {
       createSession: () => { throw new Error('unexpected session creation'); },
     });
     hosts.push(host);
-    await writeFile(configPath, JSON.stringify({ mode: 'bypass' }));
-    expect(settings.snapshot()).toEqual({ ...selectionRequired, revision: 0 });
+    await writeFile(configPath, JSON.stringify({ dsh: { permission: { defaultPreset: 'danger-full-access' } } }));
+    expect(settings.snapshot()).toEqual({ ...defaults, revision: 0 });
     expect((await fetch(`${host.address()}/api/settings/permissions`, put(preset('read-only')))).status).toBe(500);
-    expect(JSON.parse(await readFile(configPath, 'utf8'))).toEqual({ mode: 'bypass' });
+    expect(JSON.parse(await readFile(configPath, 'utf8'))).toEqual({ dsh: { permission: { defaultPreset: 'danger-full-access' } } });
   });
 
   it.skipIf(process.geteuid?.() === 0)('does not apply a failed config write to runtime settings', async () => {
-    const { base, configDir, configPath } = await setup({ mode: 'default' });
+    const { base, configDir, configPath } = await setup({ dsh: { permission: { defaultPreset: 'workspace-write' } } });
     await chmod(configDir, 0o500);
     try {
       const response = await fetch(`${base}/api/settings/permissions`, put(preset('danger-full-access')));
       expect(response.status).toBe(500);
-      expect(await (await fetch(`${base}/api/settings/permissions`)).json()).toEqual({ settings: selectionRequired });
-      expect(JSON.parse(await readFile(configPath, 'utf8'))).toEqual({ mode: 'default' });
+      expect(await (await fetch(`${base}/api/settings/permissions`)).json()).toEqual({ settings: defaults });
+      expect(JSON.parse(await readFile(configPath, 'utf8'))).toEqual({ dsh: { permission: { defaultPreset: 'workspace-write' } } });
     } finally {
       await chmod(configDir, 0o700);
     }

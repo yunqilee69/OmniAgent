@@ -94,6 +94,30 @@ describe('DSH sandbox capability and argv', () => {
     },
   );
 
+  it('reports probe failures while refusing unconfined execution', async () => {
+    const options = {
+      platform: 'linux',
+      runProbe: () => ({ status: 1, stdout: '', stderr: 'namespace access denied' }),
+    };
+    await expect(confineDshArgv(['/bin/true'], policy, options))
+      .rejects.toThrow(/namespace access denied.*refusing unconfined execution/);
+  });
+
+  it('keeps the original tmp visible when a writable root lies beneath it', async () => {
+    const tmpWorkspace = await realpath(await mkdtemp('/tmp/omni-dsh-bind-'));
+    const nested = join(tmpWorkspace, 'parent', 'workspace');
+    await mkdir(nested, { recursive: true });
+    try {
+      const result = await confineDshArgv(['/bin/true'], { ...policy, workspaceRoot: nested }, {
+        platform: 'linux', runProbe: () => ({ status: 0, stdout: '' }),
+      });
+      expect(result.argv).not.toContain('--tmpfs');
+      expect(result.argv).toEqual(expect.arrayContaining(['--bind', nested]));
+    } finally {
+      await rm(tmpWorkspace, { recursive: true, force: true });
+    }
+  });
+
   it('rejects unknown modes at runtime rather than treating them as a bypass', async () => {
     await expect(confineDshArgv(['/bin/true'], { ...policy, mode: 'unknown' as DshSandboxPolicy['mode'] }))
       .rejects.toThrow();

@@ -20,9 +20,7 @@ import type { SessionTitleLimits, SessionTitleLlmOptions, SessionTitleMessage, S
 import type { AgentEvent, StopReason } from './protocol/events';
 import type {
   ApprovalHandler,
-  PermissionMode,
   PermissionRequest,
-  Rule,
 } from './protocol/permission';
 import type { SubagentNotice, SubagentService } from './domain/subagent';
 import { SUBAGENT_NOTICE_EVENT } from './domain/subagent';
@@ -69,7 +67,9 @@ import { DSH_PRESET_BUNDLES, isDshPermissionPreset, snapshotDshPermissions } fro
 import type { DshPermissionSnapshot, DshSandboxMode } from './permissions/dsh-permissions';
 import { checkDshMutation } from './sandbox/dsh-fs';
 import type { DshSandboxPolicy } from './sandbox/dsh-policy';
+import type { DshSandboxOptions } from './sandbox/dsh-sandbox';
 import { AgentLoop, DEFAULT_MAX_STEPS } from './loop/agent-loop';
+import { estimateMessages } from './context/compaction';
 import type { PreparedToolCall } from './loop/agent-loop';
 import type { SessionHandle } from './session/store';
 import { projectMessages } from './session/projection';
@@ -98,10 +98,9 @@ export interface SessionOptions {
   /** Allow several todo items to remain in_progress when work runs in parallel. */
   todoAllowParallelInProgress?: boolean;
   system?: string;
-  /** Legacy fields are retained for source compatibility and never authorize calls. */
-  mode?: PermissionMode;
-  rules?: Rule[];
   dshPermissions?: DshPermissionSnapshot;
+  /** Trusted host-only sandbox configuration; never populated from tool arguments. */
+  dshSandbox?: DshSandboxOptions;
   /** UI 提供：渲染一次确认提示并返回结果。 */
   approve?: (request: PermissionRequest, signal: AbortSignal) => ReturnType<ApprovalHandler>;
   /** UI 提供：审阅计划并决定是否退出 plan 模式。 */
@@ -155,6 +154,7 @@ export class Session {
   private readonly tools: ToolRegistry;
   private readonly trusted = new Set<Tool>();
   private readonly dshShell?: Tool;
+  private readonly dshSandbox?: DshSandboxOptions;
   private readonly dshWrite?: Tool;
   private readonly dshEdit?: Tool;
   private readonly session?: SessionHandle;
@@ -186,6 +186,7 @@ export class Session {
     this.session = options.session;
     this.id = options.session?.id ?? options.sessionId ?? `s_${Date.now().toString(36)}`;
     this.#dshPermissions = copyDshPermissions(options.dshPermissions);
+    this.dshSandbox = options.dshSandbox && { ...options.dshSandbox };
     this.workspacePath = options.workspace ?? options.session?.header.workspace;
     this.agentValue = options.agent;
     this.modelCapabilities = options.modelCapabilities;
@@ -244,6 +245,7 @@ export class Session {
     if (allows('bash') && !this.tools.has('bash')) {
       this.dshShell = createDshShellTool({
         policy: { mode: this.#dshPermissions?.sandbox ?? 'read-only', workspaceRoot: options.cwd },
+        sandbox: this.dshSandbox,
       });
       this.tools.register(this.dshShell);
       this.trusted.add(this.dshShell);
@@ -337,6 +339,11 @@ export class Session {
 
   get messages(): readonly Message[] {
     return this.history;
+  }
+
+  /** Estimate the prepared history for the next turn, only when idle. */
+  contextMessageEstimate(): number | undefined {
+    return this.activeTurn ? undefined : estimateModelHistory(this.history);
   }
 
   get cwd(): string {
@@ -887,7 +894,7 @@ export class Session {
     let selected: Tool | undefined = tool;
     if (tool === this.dshWrite) selected = dshWriteFileTool(policy);
     else if (tool === this.dshEdit) selected = dshEditFileTool(policy);
-    else if (tool === this.dshShell) selected = createDshShellTool({ policy });
+    else if (tool === this.dshShell) selected = createDshShellTool({ policy, sandbox: this.dshSandbox });
     const registry = new ToolRegistry();
     if (selected) registry.register(selected);
     const executor = new ToolExecutor(registry, { cwd, signal });
@@ -1152,6 +1159,10 @@ function dshEditFileTool(policy: DshSandboxPolicy): Tool {
 }
 
 /** Repair only the provider input; the session transcript remains an exact record of events. */
+export function estimateModelHistory(history: readonly Message[]): number {
+  return estimateMessages(prepareModelHistory(history).messages);
+}
+
 function prepareModelHistory(history: readonly Message[]): { messages: Message[]; repaired: boolean } {
   const messages: Message[] = [];
   let repaired = false;

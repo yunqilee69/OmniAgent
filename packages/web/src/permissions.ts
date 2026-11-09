@@ -39,7 +39,7 @@ function validateUpdate(value: unknown): DshPermissionPreset {
   return value.defaultPreset;
 }
 
-/** Resolve only the persisted DSH setting; legacy modes and rules never imply a preset. */
+/** Resolve only the persisted DSH setting. */
 function resolveSettings(config: Record<string, unknown>): PermissionSettingsValue {
   if (Object.hasOwn(config, 'dsh')) {
     if (!isObject(config.dsh)) return resolveDshDefaultPreset(null);
@@ -51,9 +51,7 @@ function resolveSettings(config: Record<string, unknown>): PermissionSettingsVal
       }
     }
   }
-  return resolveDshDefaultPreset(
-    Object.hasOwn(config, 'mode') || Object.hasOwn(config, 'permissions') ? null : undefined,
-  );
+  return resolveDshDefaultPreset(undefined);
 }
 
 async function assertNoSymlinkParents(path: string, allowMissingFinal = false): Promise<void> {
@@ -167,7 +165,6 @@ export class PermissionSettings {
       if (dsh !== undefined && !isObject(dsh)) throw new Error('Invalid DSH configuration');
       const permission = dsh?.permission;
       if (permission !== undefined && !isObject(permission)) throw new Error('Invalid DSH permission configuration');
-      // This namespace is independent of the legacy mode and permissions fields.
       const config = {
         ...current.config,
         dsh: { ...dsh, permission: { ...permission, defaultPreset: nextPreset } },

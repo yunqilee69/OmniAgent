@@ -49,8 +49,6 @@ Claude Code 是 **permission-first**：默认每个工具首次使用都问，al
 2. **wrapper 先剥掉**：`timeout`、`nice`、`nohup`、裸 `xargs` 等在匹配前去掉。
 3. **它不是安全边界**（文档原话大意）：`Bash(curl *)` 拦得住 `curl ...`，拦不住 `/usr/bin/curl ...` 或 `sh -c 'curl ...'`。
 
-第 1、2 条已在 `permissions/bash.ts` 实现；第 3 条写在 README 的「权限 vs 沙盒」里。
-
 ### 路径规则
 
 前缀语义解决「规则文件在哪、路径相对谁」：
@@ -68,8 +66,6 @@ Claude Code 是 **permission-first**：默认每个工具首次使用都问，al
 - `Write` / `NotebookEdit` / `Glob` / `MultiEdit` 上的路径规则**能写但不生效**，官方让用 `Edit(...)` / `Read(...)`。
 - 支持参数匹配（`Agent(model:opus)`、`Bash(run_in_background:true)`），但**明确不支持** `command` / `file_path` / `path` / `url` 这类主内容字段——避免给人假的安全感。这个「知道什么不该支持」的判断很值得学。
 
-已实现于 `permissions/rules.ts` 的 `resolveRulePath` / `matchesPath`。
-
 ### 设置作用域
 
 - 项目：`.claude/settings.json`（需先接受 workspace trust）
@@ -78,7 +74,7 @@ Claude Code 是 **permission-first**：默认每个工具首次使用都问，al
 - managed：最高优先级，可用 `allowManagedPermissionRulesOnly` 独占规则来源
 - `--settings <file>`：`/path` 规则锚定到该文件所在目录
 
-我们的 `config/load.ts` 目前只读 `~/.omniagent/config.json`，但 `Rule.source` 字段已经预留，扩展多作用域不用改数据结构。
+这些是 Claude Code 的设置作用域，不是 OmniAgent 的配置格式。
 
 ## 沙盒
 
@@ -120,17 +116,4 @@ Claude Code 是 **permission-first**：默认每个工具首次使用都问，al
 
 模型可以请求 `dangerouslyDisableSandbox` 做一次「非沙盒重试」；`allowUnsandboxedCommands: false` 关掉它。`excludedCommands`（如 `docker compose *`）在沙盒外跑。
 
-## 可以抄进 OmniAgent 的
-
-1. **规则求值按类别而非按精度**（已实现）。
-2. **复合命令拆解 + wrapper 剥离**（已实现于 `permissions/bash.ts`）。
-3. **路径前缀语义**（已实现于 `resolveRulePath`）。
-4. **拒绝参数匹配主内容字段**这条克制：我们也只匹配 `path` / `command`，不做通用参数匹配。
-5. **沙盒直接复用 `@anthropic-ai/sandbox-runtime`**：M3 的首选路径，比自己啃 Seatbelt profile 语法省一个月。
-6. **代理做解析后地址检查**：等 M3 做网络策略时再抄，现在别提前。
-
-## 不抄的
-
-- `auto` 分类器模式（需要 eval harness 才能评估）。
-- `mask` 凭据（要 TLS 终止，复杂度远超收益）。
-- 默认「依赖缺失就退回不沙盒」的危险行为——我们改成 fail closed。
+以上是 Claude Code 的设计，不是 OmniAgent 的配置或安全保证。OmniAgent 的实际边界见 [架构文档](../architecture.md)。

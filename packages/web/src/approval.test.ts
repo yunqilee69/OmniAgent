@@ -34,8 +34,7 @@ async function expectMissing(workspace: string, path = 'approval.txt') {
 const request: PermissionRequest = {
   id: 'same-model-id',
   call: { id: 'same-model-id', name: 'write_file', arguments: writeCall().args, raw: 'private-raw' },
-  reason: 'private-rule',
-  matchedRule: { raw: 'private-rule', decision: 'ask', source: 'user', tool: 'write_file', anchor: '/private' },
+  reason: 'private-reason',
 };
 
 async function nextRequest(iterator: AsyncGenerator<AgentEvent>) {
@@ -215,7 +214,7 @@ describe('web approval broker', () => {
     const prompt = (await nextRequest(stream)).prompt;
     expect(prompt.reason).toBe('Tool execution requires approval');
     expect(JSON.stringify(prompt)).not.toContain('private-raw');
-    expect(JSON.stringify(prompt)).not.toContain('private-rule');
+    expect(JSON.stringify(prompt)).not.toContain('private-reason');
     expect(JSON.stringify(prompt)).not.toContain('/private');
     await vi.advanceTimersByTimeAsync(100);
     expect(await result).toBe('deny');

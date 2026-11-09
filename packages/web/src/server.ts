@@ -1,4 +1,6 @@
 import { createServer, type IncomingMessage, type Server, type ServerResponse } from 'node:http';
+import { createHash, randomBytes, timingSafeEqual } from 'node:crypto';
+import { isIP } from 'node:net';
 import { readFile, stat } from 'node:fs/promises';
 import { extname, isAbsolute, normalize, resolve, sep } from 'node:path';
 import { fileURLToPath } from 'node:url';
@@ -7,6 +9,7 @@ import {
   createSessionForkEvent,
   createSessionPinEvent,
   DEFAULT_SESSION_TITLE_LIMITS,
+  estimateModelHistory,
   foldSessionPinned,
   foldSessionTitle,
   hasHumanMessage,
@@ -81,6 +84,7 @@ import { exportSession } from './session-export';
 import { projectTraceEvents } from './trace-projection';
 import { projectTrajectory } from './trajectory';
 import { searchWorkspaceFiles } from './workspace-files';
+import { DefaultWorkspaceRemovalError } from './workspaces';
 import type { LiveSessionRegistry } from './live-sessions';
 import type { Workspace, WorkspaceRegistry } from './workspaces';
 
@@ -92,6 +96,8 @@ export interface WebSession {
   deliverUserMessage?(input: string | readonly ContentPart[]): Promise<'queued'>;
   /** Compact older history before the next model request. */
   requestCompaction?(): void;
+  contextMessageEstimate?(): number | undefined;
+  readonly activeTurn?: boolean;
 }
 
 /** Composer attachment accepted by the message route. */
@@ -138,6 +144,8 @@ export interface ModelSummary {
 }
 
 export interface WebHostOptions {
+  host?: string;
+  auth?: { enabled: boolean; username?: string; password?: string };
   workspaces: Pick<WorkspaceRegistry, 'list' | 'get' | 'add' | 'remove' | 'touch'>;
   store: Pick<SessionStore, 'list' | 'create' | 'open' | 'delete'>;
   /** Unconfigured composition seam; configured hosts use createRuntimeSession. */
@@ -258,6 +266,13 @@ interface CachedSession {
 }
 
 export function createWebHost(options: WebHostOptions): WebHost {
+  const bindHost = options.host ?? '127.0.0.1';
+  const auth = options.auth ?? { enabled: false };
+  if (auth.enabled && (!auth.username?.trim() || !auth.password?.trim())) {
+    throw new Error('Web authentication requires a nonempty username and password');
+  }
+  const authSessions = new Map<string, { expires: number; responses: Set<ServerResponse> }>();
+  const attempts = new Map<string, { count: number; until: number }>();
   const sessions = new Map<string, CachedSession>();
   const running = new Map<string, RunningTurn>();
   const creating = new Map<string, number>();
@@ -270,8 +285,59 @@ export function createWebHost(options: WebHostOptions): WebHost {
     // A client can reset the connection while a response write is in flight;
     // that surfaces as EPIPE/ECONNRESET on the socket, not on the response.
     response.socket?.on('error', () => undefined);
-    void route(request, response, options, sessions, running, creating, removing, permissionLocks, failedPermissions,
-      compactRequests, () => permissionDefaultUpdates, (value) => { permissionDefaultUpdates = value; }).catch((error: unknown) => {
+    void (async () => {
+      validateOrigin(request, bindHost, auth.enabled);
+      const pathname = new URL(request.url ?? '/', 'http://localhost').pathname;
+      const token = sessionToken(request);
+      const now = Date.now();
+      for (const [key, session] of authSessions) {
+        if (session.expires <= now) {
+          revokeAuthSession(authSessions, key);
+        }
+      }
+      for (const [key, attempt] of attempts) if (attempt.until <= now) attempts.delete(key);
+      const session = token === undefined ? undefined : authSessions.get(token);
+      if (pathname === '/api/auth/status' && request.method === 'GET') {
+        return json(response, 200, { enabled: auth.enabled, authenticated: !auth.enabled || session !== undefined });
+      }
+      if (pathname === '/api/auth/login' && request.method === 'POST') {
+        if (!auth.enabled) return json(response, 200, { enabled: false, authenticated: true });
+        const client = request.socket.remoteAddress ?? 'unknown';
+        const attempt = attempts.get(client);
+        if (attempt && attempt.count >= 5) {
+          response.setHeader('retry-after', String(Math.max(1, Math.ceil((attempt.until - now) / 1000))));
+          throw new HttpError(429, 'Too many login attempts');
+        }
+        if (!attempt && attempts.size >= 10000) throw new HttpError(429, 'Too many login attempts');
+        attempts.set(client, { count: (attempt?.count ?? 0) + 1, until: attempt?.until ?? now + 60_000 });
+        const body = await readJson(request, 4096);
+        const valid = typeof body.username === 'string' && typeof body.password === 'string'
+          && secureEqual(body.username, auth.username!) && secureEqual(body.password, auth.password!);
+        if (!valid) throw new HttpError(401, 'Invalid credentials');
+        attempts.delete(client);
+        if (token !== undefined) revokeAuthSession(authSessions, token);
+        if (authSessions.size >= 10000) throw new HttpError(503, 'Session capacity reached');
+        const newToken = randomBytes(32).toString('hex');
+        authSessions.set(newToken, { expires: now + AUTH_SESSION_MS, responses: new Set() });
+        response.setHeader('set-cookie', `${AUTH_COOKIE}=${newToken}; Path=/; HttpOnly; SameSite=Strict; Max-Age=${AUTH_SESSION_MS / 1000}`);
+        return json(response, 200, { enabled: true, authenticated: true });
+      }
+      if (pathname === '/api/auth/logout' && request.method === 'POST') {
+        if (token !== undefined) revokeAuthSession(authSessions, token);
+        response.setHeader('set-cookie', `${AUTH_COOKIE}=; Path=/; HttpOnly; SameSite=Strict; Max-Age=0`);
+        return json(response, 200, { enabled: auth.enabled, authenticated: !auth.enabled });
+      }
+      if (auth.enabled && (pathname === '/api' || pathname.startsWith('/api/'))) {
+        if (!session) throw new HttpError(401, 'Authentication required');
+        session.responses.add(response);
+        response.once('close', () => session.responses.delete(response));
+        const timeout = setTimeout(() => { if (token !== undefined) revokeAuthSession(authSessions, token); }, session.expires - now);
+        timeout.unref();
+        response.once('close', () => clearTimeout(timeout));
+      }
+      await route(request, response, options, sessions, running, creating, removing, permissionLocks, failedPermissions,
+        compactRequests, () => permissionDefaultUpdates, (value) => { permissionDefaultUpdates = value; });
+    })().catch((error: unknown) => {
       if (response.headersSent) {
         if (!response.destroyed && !response.writableEnded) response.end();
         return;
@@ -289,7 +355,9 @@ export function createWebHost(options: WebHostOptions): WebHost {
     server,
     address: () => {
       const address = server.address();
-      return typeof address === 'object' && address !== null ? `http://127.0.0.1:${address.port}` : undefined;
+      if (typeof address !== 'object' || address === null) return undefined;
+      const hostname = bindHost === '0.0.0.0' || bindHost === '::' ? '127.0.0.1' : bindHost;
+      return `http://${hostname.includes(':') ? `[${hostname}]` : hostname}:${address.port}`;
     },
     close: () => new Promise((resolve, reject) => {
       for (const turn of running.values()) {
@@ -302,11 +370,21 @@ export function createWebHost(options: WebHostOptions): WebHost {
   };
 }
 
+export function parseWebPort(override: string | undefined, configured: number): number {
+  if (override === undefined) return configured;
+  if (!/^\d+$/.test(override)) throw new Error('OMNIAGENT_PORT must be an integer between 1 and 65535');
+  const port = Number(override);
+  if (!Number.isSafeInteger(port) || port < 1 || port > 65535) {
+    throw new Error('OMNIAGENT_PORT must be an integer between 1 and 65535');
+  }
+  return port;
+}
+
 export async function startWebHost(options: WebHostOptions, port = 0): Promise<WebHost> {
   const host = createWebHost(options);
   await new Promise<void>((resolve, reject) => {
     host.server.once('error', reject);
-    host.server.listen(port, '127.0.0.1', () => {
+    host.server.listen(port, options.host ?? '127.0.0.1', () => {
       host.server.off('error', reject);
       resolve();
     });
@@ -400,7 +478,6 @@ async function route(
   getPermissionDefaultUpdates: () => number,
   setPermissionDefaultUpdates: (value: number) => void,
 ): Promise<void> {
-  validateOrigin(request);
   const url = new URL(request.url ?? '/', 'http://localhost');
   if (request.method === 'GET' && url.pathname === '/health') return json(response, 200, { ok: true });
   if ((request.method === 'GET' || request.method === 'HEAD')
@@ -715,6 +792,7 @@ async function route(
     return json(response, 200, { entries: await searchWorkspaceFiles(workspace.path, query, limit) });
   }
   if (request.method === 'DELETE' && parts.length === 3) {
+    if (workspace.isDefault === true) throw new HttpError(403, 'The default workspace cannot be removed');
     if (removing.has(workspace.id) || creating.has(workspace.id) ||
         [...running.keys()].some((key) => key.startsWith(workspacePrefix)) ||
         [...permissionLocks.keys()].some((key) => key.startsWith(workspacePrefix))) {
@@ -722,7 +800,13 @@ async function route(
     }
     removing.add(workspace.id);
     try {
-      const removed = await options.workspaces.remove(workspace.id);
+      let removed: boolean;
+      try {
+        removed = await options.workspaces.remove(workspace.id);
+      } catch (error) {
+        if (error instanceof DefaultWorkspaceRemovalError) throw new HttpError(403, error.message);
+        throw error;
+      }
       for (const key of sessions.keys()) if (key.startsWith(workspacePrefix)) sessions.delete(key);
       return json(response, 200, { removed });
     } finally {
@@ -933,6 +1017,47 @@ async function route(
     const created = await forkSession(options.store, source, workspace);
     await options.workspaces.touch(workspace.id);
     return json(response, 201, { session: summarize(created) });
+  }
+  if (request.method === 'GET' && parts.length === 6 && parts[5] === 'context') {
+    const handle = await openSession(options.store, workspace, sessionId);
+    let runtime: ResolvedSessionRuntime | undefined;
+    if (options.runtime) {
+      const agent = projectAgentSelection(handle.events);
+      const binding = projectModelSelection(handle.events);
+      if (agent.status === 'selected' && binding.status === 'selected') {
+        try {
+          runtime = await options.runtime.resolve({
+            cwd: handle.header.cwd ?? workspace.path,
+            agentId: agent.agent,
+            binding: binding.binding,
+            isRoot: true,
+            ...(modeRuntimeOverride(handle) === undefined ? {} : { mode: modeRuntimeOverride(handle) }),
+          });
+        } catch { /* An unavailable runtime has no known window. */ }
+      }
+    }
+    const shared = options.liveSessions?.get(key);
+    const cached = sessions.get(key);
+    const modelKey = runtime === undefined ? '' : JSON.stringify(runtime.modelBinding);
+    const revision = runtime?.revision;
+    const preset = permissionProjection(handle, key, failedPermissions).preset;
+    const matches = (candidate: { preset: unknown; modelKey: string; runtimeKey?: string }): boolean =>
+      candidate.preset === preset && candidate.modelKey === modelKey && candidate.runtimeKey === revision;
+    const sharedSession = shared?.session as WebSession | undefined;
+    let live: WebSession | undefined;
+    if (shared && matches(shared)) live = sharedSession;
+    else if (cached && matches(cached)) live = await cached.pending.catch(() => undefined);
+    const runningNow = running.has(key) || sharedSession?.activeTurn === true || live?.activeTurn === true;
+    // A live runtime owns the authoritative post-compaction history. Only use
+    // replay when the next turn would create a fresh runtime from the log.
+    const estimatedMessageTokens = runningNow ? undefined
+      : live ? live.contextMessageEstimate?.() : estimateModelHistory(projectMessages(handle.events));
+    return json(response, 200, {
+      ...(estimatedMessageTokens === undefined ? {} : { estimatedMessageTokens }),
+      ...(runtime?.contextWindowTokens === undefined || runtime.contextWindowSource === undefined ? {} : {
+        window: { tokens: runtime.contextWindowTokens, source: runtime.contextWindowSource },
+      }),
+    });
   }
   if (request.method === 'GET' && parts.length === 6 && parts[5] === 'messages') {
     const handle = await openSession(options.store, workspace, sessionId);
@@ -1830,25 +1955,53 @@ async function drainRequest(iterator: AsyncIterator<Buffer | string | Uint8Array
   }
 }
 
-function validateOrigin(request: IncomingMessage): void {
-  const host = request.headers.host;
-  if (!host || !isLocalUrl(`http://${host}`, request.socket.localPort)) throw new HttpError(403, 'Invalid Host');
-  const origin = request.headers.origin;
-  if (origin && (!isLocalUrl(origin, request.socket.localPort) ||
-      new URL(origin).origin !== new URL(`http://${host}`).origin)) {
-    throw new HttpError(403, 'Invalid Origin');
-  }
+const AUTH_COOKIE = 'omniagent_session';
+const AUTH_SESSION_MS = 12 * 60 * 60 * 1000;
+
+function secureEqual(left: string, right: string): boolean {
+  const digest = (value: string) => createHash('sha256').update(value).digest();
+  return timingSafeEqual(digest(left), digest(right));
 }
 
-function isLocalUrl(value: string, port: number | undefined): boolean {
+function sessionToken(request: IncomingMessage): string | undefined {
+  const matches = (request.headers.cookie ?? '').split(';').map((part) => part.trim())
+    .filter((part) => part.startsWith(`${AUTH_COOKIE}=`));
+  if (matches.length !== 1) return undefined;
+  const token = matches[0]!.slice(AUTH_COOKIE.length + 1);
+  return /^[a-f0-9]{64}$/.test(token) ? token : undefined;
+}
+
+function revokeAuthSession(sessions: Map<string, { expires: number; responses: Set<ServerResponse> }>, token: string): void {
+  const session = sessions.get(token);
+  sessions.delete(token);
+  if (session) for (const response of session.responses) response.destroy();
+}
+
+function validateOrigin(request: IncomingMessage, bindHost: string, authEnabled: boolean): void {
+  const host = request.headers.host;
+  let url: URL;
   try {
-    const url = new URL(value);
-    return url.protocol === 'http:' && ['127.0.0.1', 'localhost', '[::1]'].includes(url.hostname) &&
-      !url.username && !url.password && url.pathname === '/' && !url.search && !url.hash &&
-      Number(url.port || 80) === port;
+    url = new URL(`http://${host ?? ''}`);
+    if (!host || /[\s\/@?#\\,]/.test(host) || url.username || url.password || url.pathname !== '/' || url.search || url.hash ||
+      Number(url.port || 80) !== request.socket.localPort) throw new Error();
   } catch {
-    return false;
+    throw new HttpError(403, 'Invalid Host');
   }
+  const hostname = url.hostname.replace(/^\[|\]$/g, '').toLowerCase();
+  const localAddress = (request.socket.localAddress ?? '').replace(/^::ffff:/, '').toLowerCase();
+  const wildcard = bindHost === '0.0.0.0' || bindHost === '::';
+  const loopback = ['127.0.0.1', '::1', 'localhost'].includes(hostname);
+  const boundLoopback = ['127.0.0.1', '::1', 'localhost'].includes(bindHost.toLowerCase());
+  const validHost = wildcard
+    ? ((isIP(hostname) !== 0 && hostname === localAddress) || (hostname === 'localhost' && ['127.0.0.1', '::1'].includes(localAddress)))
+    : hostname === bindHost.toLowerCase().replace(/^\[|\]$/g, '') || (boundLoopback && loopback);
+  if (!validHost) throw new HttpError(403, 'Invalid Host');
+  const origin = request.headers.origin;
+  if (origin !== undefined && origin !== url.origin) throw new HttpError(403, 'Invalid Origin');
+  if (authEnabled && !['GET', 'HEAD', 'OPTIONS'].includes(request.method ?? '') && origin === undefined) {
+    throw new HttpError(403, 'Origin required');
+  }
+  if (request.headers['sec-fetch-site'] === 'cross-site') throw new HttpError(403, 'Invalid Origin');
 }
 
 function decodePart(value: string): string {

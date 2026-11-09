@@ -39,20 +39,6 @@ async function workspace(): Promise<string> {
 }
 
 describe('Session DSH permissions', () => {
-  it('denies legacy bypass and allow rules when there is no DSH snapshot', async () => {
-    const execute = vi.fn(async () => ({ content: 'executed' }));
-    const tool: Tool = { name: 'example', description: '', parameters: z.object({}), mutating: true, execute };
-    const approve = vi.fn(async () => 'allow' as const);
-    const session = new Session({
-      cwd: process.cwd(), model: model([{ id: 'c1', name: 'example', args: {} }]),
-      tools: new ToolRegistry().register(tool), mode: 'bypass',
-      rules: [{ raw: '*', tool: '*', decision: 'allow', source: 'managed', anchor: process.cwd() }], approve,
-    });
-    expect(decisions(await collect(session.send('go')))).toEqual([{ callId: 'c1', decision: 'deny' }]);
-    expect(execute).not.toHaveBeenCalled();
-    expect(approve).not.toHaveBeenCalled();
-  });
-
   it('denies unrecognized custom tools in confined modes even when their metadata claims they are non-mutating', async () => {
     const execute = vi.fn(async () => ({ content: 'executed' }));
     const tool: Tool = { name: 'example', description: '', parameters: z.object({}), mutating: false, execute };
@@ -91,7 +77,7 @@ describe('Session DSH permissions', () => {
       const calls = [
         { id: 'missing-reason', name: 'write_file', args: { file_path: 'a', content: '', sandbox_permissions: 'danger-full-access' } },
         { id: 'blank-reason', name: 'write_file', args: { file_path: 'b', content: '', sandbox_permissions: 'danger-full-access', justification: ' ' } },
-        { id: 'bad-target', name: 'write_file', args: { file_path: 'c', content: '', sandbox_permissions: 'bypass', justification: 'reason' } },
+        { id: 'bad-target', name: 'write_file', args: { file_path: 'c', content: '', sandbox_permissions: 'invalid-preset', justification: 'reason' } },
         { id: 'reason-only', name: 'write_file', args: { file_path: 'd', content: '', justification: 'reason' } },
         { id: 'same', name: 'write_file', args: { file_path: 'e', content: '', sandbox_permissions: 'workspace-write', justification: 'reason' } },
         { id: 'narrow', name: 'write_file', args: { file_path: 'f', content: '', sandbox_permissions: 'read-only', justification: 'reason' } },
@@ -170,6 +156,27 @@ describe('Session DSH permissions', () => {
     } finally { await rm(root, { recursive: true, force: true }); }
   });
 
+  it('retains trusted sandbox options when constructing an approved shell call', async () => {
+    const root = await workspace();
+    try {
+      const runProbe = vi.fn(() => ({ status: 1, stdout: '', stderr: 'test backend unavailable' }));
+      const approve = vi.fn(async () => 'allow' as const);
+      const session = new Session({
+        cwd: root, dshPermissions: snapshot('read-only'), approve,
+        dshSandbox: { platform: 'linux', landlockLauncher: '/trusted/landlock-run', runProbe },
+        model: model([{ id: 'bash', name: 'bash', args: {
+          command: 'printf should-not-run', sandbox_permissions: 'workspace-write', justification: 'Need workspace access',
+        } }]),
+      });
+      const events = await collect(session.send('go'));
+      expect(approve).toHaveBeenCalledOnce();
+      expect(runProbe).toHaveBeenCalledWith(['/trusted/landlock-run', '--probe'], expect.any(Number));
+      expect(events.find((event) => event.type === 'tool.result')).toMatchObject({
+        result: { ok: false, content: expect.stringContaining('test backend unavailable') },
+      });
+    } finally { await rm(root, { recursive: true, force: true }); }
+  });
+
   it('captures a frozen snapshot at construction and keeps it throughout a multi-call turn', async () => {
     const supplied = { ...snapshot('danger-full-access') };
     const execute = vi.fn(async () => ({ content: 'executed' }));
@@ -230,9 +237,9 @@ describe('Session DSH permissions', () => {
     } finally { await rm(root, { recursive: true, force: true }); }
   });
 
-  it('rejects invalid snapshots instead of mapping legacy modes or trusting mismatched bundles', () => {
+  it('rejects invalid snapshots and mismatched bundles', () => {
     for (const invalid of [
-      { preset: 'bypass', sandbox: 'danger-full-access', approval: 'never' },
+      { preset: 'invalid-preset', sandbox: 'danger-full-access', approval: 'never' },
       { preset: 'read-only', sandbox: 'danger-full-access', approval: 'never' },
       { preset: 'workspace-write', sandbox: 'workspace-write', approval: 'never' },
       null,

@@ -30,7 +30,7 @@ Codex 是 **sandbox-first**：默认把命令关进操作系统沙盒里跑，�
 3. 可读/可写策略按路径**具体度**解析：更窄的可写路径可以重新打开更宽的只读/禁止父目录；但**更窄的 deny 子路径仍然赢**。
 4. 无法读取的 glob 匹配会被展开并遮蔽；可写根内若某个受保护路径的组件是 symlink 或不存在，用挂载 `/dev/null` 的方式封掉。
 
-第 4 条是防 symlink 绕过的标准做法，我们 M3 一定要做：只在字符串层面判路径（我们现在的 `resolveInside`）是挡不住 symlink 的。
+这是 Codex 的沙盒设计。OmniAgent 的文件围栏会解析物理路径，但仍有检查与系统调用之间的 TOCTOU 窗口。
 
 ### 网络
 
@@ -83,16 +83,4 @@ approval_policy = { granular = {
 - 多条命中时取**最严格**的：`forbidden > prompt > allow`。
 - 第一 token 精确匹配优先；开了 `--resolve-host-executables` 后，绝对路径可以退化成 basename 规则。
 
-## 可以抄进 OmniAgent 的
-
-1. **deny 优先 + 取最严格**的求值语义（已在 `permissions/evaluate.ts` 实现，按类别 deny → ask → allow）。
-2. **受保护路径在可写根内重新只读**：`.git`、`.omniagent`（已在 `permissions/modes.ts` 里用「问一次」的软方式实现，硬方式留给沙盒）。
-3. **规则文件自带 match / not_match 测试**：我们的等价做法是给 `rules.ts` 写表驱动测试；等你受够了手写测试，可以升级成规则文件里携带样例。
-4. **symlink 用 `/dev/null` 遮蔽**：M3 绕不过去的东西。
-5. **项目级信任**比逐条规则省事，适合个人 agent 起步。
-
-## 不抄的
-
-- Starlark DSL。个人项目的规则量还没到需要 DSL 的程度，JSON 足够；等规则超过 ~50 条再考虑。
-- Windows 沙盒。M3 只做 macOS 和 Linux。
-- `auto_review` 分类器。没有 eval harness 之前，无法判断它审得准不准。
+以上是 Codex 的设计，不是 OmniAgent 的配置或安全保证。OmniAgent 的实际边界见 [架构文档](../architecture.md)。

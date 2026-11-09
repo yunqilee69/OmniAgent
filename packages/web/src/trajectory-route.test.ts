@@ -11,7 +11,7 @@ const hosts: WebHost[] = [];
 afterEach(async () => { await Promise.all(hosts.splice(0).map((host) => host.close())); });
 
 describe('session trajectory projection', () => {
-  it('projects ordered persisted activity without exposing arguments, output or permission rules', async () => {
+  it('projects ordered persisted activity without exposing arguments, output or private metadata', async () => {
     const root = await mkdtemp(join(tmpdir(), 'omniagent-web-trajectory-'));
     const workspacePath = join(root, 'project');
     await mkdir(workspacePath);
@@ -26,7 +26,7 @@ describe('session trajectory projection', () => {
       toolCalls: [{ id: 'c', name: 'read_file', arguments: { file_path: 'SECRET ARGUMENT' } }],
     } });
     await session.append({ ts: 1300, type: 'trace/tool.call', data: { id: 'c', name: 'read_file', arguments: { file_path: 'SECRET ARGUMENT' } } });
-    await session.append({ ts: 1400, type: 'trace/permission.decided', data: { callId: 'c', decision: 'allow', source: 'SECRET RULE' } });
+    await session.append({ ts: 1400, type: 'trace/permission.decided', data: { callId: 'c', decision: 'allow', details: 'SECRET METADATA' } });
     await session.append({ ts: 1500, type: 'message/tool-result', data: { result: {
       callId: 'c', name: 'read_file', ok: true, content: 'SECRET OUTPUT', truncated: false, durationMs: 17,
     } } });

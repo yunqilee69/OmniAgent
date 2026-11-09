@@ -83,7 +83,7 @@ describe('DSH one-shot escalation', () => {
     ['workspace-write', 'read-only'],
     ['danger-full-access', 'workspace-write'],
     ['danger-full-access', 'read-only'],
-    ['read-only', 'bypass'],
+    ['read-only', 'invalid-preset'],
     ['read-only', '__proto__'],
   ] as const)('refuses a narrower or unknown target %s -> %s before asking', async (from, to) => {
     const approve = vi.fn(allow);
@@ -127,7 +127,7 @@ describe('DSH one-shot escalation', () => {
 
   it.each([
     { preset: 'read-only', sandbox: 'danger-full-access', approval: 'ask' },
-    { preset: 'bypass', sandbox: 'danger-full-access', approval: 'never' },
+    { preset: 'invalid-preset', sandbox: 'danger-full-access', approval: 'never' },
     { preset: 'workspace-write', sandbox: 'workspace-write', approval: 'never' },
     null,
   ])('rejects invalid or mismatched snapshots %j', async (value) => {

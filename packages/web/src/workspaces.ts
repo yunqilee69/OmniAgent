@@ -7,6 +7,13 @@ export interface Workspace {
   path: string;
   name: string;
   lastUsedAt: number;
+  isDefault?: boolean;
+}
+
+export class DefaultWorkspaceRemovalError extends Error {
+  constructor() {
+    super('The default workspace cannot be removed');
+  }
 }
 
 const queues = new Map<string, Promise<void>>();
@@ -37,7 +44,8 @@ function isWorkspace(value: unknown): value is Workspace {
     && typeof workspace.path === 'string'
     && typeof workspace.name === 'string'
     && typeof workspace.lastUsedAt === 'number'
-    && Number.isFinite(workspace.lastUsedAt);
+    && Number.isFinite(workspace.lastUsedAt)
+    && (workspace.isDefault === undefined || typeof workspace.isDefault === 'boolean');
 }
 
 export class WorkspaceRegistry {
@@ -88,11 +96,39 @@ export class WorkspaceRegistry {
     });
   }
 
+  async ensureDefault(directory: string): Promise<Workspace> {
+    await mkdir(directory, { recursive: true });
+    const canonicalPath = await realpath(directory);
+    if (!(await stat(canonicalPath)).isDirectory()) throw new Error('Default workspace path is not a directory');
+    return serialize(this.filePath, async () => {
+      const workspaces = await this.read();
+      let workspace = workspaces.find((entry) => entry.path === canonicalPath);
+      let changed = false;
+      for (const entry of workspaces) {
+        if (entry !== workspace && entry.isDefault === true) {
+          delete entry.isDefault;
+          changed = true;
+        }
+      }
+      if (workspace === undefined) {
+        workspace = { id: randomUUID(), path: canonicalPath, name: basename(canonicalPath) || canonicalPath, lastUsedAt: Date.now(), isDefault: true };
+        workspaces.push(workspace);
+        changed = true;
+      } else if (workspace.isDefault !== true) {
+        workspace.isDefault = true;
+        changed = true;
+      }
+      if (changed) await this.write(workspaces);
+      return { ...workspace };
+    });
+  }
+
   async remove(id: string): Promise<boolean> {
     return serialize(this.filePath, async () => {
       const workspaces = await this.read();
       const index = workspaces.findIndex((workspace) => workspace.id === id);
       if (index === -1) return false;
+      if (workspaces[index]!.isDefault === true) throw new DefaultWorkspaceRemovalError();
       workspaces.splice(index, 1);
       await this.write(workspaces);
       return true;
@@ -133,7 +169,7 @@ export class WorkspaceRegistry {
     if (ids.size !== data.length || paths.size !== data.length) {
       throw new Error(`Invalid workspace registry "${this.filePath}": duplicate ID or path`);
     }
-    return data.map(({ id, path, name, lastUsedAt }) => ({ id, path, name, lastUsedAt }));
+    return data.map(({ id, path, name, lastUsedAt, isDefault }) => ({ id, path, name, lastUsedAt, ...(isDefault === undefined ? {} : { isDefault }) }));
   }
 
   private async write(workspaces: Workspace[]): Promise<void> {

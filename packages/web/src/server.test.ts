@@ -98,6 +98,57 @@ function sessionsUrl(base: string, workspaceId: string): string {
 }
 
 describe('workspace web host', () => {
+  it('reports replay and live message estimates without claiming a window', async () => {
+    const { base, first, store } = await setup();
+    const handle = await store.create({ id: 'context', workspace: first.path, cwd: first.path });
+    await handle.append(createInitialDshPermissionEvent('workspace-write'));
+    await handle.append({ type: 'message/user', data: { text: 'hello' } });
+    const url = `${sessionsUrl(base, first.id)}/context`;
+    const replay = await jsonResponse<{ estimatedMessageTokens?: number; window?: unknown }>(await fetch(`${url}/context`));
+    expect(replay.estimatedMessageTokens).toBeGreaterThan(0);
+    expect(replay.window).toBeUndefined();
+    const response = await fetch(`${url}/messages`, jsonRequest({ text: 'next' }));
+    await response.text();
+    const live = await jsonResponse<{ estimatedMessageTokens?: number }>(await fetch(`${url}/context`));
+    expect(live.estimatedMessageTokens).toBeGreaterThan(replay.estimatedMessageTokens!);
+  });
+
+  it('uses the live compacted history instead of replay', async () => {
+    const { base, first, store } = await setup((_id, permissions, workspace, handle) => new Session({
+      cwd: workspace.path, session: handle, dshPermissions: permissions,
+      approve: async () => 'deny', contextWindowTokens: 40,
+      model: new FakeModel([textResponse('done')], { onExhausted: textResponse('done') }),
+    }));
+    const handle = await store.create({ id: 'compact-context', workspace: first.path, cwd: first.path });
+    await handle.append(createInitialDshPermissionEvent('workspace-write'));
+    await handle.append({ type: 'message/user', data: { text: 'old '.repeat(300) } });
+    const url = `${sessionsUrl(base, first.id)}/compact-context`;
+    const replay = await jsonResponse<{ estimatedMessageTokens: number }>(await fetch(`${url}/context`));
+    const response = await fetch(`${url}/messages`, jsonRequest({ text: 'new' }));
+    await response.text();
+    const live = await jsonResponse<{ estimatedMessageTokens: number }>(await fetch(`${url}/context`));
+    expect(live.estimatedMessageTokens).toBeLessThan(replay.estimatedMessageTokens);
+  });
+
+  it('does not expose a stale estimate during an active turn', async () => {
+    const started = signal();
+    const finish = signal();
+    const { base, first, store } = await setup((id) => ({
+      id,
+      async *send() { started.resolve(); await finish.promise; yield { type: 'turn.end', reason: 'end_turn' }; },
+      interrupt() { finish.resolve(); },
+      contextMessageEstimate() { return 123; },
+    }));
+    const handle = await store.create({ id: 'busy-context', workspace: first.path, cwd: first.path });
+    await handle.append(createInitialDshPermissionEvent('workspace-write'));
+    const url = `${sessionsUrl(base, first.id)}/busy-context`;
+    const pending = fetch(`${url}/messages`, jsonRequest({ text: 'hello' }));
+    await started.promise;
+    expect(await (await fetch(`${url}/context`)).json()).toEqual({});
+    finish.resolve();
+    await (await pending).text();
+  });
+
   it('initializes only newly created sessions and exposes their preset', async () => {
     const { base, first, store } = await setup();
     const url = sessionsUrl(base, first.id);
@@ -144,10 +195,10 @@ describe('workspace web host', () => {
       .toEqual({ status: 'ready', preset: 'workspace-write' });
   });
 
-  it('does not infer a preset from legacy settings and applies a changed default only to new sessions', async () => {
+  it('requires selection for an invalid preset and applies a changed default only to new sessions', async () => {
     const root = await mkdtemp(join(tmpdir(), 'omniagent-web-legacy-settings-'));
     const path = join(root, 'config.json');
-    await writeFile(path, JSON.stringify({ mode: 'default' }));
+    await writeFile(path, JSON.stringify({ dsh: { permission: { defaultPreset: 'invalid' } } }));
     const settings = await PermissionSettings.open(path);
     const { base, first, store } = await setup(undefined, undefined, settings);
     const url = sessionsUrl(base, first.id);

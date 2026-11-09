@@ -83,23 +83,11 @@ turn.start ... turn.end     ← goal round 2
 | `interrupted` | 被 `AbortSignal` 中断 |
 | `error` | 模型调用抛错，前面已经发过 `error` 事件 |
 
-## 权限确认不在事件流里
+## 权限和计划审批
 
-M1 的权限确认走**注入回调**：`Session` 构造时传入 `approve(request) => Promise<'allow' | 'deny'>`。
-core 调用它并 await，UI 在回调里直接渲染提示。
+`Session` 通过注入的 `approve` 回调等待一次性权限审批。普通 `workspace-write` 调用不逐次询问；请求扩大当前调用的沙盒范围时才可能触发审批，批准只作用于本次调用。权限预设通过 `permission/dsh-preset` 会话事件持久化，审批不会修改预设。
 
-这是 ADR-0002 的取舍：先不引入 request/response 配对机制。代价是「确认」是同步阻塞的，UI 不能在这期间做别的事。
-
-Web 的实时通道在此之上增加了 live-only 的 `permission.requested`、`plan.review.requested` 和 `plan.review.decided` 事件。它们不会写入持久轨迹；`exit_plan_mode` 的计划和最终结果仍通过普通工具调用与工具结果进入会话记录。计划审核发生在 `tool.call` 之后、`tool.result` 之前。
-
-**升级路径**（做 daemon 时）：改成
-
-```
-core  --permission.request--> UI
-core  <--permission.respond-- UI
-```
-
-`PermissionRequest.id` 已经预留，`AgentCommand` 里也已经定义了 `permission.respond`。届时把 `RuleBasedGate` 换成一个持有 pending map 的实现即可，事件类型不用动。
+Web 的实时通道提供 live-only 的 `permission.requested`、`plan.review.requested` 和 `plan.review.decided` 事件。它们不会写入持久轨迹；`exit_plan_mode` 的计划和最终结果仍通过普通工具调用与工具结果进入会话记录。计划审核发生在 `tool.call` 之后、`tool.result` 之前。
 
 ## 版本策略
 

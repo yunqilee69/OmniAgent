@@ -2,16 +2,12 @@ import { readFile } from 'node:fs/promises';
 import { homedir } from 'node:os';
 import { dirname, join } from 'node:path';
 import { z } from 'zod';
-import { PERMISSION_MODES } from '../protocol/permission';
-import type { Rule } from '../protocol/permission';
 import { ReasoningEffortSchema } from '../protocol/reasoning';
-import { parseRuleSet } from '../permissions/rules';
 
 /**
  * 配置加载。
  *
- * 只读一个文件：~/.omniagent/config.json。项目级配置、多作用域合并留到后面，
- * 但 Rule 上已经有 source 字段，扩展时不用改数据结构。
+ * 只读一个文件：~/.omniagent/config.json。
  */
 
 /** Legacy OpenAI Chat Completions settings. Missing type retains the historical default. */
@@ -111,7 +107,25 @@ const route = z.object({
   systemPromptUpdate: z.enum(['in-history', 'latest']).optional(),
 }).passthrough();
 
+const webAuth = z.object({
+  enabled: z.boolean().default(false),
+  username: z.string().optional(),
+  password: z.string().optional(),
+}).strict().superRefine((auth, context) => {
+  if (!auth.enabled) return;
+  for (const field of ['username', 'password'] as const) {
+    if (!auth[field]?.trim()) context.addIssue({ code: 'custom', path: [field], message: 'Required when web authentication is enabled' });
+  }
+});
+
+const webConfig = z.object({
+  host: nonEmpty.default('127.0.0.1'),
+  port: z.number().int().min(1).max(65535).default(4317),
+  auth: webAuth.prefault({}),
+}).strict();
+
 export const ConfigSchema = z.object({
+  web: webConfig.prefault({}),
   model: nonEmpty.default('fake'),
   /** String route for DSH/pi-ai; object is the legacy OpenAI configuration. */
   provider: z.union([nonEmpty, ProviderSchema]).optional(),
@@ -133,8 +147,6 @@ export const ConfigSchema = z.object({
   retainContextTokens: positiveInteger.optional(),
   // Invalid stored permission values must remain available for explicit repair.
   dsh: z.unknown().optional(),
-  /** Legacy permission fields are retained for existing callers, never mapped to DSH presets. */
-  mode: z.enum(PERMISSION_MODES).default('default'),
   maxSteps: z.number().int().positive().default(25),
   /** Subagent delegation limits. Depth counts root as 0. */
   subagents: z.object({
@@ -146,20 +158,12 @@ export const ConfigSchema = z.object({
     allowParallelInProgress: z.boolean().default(false),
   }).passthrough().optional(),
   system: z.string().optional(),
-  permissions: z
-    .object({
-      allow: z.array(z.string()).default([]),
-      ask: z.array(z.string()).default([]),
-      deny: z.array(z.string()).default([]),
-    }).passthrough()
-    .optional(),
 }).passthrough();
 
 export type Config = z.infer<typeof ConfigSchema>;
 
 export interface LoadedConfig {
   config: Config;
-  rules: Rule[];
   configDir: string;
 }
 
@@ -182,14 +186,13 @@ export async function loadConfig(
   } catch (error) {
     if (isNotFound(error)) {
       const config = ConfigSchema.parse({});
-      return { config, rules: [], configDir };
+      return { config, configDir };
     }
     throw error;
   }
 
   const config = ConfigSchema.parse(JSON.parse(raw));
-  const rules = parseRuleSet(config.permissions ?? {}, 'user', configDir);
-  return { config, rules, configDir };
+  return { config, configDir };
 }
 
 function isNotFound(error: unknown): boolean {

@@ -1,7 +1,8 @@
-import { useState, type ReactNode } from 'react';
+import { useState, useSyncExternalStore, type ReactNode } from 'react';
 import clsx from 'clsx';
 import {
   IconAgentPresetOutlineRegular,
+  IconClockOutlineRegular,
   IconCopyOutlineRegular,
   IconDownloadOutlineRegular,
   IconEllipsisOutlineRegular,
@@ -10,6 +11,7 @@ import {
   StateDot,
   Tooltip,
 } from '../../vendor/primitives/index.ts';
+import { auth } from '../lib/auth.ts';
 import { store, useApp, useSessionEntry } from '../lib/store.ts';
 import { translator, type Translate } from '../lib/i18n.ts';
 import css from '../styles/app.module.css';
@@ -31,14 +33,15 @@ function statusOf(app: ReturnType<typeof useApp>, entry: ReturnType<typeof useSe
   return { label: t('Ready'), tone: 'idle' };
 }
 
-export function Header({ sidebarOpen, onToggleSidebar, rightOpen, rightAvailable, onToggleRight }: {
+export function Header({ sidebarOpen, onToggleSidebar, rightOpen, onToggleRight, onOpenObserve }: {
   sidebarOpen: boolean;
   onToggleSidebar: () => void;
   rightOpen: boolean;
-  rightAvailable: boolean;
   onToggleRight: () => void;
+  onOpenObserve: () => void;
 }): ReactNode {
   const app = useApp();
+  const authState = useSyncExternalStore(auth.subscribe, auth.getSnapshot);
   const entry = useSessionEntry();
   const t = translator(app.locale);
   const [menuOpen, setMenuOpen] = useState(false);
@@ -109,17 +112,26 @@ export function Header({ sidebarOpen, onToggleSidebar, rightOpen, rightAvailable
               {status.tone !== 'idle' && <span>{status.label}</span>}
             </span>
           )}
+          {hasSession && (
+            <Tooltip label={t('Open trajectory')} delayMs={400}>
+              <button type="button" className={css.iconButton} aria-label={t('Open trajectory')} aria-controls="right-panel" onClick={onOpenObserve}>
+                <IconClockOutlineRegular />
+              </button>
+            </Tooltip>
+          )}
           <Menu
             open={menuOpen}
             onClose={() => { setMenuOpen(false); }}
             align="end"
             items={[
-              { id: 'markdown', label: t('Copy as Markdown'), icon: <IconCopyOutlineRegular /> },
-              { id: 'json', label: t('Download JSON'), icon: <IconDownloadOutlineRegular /> },
+              { id: 'markdown', label: t('Copy as Markdown'), icon: <IconCopyOutlineRegular />, disabled: !hasSession },
+              { id: 'json', label: t('Download JSON'), icon: <IconDownloadOutlineRegular />, disabled: !hasSession },
+              ...(authState.phase === 'ready' && authState.enabled ? [{ id: 'logout', label: t('Sign out') }] : []),
             ]}
             onSelect={(id) => {
               setMenuOpen(false);
-              void store.exportSession(id === 'markdown' ? 'markdown' : 'json');
+              if (id === 'logout') void auth.logout();
+              else void store.exportSession(id === 'markdown' ? 'markdown' : 'json');
             }}
             anchor={(
               <Tooltip label={t('Export session')} delayMs={400}>
@@ -129,7 +141,7 @@ export function Header({ sidebarOpen, onToggleSidebar, rightOpen, rightAvailable
                   aria-label={t('Export session')}
                   aria-haspopup="menu"
                   aria-expanded={menuOpen}
-                  disabled={app.sessionId === null || entry?.draft === true}
+                  disabled={(app.sessionId === null || entry?.draft === true) && !(authState.phase === 'ready' && authState.enabled)}
                   onClick={() => { setMenuOpen((value) => !value); }}
                 >
                   <IconEllipsisOutlineRegular />
@@ -138,7 +150,7 @@ export function Header({ sidebarOpen, onToggleSidebar, rightOpen, rightAvailable
             )}
           />
         </div>
-        {!rightOpen && rightAvailable && !onAutomation && !onSettings && (
+        {!rightOpen && !onAutomation && !onSettings && (
           <div className={css.headerCorner}>
             <Tooltip label={t('Expand panel')} delayMs={400}>
               <button type="button" className={css.iconButton} aria-label={t('Expand panel')} onClick={onToggleRight}>
@@ -148,34 +160,6 @@ export function Header({ sidebarOpen, onToggleSidebar, rightOpen, rightAvailable
           </div>
         )}
       </div>
-      {hasSession && (
-        <div className={css.tabs}>
-          <div className={css.viewTabs} role="tablist" aria-label={t('Session view')}>
-            <button
-              type="button"
-              role="tab"
-              id="tab-conversation"
-              aria-selected={app.tab === 'conversation'}
-              aria-controls="panel-conversation"
-              className={clsx(css.tab, app.tab === 'conversation' && css.tabActive)}
-              onClick={() => { store.setTab('conversation'); }}
-            >
-              {t('Conversation')}
-            </button>
-            <button
-              type="button"
-              role="tab"
-              id="tab-observe"
-              aria-selected={app.tab === 'observe'}
-              aria-controls="panel-observe"
-              className={clsx(css.tab, app.tab === 'observe' && css.tabActive)}
-              onClick={() => { store.setTab('observe'); }}
-            >
-              {t('Observe')}
-            </button>
-          </div>
-        </div>
-      )}
     </header>
   );
 }

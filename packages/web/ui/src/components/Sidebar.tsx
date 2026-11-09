@@ -1,4 +1,4 @@
-import { useMemo, useState, type CSSProperties, type ReactNode } from 'react';
+import { useEffect, useMemo, useState, type CSSProperties, type ReactNode } from 'react';
 import clsx from 'clsx';
 import {
   Button,
@@ -122,7 +122,7 @@ function RemoveWorkspaceDialog({ id, name, onClose }: { id: string | null; name:
   );
 }
 
-function RenameSessionDialog({ id, initialTitle, onClose }: { id: string; initialTitle: string; onClose: () => void }): ReactNode {
+function RenameSessionDialog({ workspaceId, id, initialTitle, onClose }: { workspaceId: string; id: string; initialTitle: string; onClose: () => void }): ReactNode {
   const t = translator(useApp().locale);
   const [title, setTitle] = useState(initialTitle);
   const [error, setError] = useState('');
@@ -135,7 +135,7 @@ function RenameSessionDialog({ id, initialTitle, onClose }: { id: string; initia
       return;
     }
     setSaving(true);
-    void store.renameSession(id, trimmed).then((ok) => {
+    void store.renameSession(id, trimmed, workspaceId).then((ok) => {
       setSaving(false);
       if (ok) {
         onClose();
@@ -174,7 +174,7 @@ function RenameSessionDialog({ id, initialTitle, onClose }: { id: string; initia
   );
 }
 
-function DeleteSessionDialog({ id, name, onClose }: { id: string; name: string; onClose: () => void }): ReactNode {
+function DeleteSessionDialog({ workspaceId, id, name, onClose }: { workspaceId: string; id: string; name: string; onClose: () => void }): ReactNode {
   const t = translator(useApp().locale);
   const [saving, setSaving] = useState(false);
   return (
@@ -193,7 +193,7 @@ function DeleteSessionDialog({ id, name, onClose }: { id: string; name: string; 
             disabled={saving}
             onClick={() => {
               setSaving(true);
-              void store.deleteSession(id).then((ok) => {
+              void store.deleteSession(id, workspaceId).then((ok) => {
                 setSaving(false);
                 if (ok) onClose();
               });
@@ -224,29 +224,26 @@ export function Sidebar({ drawer, onClose }: { drawer: boolean; onClose: () => v
   const [query, setQuery] = useState('');
   const [searchOpen, setSearchOpen] = useState(false);
   const [addOpen, setAddOpen] = useState(false);
-  const [removeOpen, setRemoveOpen] = useState(false);
-  const [workspaceMenuOpen, setWorkspaceMenuOpen] = useState(false);
+  const [removeTarget, setRemoveTarget] = useState<{ id: string; name: string } | null>(null);
+  const [workspaceMenuOpen, setWorkspaceMenuOpen] = useState<string | null>(null);
   const [workspaceSettingsOpen, setWorkspaceSettingsOpen] = useState(false);
   const [sessionMenu, setSessionMenu] = useState<string | null>(null);
-  const [renameTarget, setRenameTarget] = useState<{ id: string; name: string } | null>(null);
-  const [deleteTarget, setDeleteTarget] = useState<{ id: string; name: string } | null>(null);
+  const [renameTarget, setRenameTarget] = useState<{ workspaceId: string; id: string; name: string } | null>(null);
+  const [deleteTarget, setDeleteTarget] = useState<{ workspaceId: string; id: string; name: string } | null>(null);
   const [copied, setCopied] = useState<number | null>(null);
-  const [collapsed, setCollapsed] = useState(false);
+  const [expandedOverrides, setExpandedOverrides] = useState<Record<string, boolean>>({});
+  useEffect(() => {
+    if (app.workspaceId === null) return;
+    const workspaceId = app.workspaceId;
+    setExpandedOverrides((value) => value[workspaceId] === undefined ? { ...value, [workspaceId]: true } : value);
+  }, [app.workspaceId]);
   const workspace = app.workspaces.find((item) => item.id === app.workspaceId);
-  const workspaceLabel = workspace?.name || workspace?.path || workspace?.id || t('No workspace');
   const draftEntry = app.workspaceId !== null && app.sessionId !== null
     ? app.entries[sessionKey(app.workspaceId, app.sessionId)]
     : undefined;
   const draftActive = draftEntry?.draft === true;
-  const sessions = useMemo(() => {
-    const needle = query.trim().toLowerCase();
-    if (needle === '') return app.sessions;
-    return app.sessions.filter((item) => [item.id, item.agent, item.agentId, item.cwd, item.description, item.parentSessionId]
-      .some((value) => String(value ?? '').toLowerCase().includes(needle)));
-  }, [app.sessions, query]);
-
-  const select = (id: string): void => {
-    store.selectSession(id);
+  const select = (workspaceId: string, id: string): void => {
+    store.selectSession(id, workspaceId);
     if (drawer) onClose();
   };
 
@@ -259,8 +256,10 @@ export function Sidebar({ drawer, onClose }: { drawer: boolean; onClose: () => v
     })),
     { type: 'separator', id: 'workspace-actions' },
     { id: 'add-workspace', label: t('Add workspace'), icon: <IconProjectAddOutlineRegular size={14} /> },
-    { id: 'remove-workspace', label: t('Remove workspace'), danger: true },
-  ], [app.workspaces, t]);
+    ...(workspace !== undefined && workspace.isDefault !== true
+      ? [{ id: 'remove-workspace', label: t('Remove workspace'), danger: true }]
+      : []),
+  ], [app.workspaces, workspace, t]);
 
   return (
     <aside className={clsx(sidebarCss.root, appCss.sidebar, drawer && appCss.sidebarDrawer)} aria-label={t('Workspace navigation')}>
@@ -376,9 +375,11 @@ export function Sidebar({ drawer, onClose }: { drawer: boolean; onClose: () => v
                         )}
                         onSelect={(id) => {
                           setWorkspaceSettingsOpen(false);
-                          if (id.startsWith('workspace:')) void store.selectWorkspace(id.slice('workspace:'.length));
+                          if (id.startsWith('workspace:')) { const workspaceId = id.slice('workspace:'.length); setExpandedOverrides((value) => ({ ...value, [workspaceId]: true })); void store.selectWorkspace(workspaceId); }
                           else if (id === 'add-workspace') setAddOpen(true);
-                          else if (id === 'remove-workspace') setRemoveOpen(true);
+                          else if (id === 'remove-workspace' && workspace !== undefined && workspace.isDefault !== true) {
+                            setRemoveTarget({ id: workspace.id, name: workspace.name || workspace.path || workspace.id });
+                          }
                         }}
                       />
                       <Tooltip label={t('Add workspace')} delayMs={400}>
@@ -392,48 +393,66 @@ export function Sidebar({ drawer, onClose }: { drawer: boolean; onClose: () => v
               </div>
 
               <div className={browserCss.listArea} role="tree" aria-label={t('Sessions')}>
-                {app.workspacesLoading || app.sessionsLoading ? (
-                  <div className={browserCss.empty}>{t('Loading sessions…')}</div>
-                ) : app.workspaceError !== '' ? (
+                {app.workspacesLoading && app.workspaces.length === 0 && (
+                  <div className={browserCss.empty}>{t('Loading workspaces…')}</div>
+                )}
+                {app.workspaceError !== '' && (
                   <div className={browserCss.empty}>
                     {app.workspaceError}
                     <button type="button" className={browserCss.retry} onClick={() => { void store.loadWorkspaces(); }}>{t('Retry')}</button>
                   </div>
-                ) : app.sessionError !== '' ? (
-                  <div className={browserCss.empty}>
-                    {app.sessionError}
-                    <button type="button" className={browserCss.retry} onClick={() => { if (app.workspaceId !== null) void store.loadSessions(app.workspaceId, true); }}>{t('Retry')}</button>
-                  </div>
-                ) : app.workspaceId === null ? (
+                )}
+                {!app.workspacesLoading && app.workspaceError === '' && app.workspaces.length === 0 && (
                   <div className={browserCss.empty}>{t('No workspace selected.')}</div>
-                ) : (
-                  <div className={browserCss.groupSection}>
+                )}
+                {app.workspaces.map((item) => {
+                  const active = item.id === app.workspaceId;
+                  const expanded = expandedOverrides[item.id] ?? active;
+                  const list = app.sessionsByWorkspace[item.id] ?? (active
+                    ? { sessions: app.sessions, loading: app.sessionsLoading, error: app.sessionError, loaded: true }
+                    : { sessions: [], loading: false, error: '', loaded: false });
+                  const needle = query.trim().toLowerCase();
+                  const sessions = needle === '' ? list.sessions : list.sessions.filter((session) =>
+                    [session.id, session.title, session.agent, session.agentId, session.cwd, session.description, session.parentSessionId]
+                      .some((value) => String(value ?? '').toLowerCase().includes(needle)));
+                  const menuOpen = workspaceMenuOpen === item.id;
+                  const workspaceLabel = item.name || item.path || item.id;
+                  const rowMenuItems = workspaceMenuItems.filter((entry) => entry.id !== 'remove-workspace');
+                  if (item.isDefault !== true) rowMenuItems.push({ id: 'remove-workspace', label: t('Remove workspace'), danger: true });
+                  const activate = (): void => {
+                    const next = !expanded;
+                    setExpandedOverrides((value) => ({ ...value, [item.id]: next }));
+                    if (next && !list.loaded && !list.loading) void store.loadSessions(item.id, false);
+                  };
+                  return (
+                  <div className={browserCss.groupSection} key={item.id}>
                     <div
-                      className={clsx(browserCss.workspaceRow, workspaceMenuOpen && browserCss.rowMenuOpen)}
+                      className={clsx(browserCss.workspaceRow, menuOpen && browserCss.rowMenuOpen)}
                       role="treeitem"
-                      aria-expanded={!collapsed}
+                      aria-expanded={expanded}
                       tabIndex={0}
-                      onClick={() => { setCollapsed((value) => !value); }}
+                      onClick={activate}
                       onKeyDown={(event) => {
+                        if (event.target !== event.currentTarget) return;
                         if (event.key !== 'Enter' && event.key !== ' ') return;
                         event.preventDefault();
-                        setCollapsed((value) => !value);
+                        activate();
                       }}
                     >
                       <span className={browserCss.folder} aria-hidden="true">
                         <IconFolderOpenRegular size={16} />
                       </span>
                       <span className={browserCss.chevron} aria-hidden="true">
-                        <svg width="10" height="10" viewBox="0 0 10 10" className={collapsed ? undefined : browserCss.chevronOpen}>
+                        <svg width="10" height="10" viewBox="0 0 10 10" className={expanded ? browserCss.chevronOpen : undefined}>
                           <path d="M3 1.5L7 5L3 8.5Z" fill="currentColor" />
                         </svg>
                       </span>
-                      <span className={browserCss.workspaceTitle} title={workspace?.path ?? ''}>{workspaceLabel}</span>
+                      <span className={browserCss.workspaceTitle} title={item.path}>{workspaceLabel}</span>
                       <span className={browserCss.rowActions} onClick={(event) => { event.stopPropagation(); }}>
                         <Menu
-                          open={workspaceMenuOpen}
-                          onClose={() => { setWorkspaceMenuOpen(false); }}
-                          items={workspaceMenuItems}
+                          open={menuOpen}
+                          onClose={() => { setWorkspaceMenuOpen(null); }}
+                          items={rowMenuItems}
                           selectedIds={app.workspaceId === null ? [] : [`workspace:${app.workspaceId}`]}
                           portal
                           minWidthFromAnchor
@@ -444,17 +463,17 @@ export function Sidebar({ drawer, onClose }: { drawer: boolean; onClose: () => v
                               className={browserCss.rowIcon}
                               aria-label={t('Workspace actions')}
                               aria-haspopup="menu"
-                              aria-expanded={workspaceMenuOpen}
-                              onClick={() => { setWorkspaceMenuOpen((value) => !value); }}
+                              aria-expanded={menuOpen}
+                              onClick={() => { setWorkspaceMenuOpen((value) => value === item.id ? null : item.id); }}
                             >
                               <IconEllipsisOutlineRegular size={14} />
                             </button>
                           )}
                           onSelect={(id) => {
-                            setWorkspaceMenuOpen(false);
-                            if (id.startsWith('workspace:')) void store.selectWorkspace(id.slice('workspace:'.length));
+                            setWorkspaceMenuOpen(null);
+                            if (id.startsWith('workspace:')) { const workspaceId = id.slice('workspace:'.length); setExpandedOverrides((value) => ({ ...value, [workspaceId]: true })); void store.selectWorkspace(workspaceId); }
                             else if (id === 'add-workspace') setAddOpen(true);
-                            else if (id === 'remove-workspace') setRemoveOpen(true);
+                            else if (id === 'remove-workspace' && item.isDefault !== true) setRemoveTarget({ id: item.id, name: workspaceLabel });
                           }}
                         />
                         <Tooltip label={t('New session in {name}', { name: workspaceLabel })} delayMs={400}>
@@ -463,7 +482,8 @@ export function Sidebar({ drawer, onClose }: { drawer: boolean; onClose: () => v
                             className={browserCss.rowIcon}
                             aria-label={t('New session in {name}', { name: workspaceLabel })}
                             onClick={() => {
-                              if (app.workspaceId !== null) void store.startDraftSession({ workspaceId: app.workspaceId });
+                              setExpandedOverrides((value) => ({ ...value, [item.id]: true }));
+                              void store.startDraftSession({ workspaceId: item.id });
                               if (drawer) onClose();
                             }}
                           >
@@ -473,30 +493,37 @@ export function Sidebar({ drawer, onClose }: { drawer: boolean; onClose: () => v
                       </span>
                     </div>
 
-                    {!collapsed && draftActive && app.sessionId !== null && query.trim() === '' && (
+                    {expanded && list.loading && <div className={browserCss.emptyRow}>{t('Loading sessions…')}</div>}
+                    {expanded && !list.loading && list.error !== '' && (
+                      <div className={browserCss.emptyRow}>
+                        {list.error}
+                        <button type="button" className={browserCss.retry} onClick={() => { void store.loadSessions(item.id, active); }}>{t('Retry')}</button>
+                      </div>
+                    )}
+                    {expanded && !list.loading && list.error === '' && active && draftActive && app.sessionId !== null && query.trim() === '' && (
                       <div
                         className={clsx(browserCss.sessionRow, browserCss.selected)}
                         role="treeitem"
                         aria-selected
                         tabIndex={0}
-                        onClick={() => { select(app.sessionId!); }}
+                        onClick={() => { select(item.id, app.sessionId!); }}
                         onKeyDown={(event) => {
                           if (event.target !== event.currentTarget) return;
                           if (event.key !== 'Enter' && event.key !== ' ') return;
                           event.preventDefault();
-                          select(app.sessionId!);
+                          select(item.id, app.sessionId!);
                         }}
                       >
                         <span className={browserCss.sessionSlot} aria-hidden="true" />
                         <span className={browserCss.sessionTitle}>{t('New Session')}</span>
                       </div>
                     )}
-                    {!collapsed && sessions.length === 0 && !draftActive && (
+                    {expanded && !list.loading && list.error === '' && sessions.length === 0 && (!active || !draftActive || query.trim() !== '') && (
                       <div className={browserCss.emptyRow}>
                         {query.trim() === '' ? t('No sessions yet.') : t('No matching sessions.')}
                       </div>
                     )}
-                    {!collapsed && sessions.map((session) => {
+                    {expanded && !list.loading && list.error === '' && sessions.map((session) => {
                       const child = typeof session.parentSessionId === 'string' && session.parentSessionId !== '';
                       const description = typeof session.description === 'string' ? session.description.trim() : '';
                       const title = typeof session.title === 'string' ? session.title.trim() : '';
@@ -505,11 +532,12 @@ export function Sidebar({ drawer, onClose }: { drawer: boolean; onClose: () => v
                         : title !== ''
                           ? title
                           : session.blank === true ? t('New Session') : t('Untitled');
-                      const selected = session.id === app.sessionId;
+                      const selected = active && session.id === app.sessionId;
                       const pinned = session.pinned === true;
-                      const entry = app.workspaceId === null ? undefined : app.entries[sessionKey(app.workspaceId, session.id)];
+                      const entry = app.entries[sessionKey(item.id, session.id)];
                       const running = entry?.run !== undefined;
-                      const menuOpen = sessionMenu === session.id;
+                      const menuKey = sessionKey(item.id, session.id);
+                      const menuOpen = sessionMenu === menuKey;
                       return (
                         <div
                           key={session.id}
@@ -524,12 +552,12 @@ export function Sidebar({ drawer, onClose }: { drawer: boolean; onClose: () => v
                           tabIndex={0}
                           style={child ? { '--dsh-workspace-indent': '14px' } as CSSProperties : undefined}
                           title={session.id}
-                          onClick={() => { select(session.id); }}
+                          onClick={() => { select(item.id, session.id); }}
                           onKeyDown={(event) => {
                             if (event.target !== event.currentTarget) return;
                             if (event.key !== 'Enter' && event.key !== ' ') return;
                             event.preventDefault();
-                            select(session.id);
+                            select(item.id, session.id);
                           }}
                         >
                           <span className={browserCss.sessionSlot} aria-hidden="true">
@@ -575,7 +603,7 @@ export function Sidebar({ drawer, onClose }: { drawer: boolean; onClose: () => v
                                   aria-label={t('Session actions')}
                                   aria-haspopup="menu"
                                   aria-expanded={menuOpen}
-                                  onClick={() => { setSessionMenu((current) => current === session.id ? null : session.id); }}
+                                  onClick={() => { setSessionMenu((current) => current === menuKey ? null : menuKey); }}
                                 >
                                   <IconEllipsisOutlineRegular size={14} />
                                 </button>
@@ -583,11 +611,11 @@ export function Sidebar({ drawer, onClose }: { drawer: boolean; onClose: () => v
                               onSelect={(action) => {
                                 setSessionMenu(null);
                                 if (action === 'pin') {
-                                  void store.setSessionPinned(session.id, !pinned);
+                                  void store.setSessionPinned(session.id, !pinned, item.id);
                                 } else if (action === 'rename') {
-                                  setRenameTarget({ id: session.id, name: title !== '' ? title : description });
+                                  setRenameTarget({ workspaceId: item.id, id: session.id, name: title !== '' ? title : description });
                                 } else if (action === 'fork') {
-                                  void store.forkSession(session.id);
+                                  void store.forkSession(session.id, item.id);
                                 } else if (action === 'copy-id') {
                                   const clipboard = navigator.clipboard;
                                   if (clipboard?.writeText === undefined) {
@@ -599,7 +627,7 @@ export function Sidebar({ drawer, onClose }: { drawer: boolean; onClose: () => v
                                     () => { store.showAlert(t('Clipboard access is unavailable.')); },
                                   );
                                 } else if (action === 'delete') {
-                                  setDeleteTarget({ id: session.id, name });
+                                  setDeleteTarget({ workspaceId: item.id, id: session.id, name });
                                 }
                               }}
                             />
@@ -608,7 +636,8 @@ export function Sidebar({ drawer, onClose }: { drawer: boolean; onClose: () => v
                       );
                     })}
                   </div>
-                )}
+                  );
+                })}
               </div>
             </div>
           </div>
@@ -617,13 +646,14 @@ export function Sidebar({ drawer, onClose }: { drawer: boolean; onClose: () => v
 
       <WorkspaceDialog open={addOpen} onClose={() => { setAddOpen(false); }} />
       <RemoveWorkspaceDialog
-        id={removeOpen ? app.workspaceId : null}
-        name={workspaceLabel}
-        onClose={() => { setRemoveOpen(false); }}
+        id={removeTarget?.id ?? null}
+        name={removeTarget?.name ?? ''}
+        onClose={() => { setRemoveTarget(null); }}
       />
       {renameTarget !== null && (
         <RenameSessionDialog
-          key={`rename:${renameTarget.id}`}
+          key={`rename:${renameTarget.workspaceId}:${renameTarget.id}`}
+          workspaceId={renameTarget.workspaceId}
           id={renameTarget.id}
           initialTitle={renameTarget.name}
           onClose={() => { setRenameTarget(null); }}
@@ -631,7 +661,8 @@ export function Sidebar({ drawer, onClose }: { drawer: boolean; onClose: () => v
       )}
       {deleteTarget !== null && (
         <DeleteSessionDialog
-          key={`delete:${deleteTarget.id}`}
+          key={`delete:${deleteTarget.workspaceId}:${deleteTarget.id}`}
+          workspaceId={deleteTarget.workspaceId}
           id={deleteTarget.id}
           name={deleteTarget.name}
           onClose={() => { setDeleteTarget(null); }}

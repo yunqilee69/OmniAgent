@@ -24,9 +24,9 @@ async function setup() {
   const right = await store.create({ id: 'same', workspace: second.path, cwd: second.path });
   await left.append({ type: 'message/user', data: { text: 'FIRST TRANSCRIPT' } });
   await right.append({ type: 'message/user', data: { text: 'SECOND TRANSCRIPT' } });
-  await left.append({ type: 'trace/permission.decided', data: { callId: 'c', decision: 'deny', rule: 'SECRET RULE' } });
+  await left.append({ type: 'trace/permission.decided', data: { callId: 'c', decision: 'deny', details: 'SECRET METADATA' } });
   await left.append({ type: 'message/tool-result', data: { result: {
-    callId: 'c', name: 'read_file', ok: false, content: 'SECRET RULE', truncated: false,
+    callId: 'c', name: 'read_file', ok: false, content: 'SECRET DETAIL', truncated: false,
   } } });
   const host = await startWebHost({ workspaces, store, createSession: () => { throw new Error('unexpected'); } });
   hosts.push(host);
@@ -50,7 +50,8 @@ describe('workspace-scoped session exports', () => {
     expect(JSON.parse(text).format).toBe('omniagent-session-transcript');
     expect(text).toContain('FIRST TRANSCRIPT');
     expect(text).not.toContain('SECOND TRANSCRIPT');
-    expect(text).not.toContain('SECRET RULE');
+    expect(text).not.toContain('SECRET DETAIL');
+    expect(text).not.toContain('SECRET METADATA');
     const other = await (await fetch(url(base, second.id))).text();
     expect(other).toContain('SECOND TRANSCRIPT');
     expect(other).not.toContain('FIRST TRANSCRIPT');
