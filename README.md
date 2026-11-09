@@ -355,7 +355,27 @@ export type AgentEvent =
 
 ## 文档
 
+完整索引与阅读路线见 [docs/README.md](docs/README.md)。
+
+**设计与实现**
+
+- [docs/design/overview.md](docs/design/overview.md) — 项目定位、设计原则、运行时全景、配置分层与安全模型
+- [docs/design/runtime-loop.md](docs/design/runtime-loop.md) — turn/step 生命周期、事件协议、工具批处理、中断与审计
+- [docs/design/session-state.md](docs/design/session-state.md) — 历史投影、上下文压缩、todo/plan/goal/title 与后台回合
+- [docs/design/tools-permissions-sandbox.md](docs/design/tools-permissions-sandbox.md) — 工具契约、内置工具、DSH 权限、一次性升级与沙盒边界
+- [docs/design/configuration-agents-modes.md](docs/design/configuration-agents-modes.md) — providers/models/roles/profiles/agents/modes 的解析与热加载
+- [docs/design/subagents-and-schedules.md](docs/design/subagents-and-schedules.md) — 子代理协作树、生命周期与计划任务投递
+- [docs/design/persistence-and-observation.md](docs/design/persistence-and-observation.md) — 会话 JSONL、工作区、审计、轨迹、导出与隐私边界
+- [docs/implementation/core.md](docs/implementation/core.md) — core 模块地图、依赖方向与组合根
+- [docs/implementation/tui.md](docs/implementation/tui.md) — 终端 REPL、渲染管线、块模型与审批
+- [docs/implementation/web.md](docs/implementation/web.md) — Web Host、路由、SSE、审批代理与 React 工作台
+- [docs/implementation/testing.md](docs/implementation/testing.md) — 测试布局、集成测试与 eval harness
+- [docs/development.md](docs/development.md) — 开发环境、代码约定、扩展配方与排查清单
+
+**参考与决策**
+
 - [docs/agents.md](docs/agents.md) — providers/models、roles、agentProfiles、agents/*.md 与会话选择事件
+- [docs/web-api.md](docs/web-api.md) — 本地 Web API 路由与载荷参考
 - [docs/notes/](docs/notes/) — 读别人家实现的笔记（Codex、Claude Code），带出处
 - [docs/adr/](docs/adr/) — 自己做的决定：背景、候选、结论、后果
 - [docs/spec/](docs/spec/) — 自家的协议与 schema 设计
