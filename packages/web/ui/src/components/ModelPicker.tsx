@@ -60,6 +60,15 @@ function effortEffect(
   return {};
 }
 
+export function concreteModelBinding(model: ModelSummary, resolved: ResolvedModel | null): ModelBinding {
+  const same = resolved?.provider === model.provider && resolved.model === model.model;
+  const effort = same ? resolved.reasoningEffort ?? model.defaultReasoningEffort : model.defaultReasoningEffort;
+  return {
+    version: 2, kind: 'model', provider: model.provider, model: model.model,
+    ...(effort === undefined ? {} : { reasoningEffort: effort }),
+  };
+}
+
 function bindingLabel(
   binding: ModelBinding | null,
   models: readonly ModelSummary[],
@@ -67,7 +76,6 @@ function bindingLabel(
   t: Translate,
   resolved: ResolvedModel | null = null,
 ): string {
-  if (binding === null) return t('Select model');
   // A resolved model is what the session actually runs with. Roles and
   // agent-following bindings are configuration, so the seat shows the
   // concrete model and effort instead of the role name.
@@ -76,6 +84,7 @@ function bindingLabel(
       ? resolved.name
       : `${resolved.name} · ${resolved.reasoningEffort}`;
   }
+  if (binding === null) return t('Select model');
   if (binding.kind === 'agent') return t('Follow agent');
   if (binding.kind === 'role') {
     const role = roles.find((entry) => entry.id === binding.role);
@@ -99,6 +108,7 @@ export function ModelPicker({
   disabled = false,
   allowAgent = true,
   allowRoles = true,
+  concreteOnly = false,
   triggerClassName,
   side = 'bottom',
   align = 'start',
@@ -115,6 +125,8 @@ export function ModelPicker({
   disabled?: boolean;
   allowAgent?: boolean;
   allowRoles?: boolean;
+  /** Show resolved concrete model and effort without configuration-only choices. */
+  concreteOnly?: boolean;
   triggerClassName?: string;
   side?: 'top' | 'bottom';
   align?: 'start' | 'end';
@@ -145,15 +157,19 @@ export function ModelPicker({
   useEffect(() => {
     if (!open || pane !== 'model') return;
     const frame = requestAnimationFrame(() => {
-      if (models.length + (allowRoles ? roles.length : 0) + (allowAgent ? 1 : 0) > 4) searchRef.current?.focus();
+      if (models.length + (!concreteOnly && allowRoles ? roles.length : 0) + (!concreteOnly && allowAgent ? 1 : 0) > 4) searchRef.current?.focus();
     });
     return () => { cancelAnimationFrame(frame); };
-  }, [allowAgent, allowRoles, models.length, open, pane, roles.length]);
+  }, [allowAgent, allowRoles, concreteOnly, models.length, open, pane, roles.length]);
 
-  const current = effortEffect(binding, models);
+  const effectiveBinding: ModelBinding | null = concreteOnly && resolved !== null
+    ? { version: 2, kind: 'model', provider: resolved.provider, model: resolved.model,
+      ...(resolved.reasoningEffort === undefined ? {} : { reasoningEffort: resolved.reasoningEffort }) }
+    : binding;
+  const current = effortEffect(effectiveBinding, models);
   const effortChoices = useMemo<EffortChoice[]>(() => {
     if (current.model === undefined) return [];
-    const choices: EffortChoice[] = [{
+    const choices: EffortChoice[] = concreteOnly ? [] : [{
       id: 'default',
       label: current.model.defaultReasoningEffort === undefined
         ? t('Model default')
@@ -163,7 +179,7 @@ export function ModelPicker({
       choices.push({ id: effort, effort, label: effort });
     }
     return choices;
-  }, [current.model, t]);
+  }, [concreteOnly, current.model, t]);
   const grouped = useMemo(() => {
     const groups = new Map<string, ModelSummary[]>();
     for (const model of models) {
@@ -183,15 +199,15 @@ export function ModelPicker({
         || provider.toLowerCase().includes(normalizedQuery));
     return filtered.length === 0 ? [] : [[provider, filtered] as const];
   });
-  const filteredRoles = allowRoles
+  const filteredRoles = allowRoles && !concreteOnly
     ? roles.filter((role) => normalizedQuery === ''
       || role.name.toLowerCase().includes(normalizedQuery)
       || role.id.toLowerCase().includes(normalizedQuery)
       || `${role.provider}/${role.model}`.toLowerCase().includes(normalizedQuery))
     : [];
-  const agentVisible = allowAgent && (normalizedQuery === ''
+  const agentVisible = !concreteOnly && allowAgent && (normalizedQuery === ''
     || t('Follow agent').toLowerCase().includes(normalizedQuery));
-  const showSearch = models.length + (allowRoles ? roles.length : 0) + (allowAgent ? 1 : 0) > 4;
+  const showSearch = models.length + (!concreteOnly && allowRoles ? roles.length : 0) + (!concreteOnly && allowAgent ? 1 : 0) > 4;
   const hasResults = agentVisible || filteredRoles.length > 0 || filteredGroups.length > 0;
 
   const close = (restore = false): void => {
@@ -207,6 +223,10 @@ export function ModelPicker({
   };
 
   const chooseModel = (model: ModelSummary): void => {
+    if (concreteOnly) {
+      choose(concreteModelBinding(model, resolved));
+      return;
+    }
     const same = binding?.kind === 'model'
       && binding.provider === model.provider && binding.model === model.model;
     const effort = same && binding.reasoningEffort !== undefined && model.reasoningEfforts.includes(binding.reasoningEffort)
@@ -222,12 +242,12 @@ export function ModelPicker({
   };
 
   const chooseEffort = (effort: ReasoningEffort | undefined): void => {
-    if (binding?.kind !== 'model' || current.model === undefined) return;
+    if (effectiveBinding?.kind !== 'model' || current.model === undefined) return;
     choose({
       version: 2,
       kind: 'model',
-      provider: binding.provider,
-      model: binding.model,
+      provider: effectiveBinding.provider,
+      model: effectiveBinding.model,
       ...(effort === undefined ? {} : { reasoningEffort: effort }),
     });
   };
@@ -255,6 +275,10 @@ export function ModelPicker({
     rows[next]?.focus();
   };
 
+  const displayLabel = concreteOnly && resolved === null && binding?.kind !== 'model'
+    ? t('Select model')
+    : bindingLabel(binding, models, roles, t, resolved);
+
   const openMenu = (): void => {
     if (disabled) return;
     setQuery('');
@@ -272,12 +296,12 @@ export function ModelPicker({
         aria-haspopup="menu"
         aria-expanded={open}
         aria-controls={open ? `${id}-menu` : undefined}
-        title={title ?? bindingLabel(binding, models, roles, t, resolved)}
+        title={title ?? displayLabel}
         disabled={disabled}
         onClick={() => { if (open) close(true); else openMenu(); }}
       >
         {showLeading && <IconDataOutlineRegular className={css.leading} size={16} />}
-        <span className={css.label}>{bindingLabel(binding, models, roles, t, resolved)}</span>
+        <span className={css.label}>{displayLabel}</span>
         {!disabled && <IconChevronDownOutlineRegular className={clsx(css.chevron, open && css.chevronOpen)} aria-hidden />}
       </button>
 
@@ -300,13 +324,13 @@ export function ModelPicker({
             <>
               <button type="button" role="menuitem" className={css.cell} onClick={() => { setPane('model'); }}>
                 <span className={css.cellLabel}>{t('Model')}</span>
-                <span className={css.cellValue}>{bindingLabel(binding, models, roles, t, resolved)}</span>
+                <span className={css.cellValue}>{displayLabel}</span>
                 <IconChevronRightOutlineRegular className={css.cellChevron} aria-hidden />
               </button>
-              {effortChoices.length > 1 && (
+              {effortChoices.length > (concreteOnly ? 0 : 1) && (
                 <button type="button" role="menuitem" className={css.cell} onClick={() => { setPane('effort'); }}>
                   <span className={css.cellLabel}>{t('Reasoning effort')}</span>
-                  <span className={css.cellValue}>{current.label ?? t('Model default')}</span>
+                  <span className={css.cellValue}>{current.label ?? (concreteOnly ? '—' : t('Model default'))}</span>
                   <IconChevronRightOutlineRegular className={css.cellChevron} aria-hidden />
                 </button>
               )}
@@ -360,8 +384,8 @@ export function ModelPicker({
                   <section key={provider} className={css.group}>
                     <div className={css.groupHead}>{provider}</div>
                     {groupModels.map((model) => {
-                      const selected = binding?.kind === 'model'
-                        && binding.provider === model.provider && binding.model === model.model;
+                      const selected = effectiveBinding?.kind === 'model'
+                        && effectiveBinding.provider === model.provider && effectiveBinding.model === model.model;
                       return (
                         <button key={`${provider}/${model.model}`} type="button" role="menuitemradio"
                           aria-checked={selected} className={css.option}
@@ -388,9 +412,11 @@ export function ModelPicker({
           {pane === 'effort' && (
             <div className={css.scroll}>
               {effortChoices.map((choice) => {
-                const selected = choice.effort === undefined
-                  ? binding?.kind === 'model' && binding.reasoningEffort === undefined
-                  : binding?.kind === 'model' && binding.reasoningEffort === choice.effort;
+                const selected = concreteOnly
+                  ? choice.effort === current.effort
+                  : choice.effort === undefined
+                    ? binding?.kind === 'model' && binding.reasoningEffort === undefined
+                    : binding?.kind === 'model' && binding.reasoningEffort === choice.effort;
                 return (
                   <button key={choice.id} type="button" role="menuitemradio" aria-checked={selected}
                     className={css.option} onClick={() => { chooseEffort(choice.effort); }}>

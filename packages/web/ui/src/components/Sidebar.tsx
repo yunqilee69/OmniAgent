@@ -218,7 +218,7 @@ function NavRow({ icon, label, active, onClick }: { icon: ReactNode; label: stri
   );
 }
 
-export function Sidebar({ drawer, onClose }: { drawer: boolean; onClose: () => void }): ReactNode {
+export function Sidebar({ drawer, onClose, onBrowseWorkspace }: { drawer: boolean; onClose: () => void; onBrowseWorkspace?: (workspaceId: string) => void }): ReactNode {
   const app = useApp();
   const t = translator(app.locale);
   const [query, setQuery] = useState('');
@@ -238,10 +238,13 @@ export function Sidebar({ drawer, onClose }: { drawer: boolean; onClose: () => v
     setExpandedOverrides((value) => value[workspaceId] === undefined ? { ...value, [workspaceId]: true } : value);
   }, [app.workspaceId]);
   const workspace = app.workspaces.find((item) => item.id === app.workspaceId);
-  const draftEntry = app.workspaceId !== null && app.sessionId !== null
-    ? app.entries[sessionKey(app.workspaceId, app.sessionId)]
-    : undefined;
-  const draftActive = draftEntry?.draft === true;
+  const defaultWorkspace = app.workspaces.find((item) => item.isDefault === true);
+  const defaultList = defaultWorkspace === undefined ? undefined : app.sessionsByWorkspace[defaultWorkspace.id];
+  useEffect(() => {
+    if (defaultWorkspace === undefined || app.workspaceId === null || app.workspaceId === defaultWorkspace.id) return;
+    if (defaultList?.loaded || defaultList?.loading || defaultList?.error) return;
+    void store.loadSessions(defaultWorkspace.id, false);
+  }, [defaultWorkspace?.id, app.workspaceId, defaultList?.loaded, defaultList?.loading, defaultList?.error]);
   const select = (workspaceId: string, id: string): void => {
     store.selectSession(id, workspaceId);
     if (drawer) onClose();
@@ -249,7 +252,7 @@ export function Sidebar({ drawer, onClose }: { drawer: boolean; onClose: () => v
 
   const workspaceMenuItems = useMemo<MenuEntry[]>(() => [
     { type: 'label', id: 'workspaces', text: t('Workspaces') },
-    ...app.workspaces.map((item) => ({
+    ...app.workspaces.filter((item) => item.isDefault !== true).map((item) => ({
       id: `workspace:${item.id}`,
       label: item.name || item.path || item.id,
       icon: <IconFolderOpenRegular size={14} />,
@@ -405,9 +408,9 @@ export function Sidebar({ drawer, onClose }: { drawer: boolean; onClose: () => v
                 {!app.workspacesLoading && app.workspaceError === '' && app.workspaces.length === 0 && (
                   <div className={browserCss.empty}>{t('No workspace selected.')}</div>
                 )}
-                {app.workspaces.map((item) => {
+                {[...app.workspaces.filter((item) => item.isDefault !== true), ...app.workspaces.filter((item) => item.isDefault === true)].map((item) => {
                   const active = item.id === app.workspaceId;
-                  const expanded = expandedOverrides[item.id] ?? active;
+                  const expanded = item.isDefault === true || (expandedOverrides[item.id] ?? active);
                   const list = app.sessionsByWorkspace[item.id] ?? (active
                     ? { sessions: app.sessions, loading: app.sessionsLoading, error: app.sessionError, loaded: true }
                     : { sessions: [], loading: false, error: '', loaded: false });
@@ -417,8 +420,10 @@ export function Sidebar({ drawer, onClose }: { drawer: boolean; onClose: () => v
                       .some((value) => String(value ?? '').toLowerCase().includes(needle)));
                   const menuOpen = workspaceMenuOpen === item.id;
                   const workspaceLabel = item.name || item.path || item.id;
-                  const rowMenuItems = workspaceMenuItems.filter((entry) => entry.id !== 'remove-workspace');
-                  if (item.isDefault !== true) rowMenuItems.push({ id: 'remove-workspace', label: t('Remove workspace'), danger: true });
+                  const rowMenuItems: MenuEntry[] = [
+                    { id: 'browse-workspace', label: app.locale === 'zh' ? '查看文件列表' : 'View file list', icon: <IconFolderOpenRegular size={14} /> },
+                    { id: 'remove-workspace', label: t('Remove'), icon: <IconTrashOutlineRegular size={14} />, danger: true },
+                  ];
                   const activate = (): void => {
                     const next = !expanded;
                     setExpandedOverrides((value) => ({ ...value, [item.id]: next }));
@@ -426,6 +431,9 @@ export function Sidebar({ drawer, onClose }: { drawer: boolean; onClose: () => v
                   };
                   return (
                   <div className={browserCss.groupSection} key={item.id}>
+                    {item.isDefault === true ? (
+                      <div className={browserCss.sectionHeader}><span className={browserCss.sectionLabel}>{t('Tasks')}</span></div>
+                    ) : (
                     <div
                       className={clsx(browserCss.workspaceRow, menuOpen && browserCss.rowMenuOpen)}
                       role="treeitem"
@@ -453,7 +461,6 @@ export function Sidebar({ drawer, onClose }: { drawer: boolean; onClose: () => v
                           open={menuOpen}
                           onClose={() => { setWorkspaceMenuOpen(null); }}
                           items={rowMenuItems}
-                          selectedIds={app.workspaceId === null ? [] : [`workspace:${app.workspaceId}`]}
                           portal
                           minWidthFromAnchor
                           align="end"
@@ -471,9 +478,8 @@ export function Sidebar({ drawer, onClose }: { drawer: boolean; onClose: () => v
                           )}
                           onSelect={(id) => {
                             setWorkspaceMenuOpen(null);
-                            if (id.startsWith('workspace:')) { const workspaceId = id.slice('workspace:'.length); setExpandedOverrides((value) => ({ ...value, [workspaceId]: true })); void store.selectWorkspace(workspaceId); }
-                            else if (id === 'add-workspace') setAddOpen(true);
-                            else if (id === 'remove-workspace' && item.isDefault !== true) setRemoveTarget({ id: item.id, name: workspaceLabel });
+                            if (id === 'browse-workspace') { onBrowseWorkspace?.(item.id); if (drawer) onClose(); }
+                            else if (id === 'remove-workspace') setRemoveTarget({ id: item.id, name: workspaceLabel });
                           }}
                         />
                         <Tooltip label={t('New session in {name}', { name: workspaceLabel })} delayMs={400}>
@@ -492,6 +498,7 @@ export function Sidebar({ drawer, onClose }: { drawer: boolean; onClose: () => v
                         </Tooltip>
                       </span>
                     </div>
+                    )}
 
                     {expanded && list.loading && <div className={browserCss.emptyRow}>{t('Loading sessions…')}</div>}
                     {expanded && !list.loading && list.error !== '' && (
@@ -500,25 +507,7 @@ export function Sidebar({ drawer, onClose }: { drawer: boolean; onClose: () => v
                         <button type="button" className={browserCss.retry} onClick={() => { void store.loadSessions(item.id, active); }}>{t('Retry')}</button>
                       </div>
                     )}
-                    {expanded && !list.loading && list.error === '' && active && draftActive && app.sessionId !== null && query.trim() === '' && (
-                      <div
-                        className={clsx(browserCss.sessionRow, browserCss.selected)}
-                        role="treeitem"
-                        aria-selected
-                        tabIndex={0}
-                        onClick={() => { select(item.id, app.sessionId!); }}
-                        onKeyDown={(event) => {
-                          if (event.target !== event.currentTarget) return;
-                          if (event.key !== 'Enter' && event.key !== ' ') return;
-                          event.preventDefault();
-                          select(item.id, app.sessionId!);
-                        }}
-                      >
-                        <span className={browserCss.sessionSlot} aria-hidden="true" />
-                        <span className={browserCss.sessionTitle}>{t('New Session')}</span>
-                      </div>
-                    )}
-                    {expanded && !list.loading && list.error === '' && sessions.length === 0 && (!active || !draftActive || query.trim() !== '') && (
+                    {expanded && !list.loading && list.error === '' && sessions.length === 0 && (
                       <div className={browserCss.emptyRow}>
                         {query.trim() === '' ? t('No sessions yet.') : t('No matching sessions.')}
                       </div>

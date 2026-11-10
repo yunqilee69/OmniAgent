@@ -210,10 +210,6 @@
   }
 }
 
-.workspaceRow[aria-expanded='true'] .chevron {
-  transform: rotate(90deg);
-}
-
 .workspaceTitle,
 .sessionTitle {
   min-width: 0;

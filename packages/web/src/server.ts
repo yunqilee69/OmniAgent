@@ -80,10 +80,12 @@ import { InvalidModelSettings } from './model-settings';
 import type { ModelSettings } from './model-settings';
 import { InvalidMcpSettings } from './mcp-settings';
 import type { McpSettings } from './mcp-settings';
+import { AttachmentError, parseSendAttachments, storeAttachments } from './attachments';
 import { exportSession } from './session-export';
+import { projectSessionMetrics } from './session-metrics';
 import { projectTraceEvents } from './trace-projection';
 import { projectTrajectory } from './trajectory';
-import { searchWorkspaceFiles } from './workspace-files';
+import { browseWorkspaceDirectory, readWorkspaceFile, searchWorkspaceFiles, WorkspaceFileError } from './workspace-files';
 import { DefaultWorkspaceRemovalError } from './workspaces';
 import type { LiveSessionRegistry } from './live-sessions';
 import type { Workspace, WorkspaceRegistry } from './workspaces';
@@ -97,18 +99,11 @@ export interface WebSession {
   /** Compact older history before the next model request. */
   requestCompaction?(): void;
   contextMessageEstimate?(): number | undefined;
+  contextProjection?(): {
+    breakdown: { systemTokens: number; toolsTokens: number; messageTokens: number };
+    projectedTokens: number; source: 'usage' | 'estimate'; inputTokens?: number;
+  } | undefined;
   readonly activeTurn?: boolean;
-}
-
-/** Composer attachment accepted by the message route. */
-export interface SendAttachment {
-  kind: 'image' | 'text';
-  name: string;
-  mediaType: string;
-  /** Base64 payload without a data URL prefix, for images. */
-  data?: string;
-  /** UTF-8 file contents, for text-like attachments. */
-  text?: string;
 }
 
 export interface AgentSummary {
@@ -162,6 +157,9 @@ export interface WebHostOptions {
     permissions: DshPermissionSnapshot,
     runtime: ResolvedSessionRuntime,
   ) => WebSession | Promise<WebSession>;
+  /** Synchronous, side-effect-free projection for a replayed session. */
+  replayContext?: (workspace: Workspace, handle: SessionHandle, permissions: DshPermissionSnapshot,
+    runtime: ResolvedSessionRuntime) => ReturnType<NonNullable<WebSession['contextProjection']>>;
   listAgents?: () => AgentSummary[] | Promise<AgentSummary[]>;
   listRoles?: () => RoleSummary[] | Promise<RoleSummary[]>;
   /** Durable mode presets used for new root sessions. */
@@ -199,11 +197,9 @@ const MAX_BODY_BYTES = 64 * 1024;
 /** JSON escaping can roughly double an agent body; keep one request above MAX_AGENT_BYTES. */
 const MAX_AGENT_REQUEST_BYTES = MAX_AGENT_BYTES * 2 + MAX_BODY_BYTES;
 const MAX_MESSAGE_BODY_BYTES = 32 * 1024 * 1024;
-const MAX_ATTACHMENTS = 8;
-const MAX_ATTACHMENT_NAME = 256;
-const MAX_IMAGE_DATA_BYTES = 8 * 1024 * 1024;
-const MAX_TEXT_ATTACHMENT_BYTES = 256 * 1024;
 const MAX_CACHED_WEB_SESSIONS = 64;
+const MAX_RUN_REPLAY_BYTES = 8 * 1024 * 1024;
+const MAX_FOLLOW_BUFFER_BYTES = 1024 * 1024;
 const DEFAULT_STATIC_DIR = fileURLToPath(new URL('../dist', import.meta.url));
 const DOCUMENT_CSP = [
   "default-src 'none'",
@@ -254,8 +250,16 @@ interface RunningTurn {
   session?: WebSession;
   approval?: ApprovalTurn;
   cancelled: boolean;
+  closing?: boolean;
   /** Settles when this turn has bound a session or can no longer do so. */
   ready?: Promise<void>;
+  baselineReady: Promise<void>;
+  baseline?: { messages: ReturnType<typeof projectPublicHistory>; metrics: ReturnType<typeof projectSessionMetrics> };
+  deliveries: Set<Promise<void>>;
+  events: unknown[];
+  replayBytes: number;
+  replayOverflow: boolean;
+  followers: Set<ServerResponse>;
 }
 
 interface CachedSession {
@@ -281,10 +285,14 @@ export function createWebHost(options: WebHostOptions): WebHost {
   const failedPermissions = new Set<string>();
   const compactRequests = new Set<string>();
   let permissionDefaultUpdates = 0;
+  const observedSockets = new WeakSet<object>();
   const server = createServer((request, response) => {
     // A client can reset the connection while a response write is in flight;
     // that surfaces as EPIPE/ECONNRESET on the socket, not on the response.
-    response.socket?.on('error', () => undefined);
+    if (response.socket && !observedSockets.has(response.socket)) {
+      observedSockets.add(response.socket);
+      response.socket.on('error', () => undefined);
+    }
     void (async () => {
       validateOrigin(request, bindHost, auth.enabled);
       const pathname = new URL(request.url ?? '/', 'http://localhost').pathname;
@@ -343,7 +351,7 @@ export function createWebHost(options: WebHostOptions): WebHost {
         return;
       }
       if (response.destroyed) return;
-      const status = error instanceof HttpError ? error.status : 500;
+      const status = error instanceof HttpError ? error.status : error instanceof AttachmentError ? 400 : 500;
       const message = status === 500 ? 'Internal server error' : (error as Error).message;
       json(response, status, {
         error: message,
@@ -361,8 +369,9 @@ export function createWebHost(options: WebHostOptions): WebHost {
     },
     close: () => new Promise((resolve, reject) => {
       for (const turn of running.values()) {
-        turn.cancelled = true;
+        cancelTurn(turn);
         turn.approval?.close();
+        for (const follower of turn.followers) follower.destroy();
       }
       server.close((error) => error ? reject(error) : resolve());
       server.closeAllConnections?.();
@@ -784,6 +793,16 @@ async function route(
   const workspace = await options.workspaces.get(parts[2]);
   if (!workspace) throw new HttpError(404, 'Workspace not found');
   const workspacePrefix = `${workspace.path}\0`;
+  if (request.method === 'GET' && parts.length === 5 && parts[3] === 'files' && (parts[4] === 'tree' || parts[4] === 'content')) {
+    const path = url.searchParams.get('path') ?? '';
+    try {
+      if (parts[4] === 'tree') return json(response, 200, await browseWorkspaceDirectory(workspace.path, path));
+      return json(response, 200, { path, content: await readWorkspaceFile(workspace.path, path) });
+    } catch (error) {
+      if (error instanceof WorkspaceFileError) throw new HttpError(error.status, error.message);
+      throw error;
+    }
+  }
   if (request.method === 'GET' && parts.length === 4 && parts[3] === 'files') {
     const query = url.searchParams.get('query') ?? '';
     if (query.length > 1_024) throw new HttpError(400, 'The file reference query is too long');
@@ -963,6 +982,7 @@ async function route(
       todos: projectTodos(handle.events),
       events: projectTraceEvents(handle.events),
       trajectory: projectTrajectory(handle.events),
+      metrics: projectSessionMetrics(handle.events),
       audit,
     });
   }
@@ -1028,6 +1048,7 @@ async function route(
         try {
           runtime = await options.runtime.resolve({
             cwd: handle.header.cwd ?? workspace.path,
+            workspace: workspace.path,
             agentId: agent.agent,
             binding: binding.binding,
             isRoot: true,
@@ -1052,8 +1073,19 @@ async function route(
     // replay when the next turn would create a fresh runtime from the log.
     const estimatedMessageTokens = runningNow ? undefined
       : live ? live.contextMessageEstimate?.() : estimateModelHistory(projectMessages(handle.events));
+    let projection = runningNow ? undefined : live?.contextProjection?.();
+    if (!runningNow && !live && runtime && options.replayContext) {
+      const permission = permissionProjection(handle, key, failedPermissions);
+      if (permission.status === 'ready') {
+        try {
+          projection = options.replayContext(workspace, handle, snapshotDshPermissions(permission), runtime);
+        } catch { /* A failed or unavailable runtime is not an estimate. */ }
+      }
+    }
     return json(response, 200, {
       ...(estimatedMessageTokens === undefined ? {} : { estimatedMessageTokens }),
+      ...(projection === undefined ? {} : { projection }),
+      ...(runtime?.modelDescriptor?.contextWindow === undefined ? {} : { modelWindow: runtime.modelDescriptor.contextWindow }),
       ...(runtime?.contextWindowTokens === undefined || runtime.contextWindowSource === undefined ? {} : {
         window: { tokens: runtime.contextWindowTokens, source: runtime.contextWindowSource },
       }),
@@ -1251,12 +1283,43 @@ async function route(
     await readJson(request);
     const turn = running.get(key);
     if (turn) {
-      turn.cancelled = true;
-      turn.session?.interrupt();
+      cancelTurn(turn);
     }
     await openSession(options.store, workspace, sessionId);
     if (!turn) throw new HttpError(409, 'Session is not running');
     return json(response, 200, { ok: true });
+  }
+  if (request.method === 'GET' && parts.length === 6 && parts[5] === 'follow') {
+    await openSession(options.store, workspace, sessionId);
+    const turn = running.get(key);
+    if (!turn) {
+      response.writeHead(204, { 'cache-control': 'no-store' });
+      response.end();
+      return;
+    }
+    await turn.baselineReady;
+    if (running.get(key) !== turn || turn.baseline === undefined) {
+      response.writeHead(204, { 'cache-control': 'no-store' });
+      response.end();
+      return;
+    }
+    response.on('error', () => undefined);
+    response.writeHead(200, {
+      'content-type': 'text/event-stream; charset=utf-8',
+      'cache-control': 'no-cache, no-transform',
+      'x-content-type-options': 'nosniff',
+      'connection': 'keep-alive',
+    });
+    // Registration and snapshot are synchronous, so publishing cannot interleave.
+    turn.followers.add(response);
+    response.once('close', () => turn.followers.delete(response));
+    const events = turn.events.filter((event) => {
+      if (typeof event !== 'object' || event === null || !('type' in event)) return true;
+      return event.type !== 'permission.requested' && event.type !== 'plan.review.requested';
+    });
+    events.push(...(turn.approval?.pendingPrompts() ?? []));
+    response.write(`data: ${JSON.stringify({ type: 'run.snapshot', baseline: turn.baseline, events, ...(turn.replayOverflow ? { truncated: true } : {}) })}\n\n`);
+    return;
   }
   if (request.method === 'POST' && parts.length === 6 && parts[5] === 'messages') {
     const body = await readJson(request, MAX_MESSAGE_BODY_BYTES);
@@ -1265,7 +1328,6 @@ async function route(
     if (text.trim().length === 0 && attachments.length === 0) {
       throw new HttpError(400, 'Message text or an attachment is required');
     }
-    const content = attachments.length === 0 ? text : composeUserContent(text, attachments);
     const sendMode = body.mode;
     if (sendMode !== undefined && sendMode !== 'steer') {
       throw new HttpError(400, 'A valid send mode is required');
@@ -1281,23 +1343,58 @@ async function route(
         ]);
         if (timer !== undefined) clearTimeout(timer);
       }
-      if (active.session?.deliverUserMessage === undefined) {
+      if (running.get(key) !== active || active.session?.deliverUserMessage === undefined) {
         throw new HttpError(409, 'The active turn cannot accept another message yet');
       }
-      const delivery = await active.session.deliverUserMessage(content);
-      return json(response, 202, { accepted: true, delivery });
+      const registered = await options.workspaces.get(workspace.id);
+      if (!registered || registered.path !== workspace.path) throw new HttpError(404, 'Workspace not found');
+      const handle = await openSession(options.store, workspace, sessionId);
+      const stored = await storeAttachments(workspace.path, handle.header.cwd, attachments);
+      let accepted = false;
+      try {
+        if (running.get(key) !== active || active.closing || removing.has(workspace.id)) throw new HttpError(409, 'Session is no longer running');
+        const content = attachments.length === 0 ? text : [...(text.trim() ? [{ type: 'text' as const, text }] : []), ...stored.parts];
+        const operation = active.session.deliverUserMessage(content).then((delivery) => {
+          accepted = true;
+          publishTurnEvent(active, publicUserEvent(content));
+          return delivery;
+        });
+        const settled = operation.then(() => undefined, () => undefined);
+        active.deliveries.add(settled);
+        void settled.then(() => active.deliveries.delete(settled));
+        const delivery = await operation;
+        return json(response, 202, { accepted: true, delivery, broadcast: true });
+      } catch (error) {
+        accepted = await attachmentsCommitted(options.store, workspace, sessionId, stored.parts);
+        throw error;
+      } finally {
+        await stored.finish(accepted);
+      }
     }
+    if (sendMode === 'steer') throw new HttpError(409, 'Session is not running');
     if (running.has(key)) throw new HttpError(409, 'Session already has an active turn');
     if (removing.has(workspace.id)) throw new HttpError(409, 'Workspace is being unregistered');
     let markReady!: () => void;
     const ready = new Promise<void>((resolve) => { markReady = resolve; });
-    const turn: RunningTurn = { cancelled: false, ready };
+    let markBaselineReady!: () => void;
+    const baselineReady = new Promise<void>((resolve) => { markBaselineReady = resolve; });
+    const turn: RunningTurn = { cancelled: false, ready, baselineReady, deliveries: new Set(), events: [], replayBytes: 0, replayOverflow: false, followers: new Set() };
     running.set(key, turn);
+    let accepted = false;
+    const asyncResponse = [request.headers.prefer ?? ''].flat().join(',').split(',')
+      .some((value) => value.trim().toLowerCase() === 'respond-async');
+    const checkCancelled = () => {
+      if (!turn.cancelled) return false;
+      if (asyncResponse) throw new HttpError(409, 'Turn cancelled during initialization');
+      response.writeHead(200, { 'content-type': 'text/event-stream; charset=utf-8', 'cache-control': 'no-cache, no-transform' });
+      response.end(`data: ${JSON.stringify({ type: 'turn.end', reason: 'interrupted' })}\n\n`);
+      return true;
+    };
     const disconnected = () => {
-      if (response.writableEnded) return;
-      if (turn.session) turn.session.interrupt();
-      else if (running.get(key) === turn) running.delete(key);
-      turn.approval?.close();
+      if (!accepted && !response.writableEnded) {
+        turn.cancelled = true;
+        if (running.get(key) === turn) running.delete(key);
+      }
     };
     const responseError = () => undefined;
     response.on('error', responseError);
@@ -1329,6 +1426,7 @@ async function route(
         try {
           resolved = await options.runtime.resolve({
             cwd: handle.header.cwd,
+            workspace: workspace.path,
             agentId: agent.agent,
             binding: binding.binding,
             isRoot: true,
@@ -1339,65 +1437,108 @@ async function route(
         }
         return { handle, permissions, runtime: resolved };
       });
+      turn.baseline = { messages: projectPublicHistory(handle.header, handle.events), metrics: projectSessionMetrics(handle.events) };
+      markBaselineReady();
       if (response.destroyed) return;
-      if (turn.cancelled) {
-        response.writeHead(200, {
-          'content-type': 'text/event-stream; charset=utf-8',
-          'cache-control': 'no-cache, no-transform',
-          'x-content-type-options': 'nosniff',
-          'connection': 'keep-alive',
-        });
-        response.flushHeaders();
-        response.write(`data: ${JSON.stringify({ type: 'turn.end', reason: 'interrupted' })}\n\n`);
-        return;
-      }
+      if (checkCancelled()) return;
       const session = await getSession(options, sessions, running, workspace, handle, key, permissions, runtime);
       if (response.destroyed) return;
-      if (turn.cancelled) {
+      if (checkCancelled()) return;
+      const stored = await storeAttachments(workspace.path, handle.header.cwd, attachments);
+      if (response.destroyed || turn.cancelled || running.get(key) !== turn || removing.has(workspace.id)) {
+        await stored.finish(false);
+        if (response.destroyed) return;
+        throw new HttpError(409, 'Turn cancelled during initialization');
+      }
+      const content = attachments.length === 0 ? text : [...(text.trim() ? [{ type: 'text' as const, text }] : []), ...stored.parts];
+      turn.session = session;
+      if (compactRequests.delete(key)) session.requestCompaction?.();
+      try {
+        turn.approval = options.approvalBroker?.start(workspace.path, sessionId);
+      } catch (error) {
+        await stored.finish(false);
+        throw error;
+      }
+      accepted = true;
+      if (!asyncResponse && !response.destroyed) {
         response.writeHead(200, {
           'content-type': 'text/event-stream; charset=utf-8',
           'cache-control': 'no-cache, no-transform',
           'x-content-type-options': 'nosniff',
           'connection': 'keep-alive',
         });
+        turn.followers.add(response);
+        response.once('close', () => turn.followers.delete(response));
         response.flushHeaders();
-        response.write(`data: ${JSON.stringify({ type: 'turn.end', reason: 'interrupted' })}\n\n`);
-        return;
       }
-      turn.session = session;
-      if (compactRequests.delete(key)) session.requestCompaction?.();
-      markReady();
-      turn.approval = options.approvalBroker?.start(workspace.path, sessionId);
-      response.writeHead(200, {
-        'content-type': 'text/event-stream; charset=utf-8',
-        'cache-control': 'no-cache, no-transform',
-        'x-content-type-options': 'nosniff',
-        'connection': 'keep-alive',
-      });
-      response.flushHeaders();
-      const source = session.send(content);
-      for await (const event of turn.approval ? turn.approval.stream(source) : source) {
-        if (response.destroyed) break;
-        const publicEvent = publicAgentEvent(event);
-        if (!response.write(`data: ${JSON.stringify(publicEvent)}\n\n`)) {
-          await waitForDrain(response);
-          if (response.destroyed) break;
+      let markStarted!: (success: boolean) => void;
+      const started = new Promise<boolean>((resolve) => { markStarted = resolve; });
+      void (async () => {
+        let attachmentFinished = false;
+        let ended = false;
+        try {
+          const source = session.send(content);
+          const stream = turn.approval ? turn.approval.stream(source) : source;
+          const first = await stream.next();
+          await stored.finish(true);
+          attachmentFinished = true;
+          if (first.done || first.value.type !== 'error') publishTurnEvent(turn, publicUserEvent(content), asyncResponse ? undefined : response);
+          markReady();
+          markStarted(first.done || first.value.type !== 'error');
+          if (!first.done) {
+            ended = first.value.type === 'turn.end';
+            if (ended) {
+              turn.closing = true;
+              await Promise.all(turn.deliveries);
+            }
+            publishTurnEvent(turn, publicAgentEvent(first.value));
+          }
+          for await (const event of stream) {
+            if (event.type === 'turn.start') turn.closing = false;
+            if (event.type === 'turn.end') {
+              turn.closing = true;
+              await Promise.all(turn.deliveries);
+            }
+            ended = event.type === 'turn.end';
+            publishTurnEvent(turn, publicAgentEvent(event));
+          }
+          if (!ended) {
+            turn.closing = true;
+            await Promise.all(turn.deliveries);
+            publishTurnEvent(turn, { type: 'turn.end', reason: turn.cancelled ? 'interrupted' : 'error' });
+          }
+        } catch {
+          turn.closing = true;
+          await Promise.all(turn.deliveries);
+          if (!attachmentFinished) {
+            await stored.finish(await attachmentsCommitted(options.store, workspace, sessionId, stored.parts)).catch(() => undefined);
+          }
+          publishTurnEvent(turn, { type: 'error', error: { message: 'The turn failed' } });
+          publishTurnEvent(turn, { type: 'turn.end', reason: 'error' });
+        } finally {
+          markReady();
+          markStarted(false);
+          turn.approval?.close();
+          if (running.get(key) === turn) running.delete(key);
+          for (const follower of turn.followers) follower.end();
+          turn.followers.clear();
         }
-      }
-    } catch (error) {
-      if (!response.headersSent) throw error;
-      if (!response.destroyed) {
-        response.write(`data: ${JSON.stringify({ type: 'error', error: { message: 'The turn failed' } })}\n\n`);
-        response.write(`data: ${JSON.stringify({ type: 'turn.end', reason: 'error' })}\n\n`);
+      })();
+      const startedSuccessfully = await started;
+      if (asyncResponse && !response.destroyed) {
+        if (startedSuccessfully) json(response, 202, { accepted: true });
+        else json(response, 500, { error: 'The turn failed', code: 'turn_start_failed_message_may_be_saved' });
       }
     } finally {
-      markReady();
-      turn.approval?.close();
-      if (running.get(key) === turn) running.delete(key);
+      if (!accepted) {
+        markBaselineReady();
+        markReady();
+        turn.approval?.close();
+        if (running.get(key) === turn) running.delete(key);
+        publishTurnEvent(turn, { type: 'turn.end', reason: turn.cancelled ? 'interrupted' : 'error' });
+        for (const follower of turn.followers) follower.end();
+      }
       response.off('close', disconnected);
-      // A write queued before a client disconnect can surface EPIPE after this
-      // cleanup, so the no-op handler stays attached for the response lifetime.
-      if (!response.destroyed && response.headersSent && !response.writableEnded) response.end();
     }
     return;
   }
@@ -1559,6 +1700,38 @@ function optionalStringOrNull(value: unknown, name: string): string | null | und
   return value;
 }
 
+function cancelTurn(turn: RunningTurn): void {
+  turn.cancelled = true;
+  turn.session?.interrupt();
+}
+
+function publishTurnEvent(turn: RunningTurn, event: unknown, excluded?: ServerResponse): void {
+  const serialized = JSON.stringify(event);
+  const bytes = Buffer.byteLength(serialized) + 1;
+  // Retain the newest bounded suffix. Persisted session detail remains the
+  // authoritative recovery path for transcript data older than this window.
+  while (turn.events.length > 0 && turn.replayBytes + bytes > MAX_RUN_REPLAY_BYTES) {
+    turn.replayBytes -= Buffer.byteLength(JSON.stringify(turn.events.shift())) + 1;
+    turn.replayOverflow = true;
+  }
+  if (bytes <= MAX_RUN_REPLAY_BYTES) {
+    turn.events.push(event);
+    turn.replayBytes += bytes;
+  } else {
+    turn.replayOverflow = true;
+  }
+  const frame = `data: ${serialized}\n\n`;
+  for (const follower of turn.followers) {
+    if (follower === excluded) continue;
+    if (follower.destroyed || (follower.writableLength > 0 && follower.writableLength + Buffer.byteLength(frame) > MAX_FOLLOW_BUFFER_BYTES)) {
+      follower.destroy();
+      turn.followers.delete(follower);
+    } else {
+      follower.write(frame);
+    }
+  }
+}
+
 function publicAgentEvent(event: AgentEvent): unknown {
   if (event.type === 'error') {
     return { type: 'error', error: { message: 'The turn failed' } };
@@ -1572,6 +1745,11 @@ function publicAgentEvent(event: AgentEvent): unknown {
     return parsed.success ? { ...rest, history: safePublicMessages(parsed.data) } : rest;
   }
   return event;
+}
+
+function publicUserEvent(input: string | readonly ContentPart[]): unknown {
+  const content: ContentPart[] = typeof input === 'string' ? [{ type: 'text', text: input }] : [...input];
+  return { type: 'run.user.message', message: safePublicMessages([{ role: 'user', content }])[0], timestamp: Date.now() };
 }
 
 function permissionProjection(
@@ -1592,22 +1770,6 @@ function withPermissionLock<T>(
   locks.set(key, settled);
   void settled.then(() => { if (locks.get(key) === settled) locks.delete(key); });
   return result;
-}
-
-function waitForDrain(response: ServerResponse): Promise<void> {
-  return new Promise((resolve, reject) => {
-    const cleanup = () => {
-      response.off('drain', complete);
-      response.off('close', complete);
-      response.off('error', fail);
-    };
-    const complete = () => { cleanup(); resolve(); };
-    const fail = (error: Error) => { cleanup(); reject(error); };
-    response.once('drain', complete);
-    response.once('close', complete);
-    response.once('error', fail);
-    if (response.destroyed) complete();
-  });
 }
 
 async function getSession(
@@ -1751,6 +1913,7 @@ async function describeSelection(
   try {
     const runtime = await options.runtime.resolve({
       cwd: handle.header.cwd ?? workspace.path,
+      workspace: workspace.path,
       agentId: agent.agent,
       binding: binding.binding,
       isRoot: true,
@@ -1858,6 +2021,19 @@ function json(response: ServerResponse, status: number, payload: unknown): void 
   response.end(JSON.stringify(payload));
 }
 
+async function attachmentsCommitted(store: WebHostOptions['store'], workspace: Workspace, sessionId: string, parts: readonly ContentPart[]): Promise<boolean> {
+  const references = parts.filter((part) => part.type === 'text').map((part) => part.text);
+  if (references.length === 0) return false;
+  let handle: SessionHandle;
+  try { handle = await openSession(store, workspace, sessionId); } catch { return true; }
+  return handle.events.some((event) => {
+    if (event.type !== 'message/user' || !event.data || typeof event.data !== 'object') return false;
+    const content = (event.data as { content?: unknown }).content;
+    return Array.isArray(content) && content.some((part: unknown) =>
+      typeof part === 'object' && part !== null && 'text' in part && references.includes(String(part.text)));
+  });
+}
+
 async function readJson(request: IncomingMessage, maxBytes = MAX_BODY_BYTES): Promise<Record<string, unknown>> {
   const contentType = request.headers['content-type']?.split(';')[0]?.trim().toLowerCase();
   if (contentType !== 'application/json') throw new HttpError(415, 'Content-Type must be application/json');
@@ -1886,68 +2062,6 @@ async function readJson(request: IncomingMessage, maxBytes = MAX_BODY_BYTES): Pr
   }
 }
 
-const IMAGE_MEDIA_TYPES = new Set(['image/png', 'image/jpeg', 'image/webp', 'image/gif']);
-
-function parseSendAttachments(value: unknown): SendAttachment[] {
-  if (value === undefined) return [];
-  if (!Array.isArray(value) || value.length > MAX_ATTACHMENTS) {
-    throw new HttpError(400, `Up to ${MAX_ATTACHMENTS} attachments are allowed`);
-  }
-  return value.map((item): SendAttachment => {
-    if (typeof item !== 'object' || item === null || Array.isArray(item)) {
-      throw new HttpError(400, 'Invalid attachment');
-    }
-    const attachment = item as Record<string, unknown>;
-    if (typeof attachment.name !== 'string' || attachment.name.trim() === ''
-      || attachment.name.length > MAX_ATTACHMENT_NAME || /[\u0000-\u001f]/.test(attachment.name)) {
-      throw new HttpError(400, 'Attachment names must be valid file names');
-    }
-    if (attachment.kind === 'image') {
-      if (typeof attachment.mediaType !== 'string' || !IMAGE_MEDIA_TYPES.has(attachment.mediaType)) {
-        throw new HttpError(400, 'Only PNG, JPEG, WebP, and GIF images are supported');
-      }
-      if (typeof attachment.data !== 'string' || attachment.data.length === 0
-        || attachment.data.length > MAX_IMAGE_DATA_BYTES * 2 || !/^[A-Za-z0-9+/]+={0,2}$/.test(attachment.data)) {
-        throw new HttpError(400, 'Invalid image attachment');
-      }
-      return { kind: 'image', name: attachment.name, mediaType: attachment.mediaType, data: attachment.data };
-    }
-    if (attachment.kind === 'text') {
-      if (typeof attachment.text !== 'string'
-        || Buffer.byteLength(attachment.text, 'utf8') > MAX_TEXT_ATTACHMENT_BYTES) {
-        throw new HttpError(400, 'Text attachments are limited to 256 KB');
-      }
-      return {
-        kind: 'text',
-        name: attachment.name,
-        mediaType: typeof attachment.mediaType === 'string' && attachment.mediaType !== ''
-          ? attachment.mediaType
-          : 'text/plain',
-        text: attachment.text,
-      };
-    }
-    throw new HttpError(400, 'Unsupported attachment kind');
-  });
-}
-
-function composeUserContent(text: string, attachments: readonly SendAttachment[]): ContentPart[] {
-  const content: ContentPart[] = [];
-  if (text.trim() !== '') content.push({ type: 'text', text });
-  for (const attachment of attachments) {
-    if (attachment.kind === 'text') {
-      content.push({
-        type: 'text',
-        text: `[Attached file: ${attachment.name} (${attachment.mediaType})]\n${attachment.text ?? ''}\n[End of attached file: ${attachment.name}]`,
-      });
-    }
-  }
-  for (const attachment of attachments) {
-    if (attachment.kind === 'image') {
-      content.push({ type: 'image', mediaType: attachment.mediaType, data: attachment.data! });
-    }
-  }
-  return content;
-}
 
 async function drainRequest(iterator: AsyncIterator<Buffer | string | Uint8Array>): Promise<void> {
   try {

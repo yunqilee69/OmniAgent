@@ -5,6 +5,10 @@ export interface CompactionOptions {
   maxTokens: number;
   retainTokens?: number;
   summarize?: (messages: readonly Message[]) => Promise<string>;
+  /** Estimate the actual model-facing messages while retaining original history. */
+  project?: (messages: readonly Message[]) => Message[];
+  /** Input indices that must survive compaction, even when they exceed the budget. */
+  protectedIndices?: readonly number[];
 }
 
 export interface CompactionResult {
@@ -13,11 +17,29 @@ export interface CompactionResult {
   beforeTokens: number;
   afterTokens: number;
   removed: Message[];
+  /** Updated protected indices after a successful compaction. */
+  protectedIndices?: number[];
 }
 
-/** A conservative, provider-independent estimate: JSON UTF-8 bytes / 4. */
+// Without image dimensions or provider-specific tiling, use a fixed approximate
+// visual cost per image. Base64 transport size is not a text token count.
+const IMAGE_TOKENS = 1024;
+
+/** Provider-independent estimate: JSON UTF-8 bytes / 4 plus a visual allowance. */
 export function estimateMessageTokens(message: Message): number {
-  return Math.max(1, Math.ceil(new TextEncoder().encode(JSON.stringify(message)).length / 4));
+  // Metering metadata is persisted for replay but is never sent to a provider.
+  const value = message.role === 'assistant'
+    ? (({ usage: _usage, contextSample: _sample, ...rest }) => rest)(message)
+    : message;
+  let imageCount = 0;
+  const projected = value.role === 'user' || value.role === 'assistant'
+    ? { ...value, content: value.content.map((part) => {
+      if (part.type !== 'image') return part;
+      imageCount += 1;
+      return { ...part, data: '' };
+    }) }
+    : value;
+  return Math.max(1, Math.ceil(new TextEncoder().encode(JSON.stringify(projected)).length / 4) + imageCount * IMAGE_TOKENS);
 }
 
 export function estimateMessages(messages: readonly Message[]): number {
@@ -29,7 +51,8 @@ export async function compactMessages(
   options: CompactionOptions,
 ): Promise<CompactionResult> {
   const messages = input.map((message) => structuredClone(message));
-  const beforeTokens = estimateMessages(messages);
+  const estimate = (items: readonly Message[]) => estimateMessages(options.project ? options.project(items) : items);
+  const beforeTokens = estimate(messages);
   if (beforeTokens <= options.maxTokens) {
     return { messages, compacted: false, beforeTokens, afterTokens: beforeTokens, removed: [] };
   }
@@ -48,20 +71,29 @@ export async function compactMessages(
     }
   }
 
+  const protectedIndices = new Set(options.protectedIndices ?? []);
+  let messageIndex = 0;
+  const protectedGroups = groups.map((group) => {
+    const isProtected = group.some((_, offset) => protectedIndices.has(messageIndex + offset));
+    messageIndex += group.length;
+    return isProtected;
+  });
+
   let groupStart = groups.length;
   let retainedTokens = 0;
   while (groupStart > 0 && retainedTokens < retainTokens) {
     const group = groups[groupStart - 1];
     if (!group) break;
-    retainedTokens += estimateMessages(group);
+    retainedTokens += estimate(group);
     groupStart -= 1;
   }
-  while (groupStart < groups.length && estimateMessages(groups.slice(groupStart).flat()) > options.maxTokens) {
+  while (groupStart < groups.length && estimate(groups
+    .filter((_, index) => index >= groupStart || protectedGroups[index]).flat()) > options.maxTokens) {
     groupStart += 1;
   }
 
-  const removed = groups.slice(0, groupStart).flat();
-  const retainedMessages = groups.slice(groupStart).flat();
+  const removed = groups.filter((_, index) => index < groupStart && !protectedGroups[index]).flat();
+  const retainedMessages = groups.filter((_, index) => index >= groupStart || protectedGroups[index]).flat();
   if (removed.length === 0) {
     // Even the oldest group cannot be dropped. Returning "compacted" here
     // would prepend a summary to the unchanged history and grow the request.
@@ -75,7 +107,7 @@ export async function compactMessages(
     { role: 'user' as const, content: [text(`[conversation summary]\n${summary}`)] },
     ...retainedMessages,
   ];
-  const afterTokens = estimateMessages(compactedMessages);
+  const afterTokens = estimate(compactedMessages);
   if (afterTokens >= beforeTokens) {
     // A summary that does not reduce the request must not be reported as
     // compaction. Returning the original copy keeps the caller's context
@@ -84,11 +116,23 @@ export async function compactMessages(
     return { messages, compacted: false, beforeTokens, afterTokens: beforeTokens, removed: [] };
   }
 
+  const retainedProtectedIndices: number[] = [];
+  let originalIndex = 0;
+  let retainedIndex = 1; // The summary is inserted at the start.
+  groups.forEach((group, index) => {
+    const retained = index >= groupStart || protectedGroups[index];
+    group.forEach(() => {
+      if (retained && protectedIndices.has(originalIndex)) retainedProtectedIndices.push(retainedIndex);
+      originalIndex += 1;
+      if (retained) retainedIndex += 1;
+    });
+  });
   return {
     messages: compactedMessages,
     compacted: true,
     beforeTokens,
     afterTokens,
     removed,
+    ...(options.protectedIndices ? { protectedIndices: retainedProtectedIndices } : {}),
   };
 }

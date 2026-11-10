@@ -4,6 +4,7 @@ import { join } from 'node:path';
 import { describe, expect, it } from 'vitest';
 import { FakeModel, Session, SessionStore, textResponse, toolCallResponse } from '@omniagent/core';
 import { projectTrajectory } from './trajectory';
+import { projectSessionMetrics } from './session-metrics';
 import type { TrajectoryEvent, TrajectoryToolRecord } from './trajectory';
 
 const event = (seq: number, type: string, data: unknown, ts?: number | null): TrajectoryEvent => ({
@@ -320,6 +321,12 @@ describe('projectTrajectory', () => {
         name: 'read_file', ok: false, decision: 'deny', durationMs: null,
       });
       expect(JSON.stringify(projection)).not.toMatch(/SECRET|private-id|\/private/);
+      const metrics = projectSessionMetrics(log.events);
+      expect(metrics.runs).toMatchObject({ started: 1, completed: 1, knownDurationCount: 1 });
+      expect(metrics.steps.started).toBe(2);
+      expect(metrics.requests.count).toBe(2);
+      expect(metrics.requests.knownDurationCount).toBe(2);
+      expect(JSON.stringify(metrics)).not.toMatch(/SECRET|private-id|\/private/);
       expect(JSON.stringify(log.events)).toBe(before);
     } finally {
       await rm(root, { recursive: true, force: true });

@@ -8,11 +8,24 @@ import { z } from 'zod';
  */
 
 export const ContentPartSchema = z.discriminatedUnion('type', [
-  z.object({ type: z.literal('text'), text: z.string() }),
+  z.object({
+    type: z.literal('text'),
+    text: z.string(),
+    /** Display metadata for a model-facing attachment path, persisted with the text. */
+    attachment: z.object({
+      kind: z.enum(['file', 'image']),
+      name: z.string(),
+      mediaType: z.string(),
+      filePath: z.string(),
+    }).optional(),
+  }),
   z.object({
     type: z.literal('image'),
     mediaType: z.string(),
     data: z.string(),
+    fileName: z.string().optional(),
+    /** Readable storage path relative to the session cwd. */
+    filePath: z.string().optional(),
   }),
 ]);
 export type ContentPart = z.infer<typeof ContentPartSchema>;
@@ -40,6 +53,8 @@ export type ToolResult = z.infer<typeof ToolResultSchema>;
 export const UsageSchema = z.object({
   inputTokens: z.number().int().nonnegative(),
   outputTokens: z.number().int().nonnegative(),
+  /** Input tokens read from cache; absent when cache usage is unknown. */
+  cachedInputTokens: z.number().int().nonnegative().optional(),
 });
 export type Usage = z.infer<typeof UsageSchema>;
 
@@ -52,6 +67,7 @@ export type SystemMessage = z.infer<typeof SystemMessageSchema>;
 export const UserMessageSchema = z.object({
   role: z.literal('user'),
   content: z.array(ContentPartSchema),
+  initCommand: z.literal(true).optional(),
 });
 export type UserMessage = z.infer<typeof UserMessageSchema>;
 
@@ -158,6 +174,13 @@ export const AssistantMessageSchema = z.object({
   content: z.array(ContentPartSchema),
   toolCalls: z.array(ToolCallSchema).default([]),
   usage: UsageSchema.optional(),
+  /** Elapsed time for this model request, including streaming, in milliseconds. */
+  requestDurationMs: z.number().nonnegative().optional(),
+  contextSample: z.object({
+    provider: z.string(), model: z.string(), historyHash: z.string(),
+    systemTokens: z.number().int().nonnegative(), toolsTokens: z.number().int().nonnegative(),
+    messageTokens: z.number().int().nonnegative(),
+  }).strict().optional(),
   dshReplay: DshReplaySchema.optional(),
   providerReplay: ProviderReplaySchema.optional(),
 });

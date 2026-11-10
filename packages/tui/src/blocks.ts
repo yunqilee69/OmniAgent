@@ -284,6 +284,7 @@ export function helpGroups(): readonly HelpGroup[] {
         { command: '/new', description: '新建会话' },
         { command: '/sessions', description: '列出本工作区的会话' },
         { command: '/resume <id>', description: '恢复指定会话' },
+        { command: '/init [notes]', description: '检查工作区并创建或更新根目录 AGENTS.md' },
         { command: '/todos', description: '查看当前任务清单' },
       ],
     },

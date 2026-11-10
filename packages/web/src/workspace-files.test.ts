@@ -2,7 +2,7 @@ import { mkdir, mkdtemp, symlink, writeFile } from 'node:fs/promises';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { describe, expect, it } from 'vitest';
-import { searchWorkspaceFiles } from './workspace-files';
+import { browseWorkspaceDirectory, MAX_PREVIEW_BYTES, readWorkspaceFile, searchWorkspaceFiles } from './workspace-files';
 
 async function workspace(): Promise<string> {
   const root = await mkdtemp(join(tmpdir(), 'omniagent-files-'));
@@ -59,5 +59,39 @@ describe('workspace file search', () => {
   it('respects the requested result limit', async () => {
     const root = await workspace();
     expect(await searchWorkspaceFiles(root, 's', 2)).toHaveLength(2);
+  });
+});
+
+describe('workspace file browser', () => {
+  it('lists actual directory children and reads UTF-8 text', async () => {
+    const root = await workspace();
+    const listing = await browseWorkspaceDirectory(root, '');
+    expect(listing.entries).toContainEqual({ path: 'node_modules', name: 'node_modules', kind: 'directory' });
+    expect((await browseWorkspaceDirectory(root, 'src')).entries.map((entry) => entry.path)).toEqual(['src/lib', 'src/main.ts']);
+    expect(await readWorkspaceFile(root, 'README.md')).toBe('# Read me\n');
+  });
+
+  it('rejects traversal, absolute paths, and symlinks including internal links', async () => {
+    const root = await workspace();
+    const outside = await mkdtemp(join(tmpdir(), 'omniagent-outside-'));
+    await writeFile(join(outside, 'secret'), 'secret');
+    await symlink(outside, join(root, 'escape'));
+    await symlink(join(root, 'src'), join(root, 'inside-link'));
+    for (const path of ['../secret', '/etc/passwd', 'src/../README.md', 'escape/secret', 'inside-link/main.ts', 'src\\main.ts']) {
+      await expect(readWorkspaceFile(root, path)).rejects.toBeInstanceOf(Error);
+    }
+    await expect(browseWorkspaceDirectory(root, 'escape')).rejects.toMatchObject({ status: 403 });
+    expect((await browseWorkspaceDirectory(root, '')).entries.some((entry) => entry.path === 'escape')).toBe(false);
+  });
+
+  it('rejects binary, invalid UTF-8, large files, and directories', async () => {
+    const root = await workspace();
+    await writeFile(join(root, 'binary'), Buffer.from([0, 1, 2]));
+    await writeFile(join(root, 'invalid'), Buffer.from([0xff]));
+    await writeFile(join(root, 'large'), Buffer.alloc(MAX_PREVIEW_BYTES + 1, 65));
+    await expect(readWorkspaceFile(root, 'binary')).rejects.toMatchObject({ status: 415 });
+    await expect(readWorkspaceFile(root, 'invalid')).rejects.toMatchObject({ status: 415 });
+    await expect(readWorkspaceFile(root, 'large')).rejects.toMatchObject({ status: 413 });
+    await expect(readWorkspaceFile(root, 'src')).rejects.toMatchObject({ status: 400 });
   });
 });

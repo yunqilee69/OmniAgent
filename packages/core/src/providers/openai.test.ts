@@ -171,6 +171,14 @@ describe('toOpenAITools', () => {
 });
 
 describe('toModelResponse', () => {
+  it('retains explicitly reported cached prompt tokens including zero', () => {
+    for (const cached of [0, 5]) {
+      const source = completion({ content: 'ok' });
+      source.usage = { prompt_tokens: 12, completion_tokens: 7, total_tokens: 19,
+        prompt_tokens_details: { cached_tokens: cached } };
+      expect(toModelResponse(source).usage).toEqual({ inputTokens: 12, outputTokens: 7, cachedInputTokens: cached });
+    }
+  });
   it('解析文本、tool_calls 与 usage', () => {
     const response = toModelResponse(
       completion({
@@ -212,6 +220,16 @@ describe('toModelResponse', () => {
 });
 
 describe('toModelStream', () => {
+  it('retains cached prompt tokens from the final usage chunk', async () => {
+    const stream = toModelStream(asyncItems([
+      chunk({ content: 'done' }, 'stop'),
+      { ...chunk({}), choices: [], usage: { prompt_tokens: 9, completion_tokens: 3, total_tokens: 12,
+        prompt_tokens_details: { cached_tokens: 4 } } },
+    ]));
+    let next = await stream.next();
+    while (!next.done) next = await stream.next();
+    expect(next.value.usage).toEqual({ inputTokens: 9, outputTokens: 3, cachedInputTokens: 4 });
+  });
   it('文本片段即时抛出，tool_call 分片在流结束时拼完整', async () => {
     const stream = toModelStream(
       asyncItems([

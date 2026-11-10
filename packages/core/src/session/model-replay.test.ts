@@ -55,6 +55,24 @@ function storedAssistant(data: unknown, type = 'message/assistant'): SessionEven
 }
 
 describe('model replay persistence', () => {
+  it('rebuilds a measured context after reopening and does not expose the sample publicly', async () => {
+    const root = await mkdtemp(join(tmpdir(), 'context-replay-'));
+    try {
+      const store = new SessionStore(root);
+      const handle = await store.create({ id: 'context', cwd: root, workspace: root });
+      const model = new FakeModel([{ ...textResponse('answer'), usage: { inputTokens: 200, outputTokens: 4 } }]);
+      const session = new Session({ cwd: root, session: handle, model, modelId: 'm', system: 'system' });
+      for await (const _event of session.send('hello')) { /* drain */ }
+      const live = session.contextProjection();
+      expect(live).toMatchObject({ source: 'usage', inputTokens: 200 });
+      const reopened = await store.open(root, 'context');
+      const replay = new Session({ cwd: root, session: reopened, model, modelId: 'm', system: 'system' });
+      expect(replay.contextProjection()).toEqual(live);
+      expect(JSON.stringify(projection.projectPublicHistory(reopened.header, reopened.events))).not.toContain('contextSample');
+      const changed = new Session({ cwd: root, session: reopened, model, modelId: 'other', system: 'system' });
+      expect(changed.contextProjection()?.source).toBe('estimate');
+    } finally { await rm(root, { recursive: true, force: true }); }
+  });
   it('validates and preserves both ordered replay formats in the message schema', () => {
     const result = MessageSchema.safeParse({ ...assistant, dshReplay, providerReplay });
     expect(result.success).toBe(true);
@@ -120,14 +138,26 @@ describe('model replay persistence', () => {
         role: 'assistant', content: [{ type: 'text', text: 'Checking' }], toolCalls: [], dshReplay, providerReplay,
       }) as AssistantMessage;
       const first = new Session({
-        cwd: root, model: new FakeModel([{ message: liveMessage }]), approve: async () => 'deny', session: handle,
+        cwd: root, model: new FakeModel([{ message: liveMessage, usage: { inputTokens: 10, outputTokens: 2, cachedInputTokens: 4 } }]), approve: async () => 'deny', session: handle,
       });
-      for await (const _event of first.send('Start')) { /* Drain the turn. */ }
+      let requestDurationMs: number | undefined;
+      let streamedUsage: AssistantMessage['usage'];
+      for await (const event of first.send('Start')) {
+        if (event.type === 'assistant.message') {
+          requestDurationMs = event.message.requestDurationMs;
+          const publicMessage = projection.safePublicMessages([event.message])[0];
+          streamedUsage = publicMessage?.role === 'assistant' ? publicMessage.usage : undefined;
+        }
+      }
+      expect(requestDurationMs).toEqual(expect.any(Number));
+      expect(streamedUsage).toEqual({ inputTokens: 10, outputTokens: 2, cachedInputTokens: 4 });
       await handle.close();
 
       const disk = await readFile(sessionPath(root, root, 'agent'), 'utf8');
       const events = disk.trim().split('\n').slice(1).map((line) => JSON.parse(line));
-      expect(events.find((event) => event.type === 'message/assistant')?.data).toEqual(liveMessage);
+      const storedMessage = { ...liveMessage, usage: { inputTokens: 10, outputTokens: 2, cachedInputTokens: 4 }, requestDurationMs,
+        contextSample: expect.any(Object) };
+      expect(events.find((event) => event.type === 'message/assistant')?.data).toEqual(storedMessage);
 
       const reopened = await new SessionStore(root).open(root, 'agent');
       const model = new FakeModel([textResponse('continued')]);
@@ -135,7 +165,7 @@ describe('model replay persistence', () => {
       for await (const _event of resumed.send('Continue')) { /* Drain the turn. */ }
       expect(model.requests[0]?.messages).toEqual([
         { role: 'user', content: [{ type: 'text', text: 'Start' }] },
-        liveMessage,
+        storedMessage,
         { role: 'user', content: [{ type: 'text', text: 'Continue' }] },
       ]);
     } finally {

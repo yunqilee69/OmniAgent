@@ -15,6 +15,53 @@ async function waitFor(check: () => boolean): Promise<void> {
 }
 
 describe('TUI session permissions', () => {
+  it('routes /init through normal permissions and rejects similar unknown commands', async () => {
+    const home = await realpath(await mkdtemp(join(tmpdir(), 'omniagent-tui-init-')));
+    const cwd = join(home, 'workspace');
+    const configDir = join(home, '.omniagent');
+    await mkdir(cwd);
+    await mkdir(configDir);
+    await writeFile(join(configDir, 'config.json'), JSON.stringify({ dsh: { permission: { defaultPreset: 'invalid' } } }));
+    const store = new SessionStore(join(configDir, 'sessions'));
+    const child = spawn(process.execPath, ['--import', resolve('node_modules/tsx/dist/loader.mjs'), resolve('packages/tui/src/main.ts')], {
+      cwd, env: { ...process.env, HOME: home }, stdio: ['pipe', 'pipe', 'pipe'],
+    });
+    let output = '';
+    child.stdout.setEncoding('utf8');
+    child.stderr.setEncoding('utf8');
+    child.stdout.on('data', (chunk: string) => { output += chunk; });
+    child.stderr.on('data', (chunk: string) => { output += chunk; });
+    const prompts = () => (output.match(/\u276f /g) ?? []).length;
+    try {
+      await waitFor(() => prompts() >= 1 || child.exitCode !== null);
+      expect(child.exitCode, output).toBeNull();
+      const [created] = await store.list();
+      expect(created).toBeDefined();
+      child.stdin.write('/init focus on tests\n');
+      await waitFor(() => prompts() >= 2);
+      expect(output).toContain('请先使用 /permission');
+      expect((await store.open(cwd, created!.id)).events.filter((event) => event.type === 'message/user')).toHaveLength(0);
+      child.stdin.write('/initialize\n');
+      await waitFor(() => prompts() >= 3);
+      expect(output).toContain('未知命令：/initialize');
+      child.stdin.write('/permission read-only\n');
+      await waitFor(() => prompts() >= 4);
+      child.stdin.write('/INIT focus on tests\n');
+      await waitFor(() => prompts() >= 5);
+      expect((await store.open(cwd, created!.id)).events.filter((event) => event.type === 'message/user'))
+        .toContainEqual(expect.objectContaining({ data: expect.objectContaining({ text: '/INIT focus on tests' }) }));
+      child.stdin.write('/init\n');
+      await waitFor(() => prompts() >= 6);
+      expect((await store.open(cwd, created!.id)).events.filter((event) => event.type === 'message/user'))
+        .toContainEqual(expect.objectContaining({ data: expect.objectContaining({ text: '/init' }) }));
+      child.stdin.write('exit\n');
+      await waitFor(() => child.exitCode !== null);
+      expect(child.exitCode, output).toBe(0);
+    } finally {
+      child.kill();
+    }
+  }, 15000);
+
   it('requires selection for an invalid DSH preset and persists an explicit session preset', async () => {
     const home = await realpath(await mkdtemp(join(tmpdir(), 'omniagent-tui-permissions-')));
     const cwd = join(home, 'workspace');

@@ -18,6 +18,7 @@ import {
   createPlanModeEvent,
   defaultConfigDir,
   defaultModelBinding,
+  isInitCommand,
   listCatalogModels,
   projectAgentSelection,
   projectModelSelection,
@@ -734,7 +735,7 @@ async function main(): Promise<void> {
       }
       continue;
     }
-    if (line.startsWith('/')) {
+    if (line.startsWith('/') && !isInitCommand(line)) {
       sayIndented(paintWarn(`未知命令：${sanitizeTerminal(line)}`));
       sayIndented(paintDim('输入 /help 查看可用命令。'));
       continue;

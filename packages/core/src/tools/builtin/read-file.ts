@@ -2,6 +2,7 @@ import { z } from 'zod';
 import type { Tool } from '../../domain/tool';
 import { displayPath, resolveInsidePhysical } from '../paths';
 import { readWholeText, statRegularFile, streamWholeText } from '../fs-io';
+import { readAttachment } from '../attachment-storage';
 
 /**
  * Model-facing UTF-8 read, ported from `@deepseek-ai/dsh-tool-fs` and
@@ -142,13 +143,23 @@ export const readFileTool: Tool = {
   mutating: false,
   async execute(args, ctx) {
     const input = parseReadArgs(Params.parse(args));
-    const target = await resolveInsidePhysical(ctx.cwd, input.filePath);
-    const info = await statRegularFile(target, input.filePath, 'read');
-    ctx.signal.throwIfAborted();
-
-    const chunks = info.size >= STREAM_MIN_SIZE
-      ? streamWholeText(target, input.filePath, ctx.signal)
-      : [await readWholeText(target, input.filePath, ctx.signal)];
+    const attachment = await readAttachment(input.filePath);
+    let target: string;
+    let chunks: AsyncIterable<string> | Iterable<string>;
+    if (attachment !== undefined) {
+      target = input.filePath;
+      ctx.signal.throwIfAborted();
+      if (attachment.subarray(0, 8192).includes(0)) throw new Error(`cannot read "${input.filePath}": binary file`);
+      try { chunks = [new TextDecoder('utf-8', { fatal: true }).decode(attachment)]; }
+      catch { throw new Error(`cannot read "${input.filePath}": invalid UTF-8 text`); }
+    } else {
+      target = await resolveInsidePhysical(ctx.cwd, input.filePath);
+      const info = await statRegularFile(target, input.filePath, 'read');
+      ctx.signal.throwIfAborted();
+      chunks = info.size >= STREAM_MIN_SIZE
+        ? streamWholeText(target, input.filePath, ctx.signal)
+        : [await readWholeText(target, input.filePath, ctx.signal)];
+    }
     const window = await buildWindow(chunks, {
       offset: input.offset,
       limit: input.limit,
@@ -156,7 +167,7 @@ export const readFileTool: Tool = {
       maxBytes: READ_MAX_BYTES,
     }, input.filePath);
 
-    const content = formatReadOutput(displayPath(ctx.cwd, target), input.offset, window);
+    const content = formatReadOutput(attachment === undefined ? displayPath(ctx.cwd, target) : target, input.offset, window);
     const endLine = window.lines.at(-1)?.number ?? Math.max(0, input.offset - 1);
     return {
       content,

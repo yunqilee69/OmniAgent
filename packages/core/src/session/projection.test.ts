@@ -10,6 +10,35 @@ import type { SessionEvent } from './types';
 import { projectMessages, projectPublicHistory } from './projection';
 
 describe('projectMessages', () => {
+  it('restores and publishes valid cache reads without losing malformed or legacy usage', () => {
+    const base = { role: 'assistant', content: [], toolCalls: [] };
+    const events: SessionEvent[] = [
+      { seq: 0, ts: 1, type: 'message/assistant', data: { ...base, usage: { inputTokens: 10, outputTokens: 2, cachedInputTokens: 0 } } },
+      { seq: 1, ts: 2, type: 'assistant/message', data: { ...base, usage: { inputTokens: 10, outputTokens: 2, cachedInputTokens: 11 } } },
+      { seq: 2, ts: 3, type: 'message/assistant', data: { ...base, usage: { inputTokens: 10, outputTokens: 2 } } },
+    ];
+    const messages = projectMessages(events);
+    expect(messages).toEqual([
+      { ...base, usage: { inputTokens: 10, outputTokens: 2, cachedInputTokens: 0 } },
+      { ...base, usage: { inputTokens: 10, outputTokens: 2 } },
+      { ...base, usage: { inputTokens: 10, outputTokens: 2 } },
+    ]);
+    expect(projectPublicHistory('test', events)[0]).toMatchObject({ usage: { cachedInputTokens: 0 } });
+  });
+
+  it('restores and publishes request duration while preserving legacy and malformed messages', () => {
+    const base = { role: 'assistant', content: [], toolCalls: [] };
+    const events: SessionEvent[] = [
+      { seq: 0, ts: 1, type: 'message/assistant', data: { ...base, requestDurationMs: 25.5 } },
+      { seq: 1, ts: 2, type: 'assistant/message', data: base },
+      { seq: 2, ts: 3, type: 'message/assistant', data: { ...base, requestDurationMs: -1 } },
+    ];
+    expect(projectMessages(events)).toEqual([{ ...base, requestDurationMs: 25.5 }, base, base]);
+    const publicHistory = projectPublicHistory('test', events);
+    expect(publicHistory[0]).toMatchObject({ ...base, requestDurationMs: 25.5 });
+    expect(publicHistory[1]).not.toHaveProperty('requestDurationMs');
+    expect(publicHistory[2]).not.toHaveProperty('requestDurationMs');
+  });
   it('projects stable session-scoped identities and persisted timestamps without replay data', () => {
     const events: SessionEvent[] = [
       { seq: 0, ts: 100, type: 'message/user', data: { text: 'hello' } },
@@ -25,6 +54,26 @@ describe('projectMessages', () => {
     expect(projectPublicHistory('session-a', events)[0]?.messageId).toBe(history[0]?.messageId);
     expect(projectPublicHistory('session-b', events)[0]?.messageId).not.toBe(history[0]?.messageId);
   });
+  it('persists structured file metadata without changing model text', () => {
+    const part = { type: 'text', text: 'model-readable path', attachment: {
+      kind: 'file', name: '笔记.txt', mediaType: 'text/plain', filePath: '.omniagent/attachments/batch/file',
+      secret: 'not public',
+    } };
+    const events: SessionEvent[] = [{ seq: 0, ts: 1, type: 'message/user', data: { content: [part] } }];
+    const expected = { type: 'text', text: part.text, attachment: {
+      kind: 'file', name: '笔记.txt', mediaType: 'text/plain', filePath: part.attachment.filePath,
+    } };
+    expect(projectMessages(events)).toEqual([{ role: 'user', content: [expected] }]);
+    expect(projectPublicHistory('session', events)[0]).toMatchObject({ role: 'user', content: [expected] });
+  });
+
+  it('retains image metadata in restored and public history', () => {
+    const image = { type: 'image', mediaType: 'image/png', data: 'data', fileName: 'photo.png', filePath: '.images/photo.png' };
+    const events: SessionEvent[] = [{ seq: 0, ts: 1, type: 'message/user', data: { content: [image] } }];
+    expect(projectMessages(events)).toEqual([{ role: 'user', content: [image] }]);
+    expect(projectPublicHistory('session', events)[0]).toMatchObject({ role: 'user', content: [image] });
+  });
+
   it('restores stored user content arrays for current and legacy event names', () => {
     const events: SessionEvent[] = [
       {

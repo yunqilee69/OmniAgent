@@ -219,6 +219,10 @@ async function main(): Promise<void> {
     schedule: schedules,
     createRuntimeSession: async (workspace, handle, permissions, resolved) =>
       composeSession(workspace.path, handle, permissions, resolved, true),
+    // Session construction is synchronous and only builds in-memory tools;
+    // no turn, listener, persistence or registry entry is created here.
+    replayContext: (workspace, handle, permissions, resolved) =>
+      composeSession(workspace.path, handle, permissions, resolved, true).contextProjection(),
     host: webConfig.host,
     auth: webConfig.auth,
   }, parseWebPort(process.env.OMNIAGENT_PORT, webConfig.port));

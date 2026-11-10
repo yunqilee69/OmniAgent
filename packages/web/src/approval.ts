@@ -27,8 +27,10 @@ function approvalReason(reason: string): string {
 
 interface PendingApproval {
   id: string;
+  prompt: Prompt;
   settle(decision: ApprovalResponse): void;
 }
+
 
 export class ApprovalBroker {
   private readonly turns = new Map<string, ApprovalTurn>();
@@ -82,7 +84,7 @@ export class ApprovalBroker {
 export class ApprovalTurn {
   private pending?: PendingApproval;
   private prompt?: Prompt;
-  private planPending?: { id: string; settle(response: PlanReviewResponse): void };
+  private planPending?: { id: string; prompt: PlanPrompt; settle(response: PlanReviewResponse): void };
   private planPrompt?: PlanPrompt;
   private planDecision?: Extract<AgentEvent, { type: 'plan.review.decided' }>;
   private wake?: () => void;
@@ -90,6 +92,11 @@ export class ApprovalTurn {
   private streaming = false;
 
   constructor(private readonly timeoutMs: number, private readonly onClose: () => void) {}
+
+  /** Currently actionable prompts, including those already emitted to a follower. */
+  pendingPrompts(): Array<Prompt | PlanPrompt> {
+    return [this.pending?.prompt, this.planPending?.prompt].filter((prompt): prompt is Prompt | PlanPrompt => prompt !== undefined);
+  }
 
   request(request: PermissionRequest, signal: AbortSignal): Promise<ApprovalResponse> {
     if (this.closed || this.pending || signal.aborted) return Promise.resolve('deny');
@@ -117,7 +124,7 @@ export class ApprovalTurn {
         signal.removeEventListener('abort', onAbort);
         resolve(decision);
       };
-      const pending: PendingApproval = { id: prompt.requestId, settle };
+      const pending: PendingApproval = { id: prompt.requestId, prompt, settle };
       this.pending = pending;
       this.prompt = prompt;
       signal.addEventListener('abort', onAbort, { once: true });
@@ -145,7 +152,7 @@ export class ApprovalTurn {
         signal.removeEventListener('abort', onAbort);
         resolve(response);
       };
-      const pending = { id: prompt.requestId, settle };
+      const pending = { id: prompt.requestId, prompt, settle };
       this.planPending = pending;
       this.planPrompt = prompt;
       signal.addEventListener('abort', onAbort, { once: true });

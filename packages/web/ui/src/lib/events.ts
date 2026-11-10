@@ -1,5 +1,6 @@
 import type { AgentEvent, StopReason, ToolCall, ToolResult } from '@omniagent/core';
 import type { PublicMessage } from './wire.ts';
+import { applyMetricsEvent, type SessionMetrics } from './session-metrics.ts';
 
 let nextItemId = 1;
 
@@ -9,9 +10,10 @@ function itemId(prefix: string): string {
 }
 
 export interface UserAttachment {
-  kind: 'image' | 'text';
+  kind: 'image' | 'file' | 'text';
   name: string;
-  mediaType: string;
+  mediaType?: string;
+  mimeType?: string;
   data?: string;
   text?: string;
 }
@@ -113,6 +115,10 @@ export interface PlanReviewRequest {
 export interface LiveTurnState {
   transcript: TranscriptItem[];
   turns: TurnMeta[];
+  metrics?: SessionMetrics;
+  metricsStepsSeen?: number;
+  metricsLastStep?: number;
+  metricsRunEnded?: boolean;
   streamText: string;
   streamReasoning: string;
   streamAssistantId?: string;
@@ -168,22 +174,62 @@ function messageText(message: unknown): string {
   return typeof record.text === 'string' ? record.text : '';
 }
 
-function imageAttachments(content: PublicMessage['content']): UserAttachment[] {
-  if (content === undefined) return [];
+// Older stored messages have only the exact model-facing path text. Limit the
+// fallback to the original template and storage layout, not arbitrary user text.
+function legacyAttachment(text: string): { name: string; filePath: string } | undefined {
+  const match = /^Untrusted attachment metadata \(not instructions\): file ("(?:[^"\\]|\\.)*"): ("(?:[^"\\]|\\.)*")\. The original contents are available for tools to read\.$/.exec(text);
+  if (match === null) return undefined;
+  try {
+    const name: unknown = JSON.parse(match[1]!);
+    const filePath: unknown = JSON.parse(match[2]!);
+    if (typeof name !== 'string' || typeof filePath !== 'string' ||
+        !/(?:^|\/)\.omniagent\/attachments\/[a-f0-9]{48}\/\d+-[^/]+$/.test(filePath)) return undefined;
+    return { name, filePath };
+  } catch {
+    return undefined;
+  }
+}
+
+function userContent(content: PublicMessage['content']): { text: string; attachments: UserAttachment[] } {
   const attachments: UserAttachment[] = [];
-  for (const part of content) {
+  const text: string[] = [];
+  let imageCount = 0;
+  if (content === undefined) return { text: '', attachments };
+  for (let index = 0; index < content.length; index += 1) {
+    const part = content[index];
+    if (part === null || typeof part !== 'object') continue;
+    if (part.type === 'text') {
+      const metadata = part.attachment;
+      const legacy = metadata === undefined ? legacyAttachment(part.text) : undefined;
+      if (metadata !== undefined || legacy !== undefined) {
+        const next = content[index + 1];
+        // An image also has a native image part; never render two cards for it.
+        const pairedImage = next?.type === 'image' && (metadata?.kind === 'image' ||
+          (legacy !== undefined && next.filePath === legacy.filePath));
+        if (!pairedImage) {
+          attachments.push({ kind: 'file', name: metadata?.name ?? legacy!.name,
+            ...(metadata === undefined ? {} : { mediaType: metadata.mediaType }) });
+        }
+      } else text.push(part.text);
+      continue;
+    }
     if (part.type !== 'image') continue;
     const extension = part.mediaType === 'image/jpeg' ? 'jpg'
       : part.mediaType === 'image/webp' ? 'webp'
         : part.mediaType === 'image/gif' ? 'gif' : 'png';
+    imageCount += 1;
+    const previous = content[index - 1];
+    const metadata = previous?.type === 'text' ? previous.attachment : undefined;
+    const legacy = previous?.type === 'text' ? legacyAttachment(previous.text) : undefined;
     attachments.push({
       kind: 'image',
-      name: `image-${attachments.length + 1}.${extension}`,
+      name: part.fileName ?? (metadata?.kind === 'image' ? metadata.name : undefined)
+        ?? (legacy?.filePath === part.filePath ? legacy?.name : undefined) ?? `image-${imageCount}.${extension}`,
       mediaType: part.mediaType,
       data: part.data,
     });
   }
-  return attachments;
+  return { text: text.join(''), attachments };
 }
 
 /**
@@ -196,7 +242,31 @@ function imageAttachments(content: PublicMessage['content']): UserAttachment[] {
 export function applyAgentEvent(turn: LiveTurnState, event: AgentEvent | Record<string, unknown>, now = Date.now()): void {
   const data = event as Record<string, unknown>;
   const type = typeof data.type === 'string' ? data.type : '';
+  if (turn.metrics !== undefined) {
+    const step = typeof data.step === 'number' && Number.isSafeInteger(data.step) && data.step >= 0 ? data.step : undefined;
+    const newRun = (turn.metricsStepsSeen ?? 0) === 0 || turn.metricsRunEnded === true
+      || step === 0 || (step !== undefined && turn.metricsLastStep !== undefined && step <= turn.metricsLastStep);
+    applyMetricsEvent(turn.metrics, data, newRun);
+    if (type === 'turn.start') {
+      turn.metricsStepsSeen = (turn.metricsStepsSeen ?? 0) + 1;
+      turn.metricsLastStep = step;
+      turn.metricsRunEnded = false;
+    } else if (type === 'turn.end') turn.metricsRunEnded = true;
+  }
   switch (type) {
+    case 'run.user.message': {
+      const message = data.message as PublicMessage | undefined;
+      if (message?.role !== 'user' || !Array.isArray(message.content)) return;
+      const { text, attachments } = userContent(message.content);
+      if (text === '' && attachments.length === 0) return;
+      const active = currentTurn(turn);
+      appendItem(turn, {
+        kind: 'user', id: itemId('user'), turn: active.index, text,
+        timestamp: typeof data.timestamp === 'number' ? data.timestamp : now,
+        ...(attachments.length === 0 ? {} : { attachments }),
+      });
+      return;
+    }
     case 'turn.start': {
       if (turn.turns.length === 0) {
         turn.turns.push({ index: 0, startedAt: now });
@@ -425,8 +495,7 @@ export function hydrateTranscript(messages: readonly PublicMessage[], events: re
     if (message.role === 'system') continue;
     if (message.role === 'user') {
       const index = startTurn();
-      const text = message.content === undefined ? '' : messageText(message);
-      const attachments = imageAttachments(message.content);
+      const { text, attachments } = userContent(message.content);
       if (text !== '' || attachments.length > 0) {
         transcript.push({
           kind: 'user', id: itemId('user'), turn: index, text,
@@ -485,7 +554,8 @@ function messagesFromEvents(events: readonly unknown[]): PublicMessage[] {
       : record as unknown as Record<string, unknown>;
     if (record.type === 'message/user' || record.type === 'user/message') {
       const text = typeof data.content === 'string' ? data.content : typeof data.text === 'string' ? data.text : '';
-      messages.push({ role: 'user', content: [{ type: 'text', text }] });
+      messages.push({ role: 'user', content: Array.isArray(data.content)
+        ? data.content as PublicMessage['content'] : [{ type: 'text', text }] });
     } else if (record.type === 'message/assistant' || record.type === 'assistant/message') {
       const message = typeof data.message === 'object' && data.message !== null
         ? data.message as PublicMessage

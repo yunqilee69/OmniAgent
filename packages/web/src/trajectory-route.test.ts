@@ -23,6 +23,7 @@ describe('session trajectory projection', () => {
     await session.append({ ts: 1100, type: 'trace/turn.start', data: { step: 0 } });
     await session.append({ ts: 1200, type: 'message/assistant', data: {
       role: 'assistant', content: [{ type: 'text', text: 'SECRET ASSISTANT CONTENT' }],
+      requestDurationMs: 75, usage: { inputTokens: 12, outputTokens: 5, cachedInputTokens: 4 },
       toolCalls: [{ id: 'c', name: 'read_file', arguments: { file_path: 'SECRET ARGUMENT' } }],
     } });
     await session.append({ ts: 1300, type: 'trace/tool.call', data: { id: 'c', name: 'read_file', arguments: { file_path: 'SECRET ARGUMENT' } } });
@@ -40,7 +41,18 @@ describe('session trajectory projection', () => {
     const body = await response.json() as {
       events: Array<{ type: string; data: unknown }>;
       trajectory: { version: number; records: Array<Record<string, unknown>>; timeline: { sequence: unknown[]; time: unknown[] } };
+      metrics: unknown;
     };
+    expect(body.metrics).toEqual({
+      version: 1,
+      runs: { started: 1, completed: 1, durationMs: 600, knownDurationCount: 1 },
+      steps: { started: 1 },
+      requests: { count: 1, durationMs: 75, knownDurationCount: 1 },
+      usage: { inputTokens: 12, outputTokens: 5, inputKnownCount: 1, outputKnownCount: 1 },
+      throughput: { outputTokens: 5, durationMs: 75, count: 1 },
+      cache: { inputTokens: 12, cachedInputTokens: 4, count: 1 },
+    });
+    expect(JSON.stringify(body.metrics)).not.toContain('SECRET');
     expect(body.trajectory.version).toBe(1);
     expect(body.trajectory.records.map((record) => record.kind)).toEqual(['input', 'model', 'tool']);
     expect(body.trajectory.records[0]).toMatchObject({ kind: 'input', seq: 0, timestamp: 1000 });

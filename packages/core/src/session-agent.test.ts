@@ -28,6 +28,51 @@ async function events(stream: AsyncGenerator<AgentEvent>): Promise<AgentEvent[]>
 }
 
 describe('Session agent profiles', () => {
+  it('expands /init for the model while preserving the original conversation', async () => {
+    const cwd = await fixture();
+    const store = new SessionStore(join(cwd, 'sessions'));
+    const handle = await store.create({ workspace: cwd, cwd });
+    const model = new FakeModel([textResponse('done'), textResponse('continued')]);
+    const session = new Session({ cwd, workspace: cwd, session: handle, model, dshPermissions: permissions });
+    await events(session.send('/init focus on tests'));
+    expect(model.requests[0]?.messages[0]).toMatchObject({ role: 'user', content: [
+      { type: 'text', text: expect.stringContaining('Additional user notes:\nfocus on tests') },
+    ] });
+    expect(session.messages[0]).toEqual({ role: 'user', content: [{ type: 'text', text: '/init focus on tests' }], initCommand: true });
+    const reopened = await store.open(cwd, handle.id);
+    const continued = new Session({ cwd, workspace: cwd, session: reopened, model, dshPermissions: permissions });
+    await events(continued.send('continue'));
+    expect(model.requests[1]?.messages[0]).toMatchObject({ role: 'user', content: [
+      { type: 'text', text: expect.stringContaining('Additional user notes:\nfocus on tests') },
+    ] });
+    await reopened.close();
+    await handle.close();
+  });
+  it('reloads workspace instructions for each request in a cached session', async () => {
+    const cwd = await fixture();
+    const model = new FakeModel([textResponse('first'), textResponse('second')]);
+    const session = new Session({ cwd, workspace: cwd, model, dshPermissions: permissions });
+    await writeFile(join(cwd, 'AGENTS.md'), 'First rule');
+    await events(session.send('first'));
+    await writeFile(join(cwd, 'AGENTS.md'), 'Updated rule');
+    await events(session.send('second'));
+    expect(model.requests[0]?.system).toContain('First rule');
+    expect(model.requests[1]?.system).toContain('Updated rule');
+    expect(model.requests[1]?.system).not.toContain('First rule');
+  });
+
+  it('does not interpret external notices as init commands', async () => {
+    const cwd = await fixture();
+    const store = new SessionStore(join(cwd, 'sessions'));
+    const handle = await store.create({ workspace: cwd, cwd });
+    await handle.append({ type: 'message/notice', data: { text: '/init', source: 'agent' } });
+    const model = new FakeModel([textResponse('done')]);
+    const session = new Session({ cwd, workspace: cwd, session: handle, model, dshPermissions: permissions });
+    await events(session.send('continue'));
+    expect(model.requests[0]?.messages[0]).toEqual({ role: 'user', content: [{ type: 'text', text: '/init' }] });
+    await handle.close();
+  });
+
   it('registers only allowlisted tools and rejects fabricated calls', async () => {
     const cwd = await fixture();
     const model = new FakeModel([
@@ -88,24 +133,57 @@ describe('Session agent profiles', () => {
     expect(results[1]!.result.content).toContain('allowed body');
   });
 
-  it('rejects image history when the selected model has no image capability', async () => {
+  it('projects image history for text models and restores images when switching models', async () => {
     const cwd = await fixture();
     const store = new SessionStore(join(cwd, 'sessions'));
     const handle = await store.create({ workspace: cwd, cwd });
-    await handle.append({
-      type: 'message/user',
-      data: { content: [{ type: 'image', mediaType: 'image/png', data: 'aGVsbG8=' }] },
-    });
-    const session = new Session({
-      cwd,
-      workspace: cwd,
-      session: handle,
-      model: new FakeModel([textResponse('should not run')]),
-      modelCapabilities: { imageInput: false },
-      dshPermissions: permissions,
-    });
-    await expect(events(session.send('look'))).rejects.toThrow(/does not support image input/i);
-    expect(session.messages).toContainEqual(expect.objectContaining({ role: 'user' }));
+    const image = { type: 'image' as const, mediaType: 'image/png', data: 'secret-base64', fileName: 'photo.png', filePath: '.images/photo.png' };
+    const legacy = { type: 'image' as const, mediaType: 'image/png', data: 'legacy-base64' };
+    await handle.append({ type: 'message/user', data: { content: [image, legacy] } });
+    const model = new FakeModel([textResponse('done')]);
+    const session = new Session({ cwd, workspace: cwd, session: handle, model,
+      modelCapabilities: { imageInput: false }, dshPermissions: permissions });
+    await events(session.send([image, { type: 'text', text: 'look' }]));
+    const request = model.requests[0]!;
+    expect(request.messages[0]).toEqual({ role: 'user', content: [
+      { type: 'text', text: '[Image unavailable to this model. Name: "photo.png". Path (relative to cwd): ".images/photo.png".]' },
+      { type: 'text', text: '[Image unavailable to this model. No stored file path is available.]' },
+    ] });
+    expect(request.messages[1]).toMatchObject({ role: 'user', content: [
+      { type: 'text', text: expect.stringContaining('.images/photo.png') }, { type: 'text', text: 'look' },
+    ] });
+    expect(JSON.stringify(request.messages)).not.toContain('base64');
+    expect(session.messages[0]).toEqual({ role: 'user', content: [image, legacy] });
+    expect(session.messages[1]).toEqual({ role: 'user', content: [image, { type: 'text', text: 'look' }] });
+
+    const visionModel = new FakeModel([textResponse('seen')]);
+    const reopened = await store.open(cwd, handle.id);
+    const vision = new Session({ cwd, workspace: cwd, session: reopened, model: visionModel,
+      modelCapabilities: { imageInput: true }, dshPermissions: permissions });
+    await events(vision.send('continue'));
+    expect(visionModel.requests[0]?.messages[0]).toEqual({ role: 'user', content: [image, legacy] });
+    expect(visionModel.requests[0]?.messages[1]).toEqual({ role: 'user', content: [image, { type: 'text', text: 'look' }] });
+  });
+
+  it('projects an in-flight human steer and retains it in session history', async () => {
+    const cwd = await fixture();
+    const handle = await new SessionStore(join(cwd, 'sessions')).create({ workspace: cwd, cwd });
+    const model = new FakeModel([
+      toolCallResponse([{ name: 'unknown', args: {} }]), textResponse('done'),
+    ]);
+    const session = new Session({ cwd, session: handle, model, modelCapabilities: { imageInput: false }, dshPermissions: permissions });
+    const image = { type: 'image' as const, mediaType: 'image/png', data: 'steer-secret',
+      fileName: 'steer.png', filePath: '.images/steer.png' };
+    for await (const event of session.send('start')) {
+      if (event.type === 'tool.call') await session.deliverUserMessage([image]);
+    }
+    expect(model.requests[1]?.messages.at(-1)).toMatchObject({ role: 'user', content: [
+      { type: 'text', text: expect.stringContaining('.images/steer.png') },
+    ] });
+    expect(JSON.stringify(model.requests[1]?.messages)).not.toContain('steer-secret');
+    expect(session.messages).toContainEqual({ role: 'user', content: [image] });
+    const reopened = await new SessionStore(join(cwd, 'sessions')).open(cwd, handle.id);
+    expect(new Session({ cwd, session: reopened, model }).messages).toContainEqual({ role: 'user', content: [image] });
   });
 
   it('requires exit_plan_mode in the profile while plan mode is active', async () => {

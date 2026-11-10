@@ -25,6 +25,8 @@ export interface ModelRequest {
 export interface ModelResponse {
   message: AssistantMessage;
   usage: Usage;
+  /** Total prompt occupancy when provider usage separates cached input. */
+  contextInputTokens?: number;
   stopReason: StopReason;
 }
 

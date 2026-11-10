@@ -72,6 +72,15 @@ describe('pi-ai routes', () => {
 });
 
 describe('PiAiModel', () => {
+  it('reports positive cache reads separately from total prompt occupancy', async () => {
+    const message = native({ usage: { ...usage, input: 10, cacheRead: 3, cacheWrite: 2 } });
+    const { client } = fixture([{ type: 'done', reason: 'stop', message }]);
+    const response = await client.complete(baseRequest);
+    expect(response.usage).toEqual({ inputTokens: 10, outputTokens: 7, cachedInputTokens: 3 });
+    expect(response.contextInputTokens).toBe(15);
+    const missing = fixture([{ type: 'done', reason: 'stop', message: native() }]);
+    expect((await missing.client.complete(baseRequest)).usage).not.toHaveProperty('cachedInputTokens');
+  });
   it('streams text and returns completed, ordered tool calls and usage', async () => {
     const call = { type: 'toolCall' as const, id: 'call_1', name: 'read', arguments: { path: 'a.txt' } };
     const message = native({ content: [{ type: 'text', text: 'Hello' }, call], stopReason: 'toolUse' });
@@ -156,7 +165,7 @@ describe('PiAiModel', () => {
       models: [{ id: 'fixture-model', contextWindow: 8192, maxTokens: 1024, input: ['text', 'image'] }],
     });
     await client.complete({ ...baseRequest, messages: [
-      { role: 'user', content: [{ type: 'text', text: 'look' }, { type: 'image', mediaType: 'image/png', data: 'YWJj' }] },
+      { role: 'user', content: [{ type: 'text', text: 'look' }, { type: 'image', mediaType: 'image/png', data: 'YWJj', fileName: 'image.png', filePath: '.images/image.png' }] },
       { role: 'system', content: 'later instruction' },
       { role: 'assistant', content: [], toolCalls: [{ id: 'a', name: 'read', arguments: { path: 'a' } }] },
       { role: 'tool', results: [{ callId: 'a', name: 'read', ok: false, content: 'denied', truncated: false }] },

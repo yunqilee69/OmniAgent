@@ -145,7 +145,9 @@ function responseOf(
   const checked = ProviderReplaySchema.safeParse(candidate);
   if (!checked.success) throw new Error('pi-ai response replay metadata is invalid');
   return { message: { role: 'assistant', content, toolCalls, providerReplay: checked.data },
-    usage: { inputTokens: message.usage.input, outputTokens: message.usage.output },
+    usage: { inputTokens: message.usage.input, outputTokens: message.usage.output,
+      ...(message.usage.cacheRead > 0 ? { cachedInputTokens: message.usage.cacheRead } : {}) },
+    contextInputTokens: message.usage.input + message.usage.cacheRead + message.usage.cacheWrite,
     stopReason: message.stopReason === 'length' ? 'max_tokens' : toolCalls.length ? 'tool_use' : 'end_turn' };
 }
 

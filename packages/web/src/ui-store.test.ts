@@ -1,4 +1,4 @@
-import { afterEach, describe, expect, it, vi } from 'vitest';
+import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 import { AppStore } from '../ui/src/lib/store.ts';
 import { groupTurns } from '../ui/src/lib/events.ts';
 import type { AgentSummary } from '../ui/src/lib/wire.ts';
@@ -118,8 +118,298 @@ function sessionFetcher(
   };
 }
 
+beforeEach(() => {
+  const values = new Map<string, string>();
+  const pending = new Map<string, Promise<unknown>>();
+  vi.stubGlobal('localStorage', {
+    getItem: (key: string) => values.get(key) ?? null,
+    setItem: (key: string, value: string) => { values.set(key, value); },
+    removeItem: (key: string) => { values.delete(key); },
+  });
+  vi.stubGlobal('navigator', { locks: { request: <T>(name: string, callback: () => Promise<T> | T): Promise<T> => {
+    const previous = pending.get(name) ?? Promise.resolve();
+    const next = previous.catch(() => {}).then(callback);
+    pending.set(name, next);
+    void next.finally(() => { if (pending.get(name) === next) pending.delete(name); }).catch(() => {});
+    return next;
+  } } });
+});
+
 afterEach(() => {
   vi.unstubAllGlobals();
+});
+
+describe('independent run observation', () => {
+  it('adds the initial message when detail predates persistence', async () => {
+    let controller!: ReadableStreamDefaultController<Uint8Array>;
+    const store = await boot(sessionFetcher((url) => {
+      if (url === '/api/workspaces/a/sessions/shared') return json(detail({ text: 'old question', running: true }));
+      if (url === '/api/workspaces/a/sessions/shared/follow') return new Response(new ReadableStream<Uint8Array>({ start(c) { controller = c; } }));
+      return undefined;
+    }));
+    await waitFor(() => controller !== undefined);
+    const baseline = [{ role: 'user', content: [{ type: 'text', text: 'old question' }] },
+      { role: 'assistant', content: [{ type: 'text', text: 'old answer' }] }];
+    controller.enqueue(new TextEncoder().encode(`data: ${JSON.stringify({ type: 'run.snapshot', baseline: { messages: baseline }, events: [] })}\n\n`));
+    controller.enqueue(new TextEncoder().encode(`data: ${JSON.stringify({ type: 'run.user.message', message: { role: 'user', content: [{ type: 'text', text: 'new question' }] } })}\n\n`));
+    controller.enqueue(new TextEncoder().encode('data: {"type":"assistant.delta","text":"new answer"}\n\n'));
+    await waitFor(() => store.currentEntry()?.run?.transcript.length === 4);
+    const items = store.currentEntry()!.run!.transcript;
+    expect(items.map((item) => [item.kind, 'text' in item ? item.text : '', item.turn])).toEqual([
+      ['user', 'old question', 0], ['assistant', 'old answer', 0],
+      ['user', 'new question', 1], ['assistant', 'new answer', 1],
+    ]);
+    store.dispose();
+    controller.close();
+  });
+
+  it('uses the server baseline and ordered user events across subscriptions', async () => {
+    const controllers: ReadableStreamDefaultController<Uint8Array>[] = [];
+    const encoder = new TextEncoder();
+    const store = await boot(sessionFetcher((url, init) => {
+      if (url === '/api/workspaces/a/sessions/shared') return json({ ...detail({ running: true }), messages: [
+        { role: 'user', content: [{ type: 'text', text: 'question' }] },
+        { role: 'assistant', content: [{ type: 'text', text: 'answer' }] },
+        { role: 'user', content: [{ type: 'text', text: 'follow up' }] },
+      ] });
+      if (url === '/api/workspaces/a/sessions/shared/follow') return new Response(new ReadableStream<Uint8Array>({ start(c) { controllers.push(c); } }));
+      if (url === '/api/workspaces/a/sessions/shared/messages' && init?.method === 'POST') return json({ accepted: true, broadcast: true }, 202);
+      return undefined;
+    }));
+    await waitFor(() => controllers.length === 1);
+    const events = [
+      { type: 'run.user.message', message: { role: 'user', content: [{ type: 'text', text: 'question' }] } },
+      { type: 'turn.start', step: 0 },
+      { type: 'assistant.message', message: { content: [{ type: 'text', text: 'answer' }] } },
+      { type: 'run.user.message', message: { role: 'user', content: [{ type: 'text', text: 'follow up' }] } },
+    ];
+    const snapshot = { type: 'run.snapshot', baseline: { messages: [] }, events };
+    controllers[0]!.enqueue(encoder.encode(`data: ${JSON.stringify(snapshot)}\n\n`));
+    await waitFor(() => store.currentEntry()?.run?.transcript.length === 3);
+    expect(store.currentEntry()!.run!.transcript.map((item) => [item.kind, 'text' in item ? item.text : ''])).toEqual([
+      ['user', 'question'], ['assistant', 'answer'], ['user', 'follow up'],
+    ]);
+    expect(await store.steerMessage('another')).toBe(true);
+    const next = { type: 'run.user.message', message: { role: 'user', content: [{ type: 'text', text: 'another' }] } };
+    controllers[0]!.enqueue(encoder.encode(`data: ${JSON.stringify(next)}\n\n`));
+    await waitFor(() => store.currentEntry()?.run?.transcript.length === 4);
+    controllers[0]!.close();
+    await waitFor(() => controllers.length === 2, 3000);
+    controllers[1]!.enqueue(encoder.encode(`data: ${JSON.stringify({ ...snapshot, events: [...events, next] })}\n\n`));
+    await new Promise((resolve) => setTimeout(resolve, 20));
+    expect(store.currentEntry()!.run!.transcript.map((item) => 'text' in item ? item.text : '')).toEqual(['question', 'answer', 'follow up', 'another']);
+    store.dispose();
+    controllers[1]!.close();
+  });
+
+  it('preserves steered input and prior output when a snapshot is replayed', async () => {
+    const controllers: ReadableStreamDefaultController<Uint8Array>[] = [];
+    const encoder = new TextEncoder();
+    const store = await boot(sessionFetcher((url, init) => {
+      if (url === '/api/workspaces/a/sessions/shared') return json(detail({ running: true }));
+      if (url === '/api/workspaces/a/sessions/shared/follow') return new Response(new ReadableStream<Uint8Array>({ start(c) { controllers.push(c); } }));
+      if (url === '/api/workspaces/a/sessions/shared/messages' && init?.method === 'POST') return json({ accepted: true }, 202);
+      return undefined;
+    }));
+    await waitFor(() => controllers.length === 1);
+    const event = { type: 'assistant.message', message: { content: [{ type: 'text', text: 'first answer' }] } };
+    controllers[0]!.enqueue(encoder.encode(`data: ${JSON.stringify({ type: 'run.snapshot', events: [event] })}\n\n`));
+    await waitFor(() => store.currentEntry()?.run?.transcript.some((item) => item.kind === 'assistant' && item.text === 'first answer') === true);
+    expect(await store.steerMessage('follow up')).toBe(true);
+    controllers[0]!.close();
+    await waitFor(() => controllers.length === 2, 3000);
+    controllers[1]!.enqueue(encoder.encode(`data: ${JSON.stringify({ type: 'run.snapshot', events: [event] })}\n\n`));
+    await new Promise((resolve) => setTimeout(resolve, 20));
+    const transcript = store.currentEntry()!.run!.transcript;
+    expect(transcript.filter((item) => item.kind === 'user' && item.text === 'follow up')).toHaveLength(1);
+    expect(transcript.filter((item) => item.kind === 'assistant' && item.text === 'first answer')).toHaveLength(1);
+    store.dispose();
+    controllers[1]!.close();
+  });
+
+  it('warns instead of replaying an unrecoverably truncated snapshot', async () => {
+    let controller!: ReadableStreamDefaultController<Uint8Array>;
+    const store = await boot(sessionFetcher((url) => {
+      if (url === '/api/workspaces/a/sessions/shared') return json(detail({ running: true }));
+      if (url === '/api/workspaces/a/sessions/shared/follow') return new Response(new ReadableStream<Uint8Array>({ start(c) { controller = c; } }));
+      return undefined;
+    }));
+    await waitFor(() => controller !== undefined);
+    controller.enqueue(new TextEncoder().encode(`data: ${JSON.stringify({ type: 'run.snapshot', truncated: true, events: [{ type: 'assistant.delta', text: 'partial' }] })}\n\n`));
+    await waitFor(() => store.getSnapshot().alert.includes('truncated'));
+    expect(store.currentEntry()?.run?.transcript.some((item) => item.kind === 'assistant' && item.text === 'partial')).toBe(false);
+    store.dispose();
+    controller.close();
+  });
+
+  it('recovers a persisted interrupted outcome after follow returns 204', async () => {
+    let calls = 0;
+    const store = await boot(sessionFetcher((url) => {
+      if (url === '/api/workspaces/a/sessions/shared') {
+        calls++;
+        return json(calls === 1 ? detail({ running: true }) : {
+          ...detail(), events: [
+            { type: 'message/user', data: { content: 'Question' } },
+            { type: 'trace/turn.end', data: { reason: 'interrupted' } },
+          ],
+        });
+      }
+      if (url === '/api/workspaces/a/sessions/shared/follow') return new Response(null, { status: 204 });
+      return undefined;
+    }));
+    await waitFor(() => store.currentEntry()?.outcome === 'interrupted');
+    store.dispose();
+  });
+
+  it('follows an accepted run, replays snapshots without duplicate history, and recovers approval', async () => {
+    const controllers: ReadableStreamDefaultController<Uint8Array>[] = [];
+    const encoder = new TextEncoder();
+    let running = false;
+    const decisions: unknown[] = [];
+    const store = await boot(sessionFetcher((url, init) => {
+      if (url === '/api/workspaces/a/sessions/shared/messages' && init?.method === 'POST') {
+        expect(new Headers(init.headers).get('prefer')).toBe('respond-async');
+        running = true;
+        return json({ accepted: true }, 202);
+      }
+      if (url === '/api/workspaces/a/sessions/shared/follow') {
+        return new Response(new ReadableStream<Uint8Array>({ start(controller) { controllers.push(controller); } }),
+          { headers: { 'content-type': 'text/event-stream' } });
+      }
+      if (url === '/api/workspaces/a/sessions/shared/approvals') {
+        decisions.push(JSON.parse(String(init?.body)));
+        return json({ ok: true });
+      }
+      if (url === '/api/workspaces/a/sessions/shared') return json(detail({ text: running ? 'Question' : 'Saved answer', running }));
+      return undefined;
+    }));
+    expect(await store.sendMessage('Question')).toBe(true);
+    await waitFor(() => controllers.length === 1);
+    const snapshot = { type: 'run.snapshot', events: [
+      { type: 'turn.start', step: 0 },
+      { type: 'assistant.delta', text: 'partial' },
+      { type: 'permission.requested', requestId: 'r1', call: { id: 'c1', name: 'bash', arguments: {} }, reason: 'approval' },
+    ] };
+    controllers[0]!.enqueue(encoder.encode(`data: ${JSON.stringify(snapshot)}\n\n`));
+    await waitFor(() => store.currentEntry()?.run?.approval?.requestId === 'r1');
+    controllers[0]!.close();
+    await waitFor(() => controllers.length === 2, 3000);
+    controllers[1]!.enqueue(encoder.encode(`data: ${JSON.stringify(snapshot)}\n\n`));
+    await waitFor(() => store.currentEntry()?.run?.approval?.requestId === 'r1');
+    expect(store.currentEntry()?.run?.transcript.filter((item) => item.kind === 'assistant').map((item) => item.text)).toEqual(['partial']);
+    expect(store.currentEntry()?.outcome).toBe('');
+    await store.resolveApproval('allow');
+    expect(decisions).toEqual([{ requestId: 'r1', decision: 'allow' }]);
+    running = false;
+    controllers[1]!.enqueue(encoder.encode('data: {"type":"turn.end","reason":"end_turn"}\n\n'));
+    controllers[1]!.close();
+    await waitFor(() => store.currentEntry()?.run === undefined);
+    expect(store.currentEntry()?.transcript).toMatchObject([{ kind: 'user', text: 'Saved answer' }]);
+    store.dispose();
+  });
+
+  it('follows the next queued 202 turn after the previous observer closes', async () => {
+    let running = false;
+    const posts: string[] = [];
+    const controllers: ReadableStreamDefaultController<Uint8Array>[] = [];
+    const store = await boot(sessionFetcher((url, init) => {
+      if (url === '/api/workspaces/a/sessions/shared/messages' && init?.method === 'POST') {
+        posts.push((JSON.parse(String(init.body)) as { text: string }).text);
+        running = true;
+        return json({ accepted: true }, 202);
+      }
+      if (url === '/api/workspaces/a/sessions/shared/follow') {
+        return new Response(new ReadableStream<Uint8Array>({ start(controller) { controllers.push(controller); } }));
+      }
+      if (url === '/api/workspaces/a/sessions/shared') return json(detail({ running }));
+      return undefined;
+    }));
+    expect(await store.sendMessage('first')).toBe(true);
+    expect(await store.queueMessage('second')).toBe(true);
+    await waitFor(() => controllers.length === 1);
+    running = false;
+    controllers[0]!.enqueue(new TextEncoder().encode('data: {"type":"turn.end","reason":"end_turn"}\n\n'));
+    controllers[0]!.close();
+    await waitFor(() => controllers.length === 2);
+    expect(posts).toEqual(['first', 'second']);
+    controllers[1]!.enqueue(new TextEncoder().encode('data: {"type":"run.snapshot","events":[{"type":"assistant.delta","text":"second reply"}]}\n\n'));
+    await waitFor(() => store.currentEntry()?.run?.streamText === 'second reply');
+    store.dispose();
+    controllers[1]!.close();
+  });
+
+  it('immediately reconciles an accepted run that ended before follow', async () => {
+    let sent = false;
+    let detailCalls = 0;
+    const store = await boot(sessionFetcher((url, init) => {
+      if (url === '/api/workspaces/a/sessions/shared/messages' && init?.method === 'POST') {
+        sent = true;
+        return json({ accepted: true }, 202);
+      }
+      if (url === '/api/workspaces/a/sessions/shared/follow') return new Response(null, { status: 204 });
+      if (url === '/api/workspaces/a/sessions/shared') {
+        detailCalls += 1;
+        return json(detail({ text: sent ? 'Completed' : 'Before' }));
+      }
+      return undefined;
+    }));
+    expect(await store.sendMessage('Fast')).toBe(true);
+    await waitFor(() => store.currentEntry()?.run === undefined);
+    expect(detailCalls).toBeGreaterThanOrEqual(2);
+    expect(store.currentEntry()?.transcript).toMatchObject([{ text: 'Completed' }]);
+    store.dispose();
+  });
+
+  it('keeps the run and queue while finish reconciliation is unavailable', async () => {
+    let sent = false;
+    let failDetail = true;
+    let followCalls = 0;
+    const posts: string[] = [];
+    const store = await boot(sessionFetcher((url, init) => {
+      if (url === '/api/workspaces/a/sessions/shared/messages' && init?.method === 'POST') {
+        posts.push((JSON.parse(String(init.body)) as { text: string }).text);
+        sent = true;
+        return json({ accepted: true }, 202);
+      }
+      if (url === '/api/workspaces/a/sessions/shared/follow') {
+        followCalls += 1;
+        return followCalls === 1 ? new Response(null, { status: 204 })
+          : new Response(new ReadableStream<Uint8Array>());
+      }
+      if (url === '/api/workspaces/a/sessions/shared') {
+        return sent && failDetail ? json({ error: 'offline' }, 503) : json(detail());
+      }
+      return undefined;
+    }));
+    expect(await store.sendMessage('first')).toBe(true);
+    expect(await store.queueMessage('second')).toBe(true);
+    await waitFor(() => store.currentEntry()?.error === 'offline');
+    expect(store.currentEntry()?.run).toBeDefined();
+    expect(store.currentEntry()?.outcome).toBe('');
+    expect(posts).toEqual(['first']);
+    failDetail = false;
+    await waitFor(() => followCalls >= 2, 3000);
+    store.dispose();
+  });
+
+  it('discovers a run started in another tab and restores plan review', async () => {
+    let running = false;
+    let controller!: ReadableStreamDefaultController<Uint8Array>;
+    const store = await boot(sessionFetcher((url) => {
+      if (url === '/api/workspaces/a/sessions/shared/follow') {
+        return new Response(new ReadableStream<Uint8Array>({ start(value) { controller = value; } }));
+      }
+      if (url === '/api/workspaces/a/sessions/shared') return json(detail({ running }));
+      return undefined;
+    }));
+    running = true;
+    await waitFor(() => controller !== undefined, 4000);
+    controller.enqueue(new TextEncoder().encode('data: {"type":"run.snapshot","events":[{"type":"plan.review.requested","requestId":"p1","plan":"Plan"}]}\n\n'));
+    await waitFor(() => store.currentEntry()?.run?.planReview?.requestId === 'p1');
+    expect(store.currentEntry()?.running).toBe(true);
+    store.dispose();
+    controller.close();
+  });
 });
 
 describe('workspace session isolation', () => {
@@ -617,6 +907,332 @@ describe('workbench store', () => {
     await waitFor(() => store.currentEntry()?.run === undefined);
   });
 
+  it('persists the busy send preference and defaults to queue', () => {
+    const values = new Map<string, string>();
+    vi.stubGlobal('localStorage', {
+      getItem: (key: string) => values.get(key) ?? null,
+      setItem: (key: string, value: string) => { values.set(key, value); },
+      removeItem: (key: string) => { values.delete(key); },
+    });
+    const store = new AppStore();
+    expect(store.getSnapshot().busySend).toBe('queue');
+    store.setBusySend('steer');
+    expect(store.getSnapshot().busySend).toBe('steer');
+    expect(new AppStore().getSnapshot().busySend).toBe('steer');
+    values.set('omniagent.busySend', 'invalid');
+    expect(new AppStore().getSnapshot().busySend).toBe('queue');
+  });
+
+  it('sends files and images for normal turns and steering', async () => {
+    const sent: unknown[] = [];
+    let controller!: ReadableStreamDefaultController<Uint8Array>;
+    const attachments = [
+      { kind: 'image' as const, name: 'a.png', mimeType: 'image/png', data: 'YQ==' },
+      { kind: 'file' as const, name: 'a.pdf', mimeType: 'application/pdf', data: 'Yg==' },
+    ];
+    const store = await boot(sessionFetcher((url, init) => {
+      if (url === '/api/workspaces/a/sessions/shared') return json(detail());
+      if (url === '/api/workspaces/a/sessions/shared/messages' && init?.method === 'POST') {
+        const body = JSON.parse(String(init.body)) as { mode?: string };
+        sent.push(body);
+        if (body.mode === 'steer') return json({ accepted: true }, 202);
+        return new Response(new ReadableStream<Uint8Array>({ start(value) { controller = value; } }), { status: 200 });
+      }
+      return undefined;
+    }));
+    expect(await store.sendMessage('normal', attachments)).toBe(true);
+    expect(await store.steerMessage('steer', attachments)).toBe(true);
+    expect(sent).toEqual([{ text: 'normal', attachments }, { text: 'steer', attachments, mode: 'steer' }]);
+    expect(store.currentEntry()?.run?.transcript.at(-1)).toMatchObject({ attachments });
+    controller.close();
+    store.dispose();
+  });
+
+  it('restores queued files and legacy text, steers them and removes queued items', async () => {
+    const file = { kind: 'file', name: 'report.pdf', mimeType: 'application/pdf', data: 'YQ==' };
+    const old = { kind: 'text', name: 'old.txt', mediaType: 'text/plain', text: '你好' };
+    const values = new Map<string, string>([['omniagent.queue:a:shared', JSON.stringify([
+      { id: 'one', text: '', attachments: [file, old], createdAt: 1 },
+      { id: 'two', text: '', attachments: [file], createdAt: 2 },
+    ])]]);
+    vi.stubGlobal('localStorage', {
+      getItem: (key: string) => values.get(key) ?? null,
+      setItem: (key: string, value: string) => { values.set(key, value); },
+      removeItem: (key: string) => { values.delete(key); },
+    });
+    const sent: unknown[] = [];
+    const store = await boot(sessionFetcher((url, init) => {
+      if (url === '/api/workspaces/a/sessions/shared') return json(detail({ running: true }));
+      if (url === '/api/workspaces/a/sessions/shared/messages' && init?.method === 'POST') {
+        sent.push(JSON.parse(String(init.body)));
+        return json({ accepted: true }, 202);
+      }
+      return undefined;
+    }));
+    expect(store.currentEntry()?.queued[0]?.attachments).toEqual([file, old]);
+    await store.removeQueuedMessage('two');
+    expect(store.currentEntry()?.queued).toHaveLength(1);
+    expect(await store.steerQueuedMessage('one')).toBe(true);
+    expect(sent).toEqual([{ text: '', attachments: [file, { kind: 'file', name: 'old.txt', mimeType: 'text/plain', data: '5L2g5aW9' }], mode: 'steer' }]);
+    expect(JSON.parse(values.get('omniagent.queue:a:shared')!)).toEqual([]);
+    store.dispose();
+  });
+
+  it('serializes concurrent enqueue and delivery across stores', async () => {
+    const posts: string[] = [];
+    let resolvePost!: (response: Response) => void;
+    const pending = new Promise<Response>((resolve) => { resolvePost = resolve; });
+    const fetcher = sessionFetcher((url, init) => {
+      if (url === '/api/workspaces/a/sessions/shared') return json(detail({ running: true }));
+      if (url === '/api/workspaces/a/sessions/shared/messages' && init?.method === 'POST') {
+        posts.push((JSON.parse(String(init.body)) as { text: string }).text);
+        return pending;
+      }
+      return undefined;
+    });
+    const first = await boot(fetcher);
+    const second = await boot(fetcher);
+    expect(await Promise.all([first.queueMessage('one'), second.queueMessage('two')])).toEqual([true, true]);
+    const persisted = JSON.parse(localStorage.getItem('omniagent.queue:a:shared')!) as { id: string; text: string }[];
+    expect(persisted.map((item) => item.text)).toEqual(['one', 'two']);
+    const delivery1 = first.steerQueuedMessage(persisted[0]!.id);
+    const delivery2 = second.steerQueuedMessage(persisted[0]!.id);
+    await waitFor(() => posts.length === 1);
+    resolvePost(json({ accepted: true }, 202));
+    expect(await Promise.all([delivery1, delivery2])).toEqual([true, false]);
+    expect(posts).toEqual(['one']);
+    expect(JSON.parse(localStorage.getItem('omniagent.queue:a:shared')!).map((item: { text: string }) => item.text)).toEqual(['two']);
+    first.dispose();
+    second.dispose();
+  });
+
+  it('updates loaded queues on storage events using the latest value', async () => {
+    const target = new EventTarget();
+    vi.stubGlobal('window', target);
+    const store = await boot(sessionFetcher((url) => url === '/api/workspaces/a/sessions/shared' ? json(detail({ running: true })) : undefined));
+    const item = { id: 'external', text: 'from another tab', attachments: [], createdAt: 1 };
+    localStorage.setItem('omniagent.queue:a:shared', JSON.stringify([item]));
+    const event = new Event('storage');
+    Object.defineProperty(event, 'key', { value: 'omniagent.queue:a:shared' });
+    target.dispatchEvent(event);
+    expect(store.currentEntry()?.queued).toEqual([item]);
+    localStorage.setItem('omniagent.queue:a:shared', 'invalid');
+    target.dispatchEvent(event);
+    expect(store.currentEntry()?.queued).toEqual([item]);
+    store.dispose();
+  });
+
+  it('fails closed when locking is unavailable', async () => {
+    vi.stubGlobal('navigator', {});
+    const store = await boot(sessionFetcher((url) => url === '/api/workspaces/a/sessions/shared' ? json(detail({ running: true })) : undefined));
+    expect(await store.queueMessage('unsaved')).toBe(false);
+    expect(store.currentEntry()?.queued).toEqual([]);
+    expect(store.getSnapshot().alert).toContain('locking');
+    store.dispose();
+  });
+
+  it('retains a queue item when turn startup may have saved the message', async () => {
+    let posts = 0;
+    let details = 0;
+    const fetcher = sessionFetcher((url, init) => {
+      if (url === '/api/workspaces/a/sessions/shared') { details++; return json(detail()); }
+      if (url === '/api/workspaces/a/sessions/shared/messages' && init?.method === 'POST') {
+        posts++;
+        return json({ code: 'turn_start_failed_message_may_be_saved', error: 'startup failed' }, 400);
+      }
+      return undefined;
+    });
+    const store = await boot(fetcher);
+    expect(await store.queueMessage('possibly saved')).toBe(true);
+    await waitFor(() => store.getSnapshot().alert !== '' && details >= 3);
+    expect(store.currentEntry()?.queued[0]?.delivery).toBe('uncertain');
+    const another = await boot(fetcher);
+    await new Promise((resolve) => setTimeout(resolve, 20));
+    expect(posts).toBe(1);
+    another.dispose();
+    store.dispose();
+  });
+
+  it('does not retry an uncertain delivery after another store restores it', async () => {
+    let posts = 0;
+    const fetcher = sessionFetcher((url, init) => {
+      if (url === '/api/workspaces/a/sessions/shared') return json(detail());
+      if (url === '/api/workspaces/a/sessions/shared/messages' && init?.method === 'POST') {
+        posts++;
+        return Promise.reject(new Error('connection lost'));
+      }
+      return undefined;
+    });
+    const first = await boot(fetcher);
+    expect(await first.queueMessage('possibly accepted')).toBe(true);
+    await waitFor(() => posts === 1 && first.getSnapshot().alert !== '');
+    first.dispose();
+    const second = await boot(fetcher);
+    await new Promise((resolve) => setTimeout(resolve, 20));
+    expect(posts).toBe(1);
+    expect(second.currentEntry()?.queued[0]?.delivery).toBe('uncertain');
+    second.dispose();
+  });
+
+  it('does not accept a queued attachment if browser storage is full', async () => {
+    vi.stubGlobal('localStorage', { getItem: () => null, setItem: () => { throw new Error('quota'); }, removeItem: () => {} });
+    const store = await boot(sessionFetcher((url) => url === '/api/workspaces/a/sessions/shared' ? json(detail({ running: true })) : undefined));
+    expect(await store.queueMessage('', [{ kind: 'file', name: 'a.pdf', mimeType: 'application/pdf', data: 'YQ==' }])).toBe(false);
+    expect(store.currentEntry()?.queued).toEqual([]);
+    expect(store.getSnapshot().alert).not.toBe('');
+    store.dispose();
+  });
+
+  it('steers queued messages in order and leaves rejected messages queued', async () => {
+    const sent: string[] = [];
+    const store = await boot(sessionFetcher((url, init) => {
+      if (url === '/api/workspaces/a/sessions/shared') return json(detail({ running: true }));
+      if (url === '/api/workspaces/a/sessions/shared/messages' && init?.method === 'POST') {
+        const body = JSON.parse(String(init.body)) as { text: string };
+        sent.push(body.text);
+        return body.text === 'second' ? json({ error: 'rejected' }, 500) : json({ accepted: true }, 202);
+      }
+      return undefined;
+    }));
+    expect(await store.queueMessage('first')).toBe(true);
+    expect(await store.queueMessage('second')).toBe(true);
+    expect(await store.queueMessage('third')).toBe(true);
+    await store.steerQueuedMessages();
+    expect(sent).toEqual(['first', 'second']);
+    expect(store.currentEntry()?.queued.map((item) => item.text)).toEqual(['second', 'third']);
+    store.dispose();
+  });
+
+  it('starts a queued message when the session has already become idle', async () => {
+    const sent: unknown[] = [];
+    const attachment = { kind: 'file' as const, name: 'report.docx', mimeType: 'application/vnd.openxmlformats-officedocument.wordprocessingml.document', data: 'YQ==' };
+    let controller!: ReadableStreamDefaultController<Uint8Array>;
+    const store = await boot(sessionFetcher((url, init) => {
+      if (url === '/api/workspaces/a/sessions/shared') return json(detail());
+      if (url === '/api/workspaces/a/sessions/shared/messages' && init?.method === 'POST') {
+        sent.push(JSON.parse(String(init.body)));
+        return new Response(new ReadableStream<Uint8Array>({ start(value) { controller = value; } }), { status: 200 });
+      }
+      return undefined;
+    }));
+    expect(await store.queueMessage('after', [attachment])).toBe(true);
+    await waitFor(() => sent.length === 1);
+    expect(sent).toEqual([{ text: 'after', attachments: [attachment] }]);
+    controller.enqueue(new TextEncoder().encode('data: {"type":"turn.end","reason":"end_turn"}\n\n'));
+    controller.close();
+    await waitFor(() => store.currentEntry()?.run === undefined);
+    store.dispose();
+  });
+
+  it('persists and restores an in-flight queued attachment until the server accepts it', async () => {
+    const values = new Map<string, string>();
+    vi.stubGlobal('localStorage', {
+      getItem: (key: string) => values.get(key) ?? null,
+      setItem: (key: string, value: string) => { values.set(key, value); },
+      removeItem: (key: string) => { values.delete(key); },
+    });
+    const attachment = { kind: 'file' as const, name: 'report.pdf', mimeType: 'application/pdf', data: 'YQ==' };
+    let resolvePost!: (response: Response) => void;
+    const pending = new Promise<Response>((resolve) => { resolvePost = resolve; });
+    const sent: unknown[] = [];
+    const fetcher = sessionFetcher((url, init) => {
+      if (url === '/api/workspaces/a/sessions/shared') return json(detail());
+      if (url === '/api/workspaces/a/sessions/shared/messages' && init?.method === 'POST') {
+        sent.push(JSON.parse(String(init.body)));
+        return pending;
+      }
+      return undefined;
+    });
+    const store = await boot(fetcher);
+    expect(await store.queueMessage('first', [attachment])).toBe(true);
+    await waitFor(() => sent.length === 1);
+    const first = store.currentEntry()!.queued[0]!;
+    expect(JSON.parse(values.get('omniagent.queue:a:shared')!)).toEqual([first]);
+    expect(await store.queueMessage('second')).toBe(true);
+    const removal = store.removeQueuedMessage(first.id);
+    const steering = store.steerQueuedMessage(first.id);
+    expect(sent).toEqual([{ text: 'first', attachments: [attachment] }]);
+    expect(JSON.parse(values.get('omniagent.queue:a:shared')!).map((item: { text: string }) => item.text)).toEqual(['first', 'second']);
+
+    const restored = await boot(sessionFetcher((url) =>
+      url === '/api/workspaces/a/sessions/shared' ? json(detail({ running: true })) : undefined));
+    expect(restored.currentEntry()?.queued).toEqual(store.currentEntry()?.queued);
+    expect(restored.currentEntry()?.queued[0]?.attachments).toEqual([attachment]);
+    restored.dispose();
+
+    let controller!: ReadableStreamDefaultController<Uint8Array>;
+    resolvePost(new Response(new ReadableStream<Uint8Array>({ start(value) { controller = value; } }), { status: 200 }));
+    await removal;
+    expect(await steering).toBe(false);
+    await waitFor(() => store.currentEntry()?.queued.length === 1);
+    expect(store.currentEntry()?.queued[0]?.text).toBe('second');
+    expect(JSON.parse(values.get('omniagent.queue:a:shared')!).map((item: { text: string }) => item.text)).toEqual(['second']);
+    controller.close();
+    store.dispose();
+  });
+
+  it('retains a failed in-flight queued attachment and later queued messages for recovery', async () => {
+    const values = new Map<string, string>();
+    vi.stubGlobal('localStorage', {
+      getItem: (key: string) => values.get(key) ?? null,
+      setItem: (key: string, value: string) => { values.set(key, value); },
+      removeItem: (key: string) => { values.delete(key); },
+    });
+    const attachment = { kind: 'image' as const, name: 'image.png', mimeType: 'image/png', data: 'YQ==' };
+    let rejectPost!: (error: Error) => void;
+    const pending = new Promise<Response>((_resolve, reject) => { rejectPost = reject; });
+    let posts = 0;
+    const store = await boot(sessionFetcher((url, init) => {
+      if (url === '/api/workspaces/a/sessions/shared') return json(detail());
+      if (url === '/api/workspaces/a/sessions/shared/messages' && init?.method === 'POST') {
+        posts += 1;
+        return pending;
+      }
+      return undefined;
+    }));
+    expect(await store.queueMessage('', [attachment])).toBe(true);
+    await waitFor(() => posts === 1);
+    expect(await store.queueMessage('later')).toBe(true);
+    rejectPost(new Error('network failure'));
+    await waitFor(() => store.getSnapshot().alert !== '');
+    expect(store.currentEntry()?.outcome).toBe('');
+    expect(posts).toBe(1);
+    expect(store.currentEntry()?.queued.map((item) => item.text)).toEqual(['', 'later']);
+    expect(JSON.parse(values.get('omniagent.queue:a:shared')!)).toEqual(store.currentEntry()?.queued);
+
+    const restored = await boot(sessionFetcher((url) =>
+      url === '/api/workspaces/a/sessions/shared' ? json(detail({ running: true })) : undefined));
+    expect(restored.currentEntry()?.queued).toEqual(store.currentEntry()?.queued);
+    expect(restored.currentEntry()?.queued[0]?.attachments).toEqual([attachment]);
+    restored.dispose();
+    store.dispose();
+  });
+
+  it('starts a normal turn when steering races with an idle session', async () => {
+    const posted: Array<{ text: string; mode?: string }> = [];
+    let running = true;
+    let controller!: ReadableStreamDefaultController<Uint8Array>;
+    const store = await boot(sessionFetcher((url, init) => {
+      if (url === '/api/workspaces/a/sessions/shared') return json(detail({ running }));
+      if (url === '/api/workspaces/a/sessions/shared/messages' && init?.method === 'POST') {
+        const body = JSON.parse(String(init.body)) as { text: string; mode?: string };
+        posted.push(body);
+        if (body.mode === 'steer') {
+          running = false;
+          return json({ error: 'Session is not running' }, 409);
+        }
+        return new Response(new ReadableStream<Uint8Array>({ start(value) { controller = value; } }), { status: 200 });
+      }
+      return undefined;
+    }));
+    expect(await store.steerMessage('late')).toBe(true);
+    expect(posted).toEqual([{ text: 'late', mode: 'steer' }, { text: 'late' }]);
+    controller.enqueue(new TextEncoder().encode('data: {"type":"turn.end","reason":"end_turn"}\n\n'));
+    controller.close();
+    await waitFor(() => store.currentEntry()?.run === undefined);
+    store.dispose();
+  });
+
   it('steers into the running turn and keeps the optimistic user message', async () => {
     const steers: unknown[] = [];
     let controller!: ReadableStreamDefaultController<Uint8Array>;
@@ -671,7 +1287,7 @@ describe('workbench store', () => {
     const first = store.currentEntry()?.run;
     expect(first?.transcript.at(-1)).toMatchObject({ kind: 'user', text: 'First turn', turn: 1 });
     expect(groupTurns(first!.transcript, first!.turns, true).at(-1)?.user?.text).toBe('First turn');
-    expect(store.queueMessage('Second turn')).toBe(true);
+    expect(await store.queueMessage('Second turn')).toBe(true);
     expect(store.currentEntry()?.queued.map((item) => item.text)).toEqual(['Second turn']);
 
     controllers[0]!.enqueue(encoder.encode('data: {"type":"turn.end","reason":"end_turn"}\n\n'));
@@ -842,6 +1458,31 @@ describe('workbench store', () => {
     await waitFor(() => store.currentEntry()?.run === undefined);
   });
 
+  it('falls back from draft agent and role bindings to the model default effort', async () => {
+    const roleMode = { ...standardMode, id: 'role-mode', model: { version: 2, kind: 'role', role: 'writer' } };
+    const store = await boot(sessionFetcher((url) => {
+      if (url === '/api/modes') return json({ modes: [standardMode, roleMode], defaultMode: 'standard' });
+      if (url === '/api/models') return json({ models: [
+        { provider: 'provider-a', model: 'model-2', name: 'Model Two', reasoningEfforts: ['low', 'high'], defaultReasoningEffort: 'low' },
+      ] });
+      if (url === '/api/roles') return json({ roles: [
+        { id: 'default', name: 'Default', provider: 'provider-a', model: 'model-2' },
+        { id: 'writer', name: 'Writer', provider: 'provider-a', model: 'model-2', reasoningEffort: 'high' },
+      ] });
+      if (url === '/api/workspaces/a/sessions/shared') return json(detail());
+      return undefined;
+    }));
+
+    await store.startDraftSession('standard');
+    expect(store.currentEntry()?.resolvedModel).toMatchObject({ model: 'model-2', reasoningEffort: 'low' });
+    store.selectDraftMode('role-mode');
+    expect(store.currentEntry()?.resolvedModel).toMatchObject({ model: 'model-2', reasoningEffort: 'high' });
+    await store.saveSessionModel({ version: 2, kind: 'role', role: 'default' });
+    expect(store.currentEntry()?.resolvedModel).toMatchObject({ model: 'model-2', reasoningEffort: 'low' });
+    await store.saveSessionModel({ version: 2, kind: 'model', provider: 'provider-a', model: 'model-2' });
+    expect(store.currentEntry()?.resolvedModel).toMatchObject({ model: 'model-2', reasoningEffort: 'low' });
+  });
+
   it('lets a draft override the mode model and sends the override when persisting', async () => {
     const posts: Array<{ url: string; body: unknown }> = [];
     let controller!: ReadableStreamDefaultController<Uint8Array>;
@@ -945,6 +1586,55 @@ describe('workbench store', () => {
       name: 'Model Two',
       reasoningEffort: 'high',
     });
+  });
+
+  it('moves the same draft to the selected workspace before sending', async () => {
+    const posts: string[] = [];
+    let controller!: ReadableStreamDefaultController<Uint8Array>;
+    const stream = new ReadableStream<Uint8Array>({ start(value) { controller = value; } });
+    const store = await boot(sessionFetcher(async (url, init) => {
+      if (url === '/api/modes') return json({ modes: [standardMode], defaultMode: 'standard' });
+      if (url === '/api/workspaces') return json({ workspaces: [
+        { id: 'a', name: 'Alpha', path: '/a' },
+        { id: 'b', name: 'Beta', path: '/b' },
+      ] });
+      if (url === '/api/workspaces/b/sessions' && init?.method === 'POST') {
+        posts.push(url);
+        return json({ session: { id: 'fresh', workspace: '/b', createdAt: 2, updatedAt: 2, blank: true } }, 201);
+      }
+      if (url === '/api/workspaces/b/sessions' && (init?.method ?? 'GET') === 'GET') return json({ sessions: [] });
+      if (url === '/api/workspaces/b/sessions/fresh/permission' && init?.method === 'POST') {
+        posts.push(url);
+        return json({ permission: JSON.parse(String(init.body)) });
+      }
+      if (url === '/api/workspaces/b/sessions/fresh/messages' && init?.method === 'POST') {
+        posts.push(url);
+        return new Response(stream, { status: 200, headers: { 'content-type': 'text/event-stream' } });
+      }
+      if (url === '/api/workspaces/a/sessions/shared' || url === '/api/workspaces/b/sessions/fresh') return json(detail());
+      return undefined;
+    }));
+    await store.startDraftSession('standard');
+    const id = store.getSnapshot().sessionId!;
+    const entry = store.currentEntry();
+    store.selectDraftWorkspace('b');
+    expect(store.getSnapshot().sessionId).toBe(id);
+    expect(store.getSnapshot().workspaceId).toBe('b');
+    expect(store.currentEntry()).toEqual(entry);
+    expect(store.getSnapshot().entries[JSON.stringify(['a', id])]).toBeUndefined();
+    expect(posts).toEqual([]);
+    const sending = store.sendMessage('Hello');
+    store.selectDraftWorkspace('a');
+    expect(store.getSnapshot().workspaceId).toBe('b');
+    await expect(sending).resolves.toBe(true);
+    expect(posts).toEqual([
+      '/api/workspaces/b/sessions',
+      '/api/workspaces/b/sessions/fresh/permission',
+      '/api/workspaces/b/sessions/fresh/messages',
+    ]);
+    controller.enqueue(new TextEncoder().encode('data: {"type":"turn.end","reason":"end_turn"}\n\n'));
+    controller.close();
+    await waitFor(() => store.currentEntry()?.run === undefined);
   });
 
   it('pins a session ahead of newer activity and unpins it', async () => {

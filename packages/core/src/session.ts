@@ -68,14 +68,18 @@ import type { DshPermissionSnapshot, DshSandboxMode } from './permissions/dsh-pe
 import { checkDshMutation } from './sandbox/dsh-fs';
 import type { DshSandboxPolicy } from './sandbox/dsh-policy';
 import type { DshSandboxOptions } from './sandbox/dsh-sandbox';
-import { AgentLoop, DEFAULT_MAX_STEPS } from './loop/agent-loop';
+import { AgentLoop, DEFAULT_MAX_STEPS, projectCommandInput } from './loop/agent-loop';
 import { estimateMessages } from './context/compaction';
+import { projectContext } from './context/projection';
+import { projectImageInput } from './context/image-input';
 import type { PreparedToolCall } from './loop/agent-loop';
 import type { SessionHandle } from './session/store';
 import { projectMessages } from './session/projection';
 import type { SessionAgent } from './session/runtime';
 import type { ModelCapabilities } from './config/models';
 import { DEFAULT_SYSTEM_PROMPT } from './prompts';
+import { expandInitCommand } from './session/init-command';
+import { readWorkspaceInstructions } from './session/workspace-instructions';
 
 /**
  * 组合根（composition root）。
@@ -151,6 +155,8 @@ export class Session {
   readonly #dshPermissions: DshPermissionSnapshot | undefined;
   private history: Message[] = [];
   private readonly loop: AgentLoop;
+  private readonly contextProvider: string;
+  private readonly contextModel: string;
   private readonly tools: ToolRegistry;
   private readonly trusted = new Set<Tool>();
   private readonly dshShell?: Tool;
@@ -179,11 +185,14 @@ export class Session {
   private compactRequested = false;
   private controller?: AbortController;
   private executing = false;
+  private interruptRequested = false;
   private turnSource: 'human' | 'goal' | 'external' | 'notice' | 'system' = 'system';
   private currentGoalRound?: GoalRoundContext;
 
   constructor(options: SessionOptions) {
     this.session = options.session;
+    this.contextProvider = options.model.name;
+    this.contextModel = options.modelId ?? 'fake';
     this.id = options.session?.id ?? options.sessionId ?? `s_${Date.now().toString(36)}`;
     this.#dshPermissions = copyDshPermissions(options.dshPermissions);
     this.dshSandbox = options.dshSandbox && { ...options.dshSandbox };
@@ -313,6 +322,7 @@ export class Session {
     this.loop = new AgentLoop({
       model: options.model,
       modelId: options.modelId ?? 'fake',
+      ...(options.modelCapabilities === undefined ? {} : { imageInput: options.modelCapabilities.imageInput }),
       system: () => this.systemText(),
       tools: this.tools,
       toolSpecs: () => this.visibleToolSpecs(),
@@ -341,9 +351,16 @@ export class Session {
     return this.history;
   }
 
+  /** Projection of the next request. During a turn the loop owns mutable history. */
+  contextProjection(): ReturnType<typeof projectContext> | undefined {
+    if (this.activeTurn) return undefined;
+    return projectContext(projectImageInput(projectCommandInput(prepareModelHistory(this.history).messages), this.modelCapabilities?.imageInput), this.systemText(), this.visibleToolSpecs(),
+      this.contextProvider, this.contextModel);
+  }
+
   /** Estimate the prepared history for the next turn, only when idle. */
   contextMessageEstimate(): number | undefined {
-    return this.activeTurn ? undefined : estimateModelHistory(this.history);
+    return this.activeTurn ? undefined : estimateModelHistory(this.history, this.modelCapabilities?.imageInput);
   }
 
   get cwd(): string {
@@ -384,7 +401,7 @@ export class Session {
   }
 
   private systemText(): string {
-    const parts = [this.baseSystem];
+    const parts = [this.baseSystem, readWorkspaceInstructions(this.workspacePath ?? this.cwdValue)];
     if (this.planActive) parts.push(PLAN_MODE_GUIDANCE);
     if (this.hasGoalTools()) parts.push(renderGoalToolGuidance(GOAL_DEFAULT_BLOCKED_AFTER));
     if (this.hasScheduleTools()) parts.push(renderScheduleToolGuidance());
@@ -491,6 +508,7 @@ export class Session {
   }
 
   interrupt(): void {
+    if (this.executing) this.interruptRequested = true;
     this.controller?.abort();
   }
 
@@ -528,13 +546,17 @@ export class Session {
     }
     this.executing = true;
     try {
-      this.history.push({ role: 'user', content });
+      const message: Message = expandInitCommand(content) === undefined
+        ? { role: 'user', content }
+        : { role: 'user', content, initCommand: true };
+      this.history.push(message);
       await this.appendMessage('message/user', typeof input === 'string' ? { text: input } : { content });
       const title = await this.ensureTitle();
       if (title !== undefined) yield { type: 'session.title', title };
       yield* this.runGoalChain(false, 'human');
     } finally {
       this.executing = false;
+      this.interruptRequested = false;
       this.resumeQueuedBackground();
     }
   }
@@ -550,7 +572,9 @@ export class Session {
       || !content.some((part) => part.type === 'image' || (part.type === 'text' && part.text.trim() !== ''))) {
       throw new Error('A non-empty message is required');
     }
-    const message: Message = { role: 'user', content };
+    const message: Message = expandInitCommand(content) === undefined
+      ? { role: 'user', content }
+      : { role: 'user', content, initCommand: true };
     this.history.push(message);
     await this.appendMessage('message/user', typeof input === 'string' ? { text: input } : { content });
     this.inbox.push(message);
@@ -679,11 +703,9 @@ export class Session {
     if (this.planActive && !this.allowsTool(EXIT_PLAN_MODE_TOOL_NAME)) {
       throw new Error('The current agent profile must allow exit_plan_mode while plan mode is active');
     }
-    if (this.modelCapabilities !== undefined && !this.modelCapabilities.imageInput && containsImage(this.history)) {
-      throw new Error('The selected model does not support image input');
-    }
     const controller = new AbortController();
     this.controller = controller;
+    if (this.interruptRequested) controller.abort();
     let generator: AsyncGenerator<AgentEvent, Message[]> | undefined;
     let terminal = false;
     let failed = false;
@@ -809,6 +831,7 @@ export class Session {
         // runTurn persists a redacted trace/error before rethrowing.
       } finally {
         this.executing = false;
+        this.interruptRequested = false;
         this.resumeQueuedBackground();
       }
     })();
@@ -1066,11 +1089,6 @@ export class Session {
   }
 }
 
-function containsImage(history: readonly Message[]): boolean {
-  return history.some((message) =>
-    message.role === 'user' && message.content.some((part) => part.type === 'image'));
-}
-
 /** Auxiliary title instruction. It must never look like a tool-using turn. */
 function renderTitleSystemPrompt(options: Required<SessionTitleLlmOptions>): string {
   return [
@@ -1159,8 +1177,8 @@ function dshEditFileTool(policy: DshSandboxPolicy): Tool {
 }
 
 /** Repair only the provider input; the session transcript remains an exact record of events. */
-export function estimateModelHistory(history: readonly Message[]): number {
-  return estimateMessages(prepareModelHistory(history).messages);
+export function estimateModelHistory(history: readonly Message[], imageInput?: boolean): number {
+  return estimateMessages(projectImageInput(projectCommandInput(prepareModelHistory(history).messages), imageInput));
 }
 
 function prepareModelHistory(history: readonly Message[]): { messages: Message[]; repaired: boolean } {

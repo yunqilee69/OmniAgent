@@ -4,7 +4,8 @@
   display: flex;
   align-items: center;
   justify-content: center;
-  gap: 12px;
+  flex-wrap: wrap;
+  gap: 2px 8px;
   min-height: 22px;
   max-width: 100%;
   color: var(--dsw-alias-label-tertiary);
@@ -27,33 +28,4 @@
   flex: none;
   width: 14px;
   height: 14px;
-}
-
-.hint {
-  display: inline-flex;
-  align-items: center;
-  gap: 4px;
-  margin-left: 4px;
-  color: var(--dsw-alias-label-caption);
-}
-
-.hint kbd {
-  padding: 0 4px;
-  border: 0.5px solid var(--dsw-alias-border-l3);
-  border-radius: var(--dsw-radius-xs);
-  background: var(--dsw-alias-button-elevated-fill);
-  color: var(--dsw-alias-label-tertiary);
-  font-family: var(--ds-font-family-code);
-  font-size: 10px;
-  line-height: 16px;
-}
-
-.sep {
-  color: var(--dsw-alias-separator-primary);
-}
-
-@media (max-width: 720px) {
-  .hint {
-    display: none;
-  }
 }

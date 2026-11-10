@@ -60,6 +60,27 @@ async function waitFor(check: () => boolean | Promise<boolean>, message = 'condi
 }
 
 describe('SubagentManager with RuntimeResolver', () => {
+  it('refreshes workspace guidance when a cached child receives another turn', async () => {
+    const { cwd, store, parent, runtime } = await fixture();
+    const childDir = join(cwd, 'child');
+    await mkdir(childDir);
+    await writeFile(join(childDir, 'AGENTS.md'), 'WRONG CHILD');
+    const model = new FakeModel([textResponse('first'), textResponse('second'), textResponse('third')]);
+    const manager = new SubagentManager({ store, runtime, createModel: () => model });
+    managers.push(manager);
+    const { id } = await manager.start(parent, { description: 'test', prompt: 'first', cwd: childDir });
+    await manager.wait(parent, id, 4_000, new AbortController().signal);
+    expect(model.requests[0]!.system).not.toContain('WRONG CHILD');
+    await writeFile(join(cwd, 'AGENTS.md'), 'ROOT FIRST');
+    await manager.send(parent, id, 'second');
+    await manager.wait(parent, id, 4_000, new AbortController().signal);
+    expect(model.requests[1]!.system).toContain('ROOT FIRST');
+    await writeFile(join(cwd, 'AGENTS.md'), 'ROOT SECOND');
+    await manager.send(parent, id, 'third');
+    await manager.wait(parent, id, 4_000, new AbortController().signal);
+    expect(model.requests[2]!.system).toContain('ROOT SECOND');
+    expect(model.requests[2]!.system).not.toContain('ROOT FIRST');
+  });
   it('starts the requested agent with its profile and persists both selections', async () => {
     const { cwd, store, parentHandle, parent, runtime } = await fixture();
     const childModel = new FakeModel([textResponse('explored')]);

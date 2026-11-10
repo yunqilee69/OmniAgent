@@ -12,6 +12,8 @@ import { AutomationPage } from './components/AutomationPage.tsx';
 import { SettingsPage } from './components/SettingsPage.tsx';
 import { NewSessionDialog } from './components/NewSessionDialog.tsx';
 import { RightPanel, type RightView } from './components/RightPanel.tsx';
+import { WorkspaceFileTree } from './components/WorkspaceFileTree.tsx';
+import type { FileSelection } from './components/WorkspaceFilePreview.tsx';
 import css from './styles/app.module.css';
 import heroCss from './styles/dsh/hero-shell.module.css';
 
@@ -70,6 +72,8 @@ export function App(): ReactNode {
   const [rightFullscreen, setRightFullscreen] = useState(false);
   const [rightWidth, setRightWidth] = useState<number | null>(null);
   const [rightView, setRightView] = useState<RightView>('guide');
+  const [browseWorkspaceId, setBrowseWorkspaceId] = useState<string | null>(null);
+  const [preview, setPreview] = useState<FileSelection | null>(null);
   const booted = useRef(false);
 
   useEffect(() => {
@@ -81,6 +85,17 @@ export function App(): ReactNode {
   useEffect(() => {
     if (mobile) setSidebarOpen(false);
   }, [mobile]);
+
+  useEffect(() => {
+    setPreview(null);
+    setRightView((view) => view === 'preview' ? 'guide' : view);
+  }, [app.workspaceId, app.sessionId]);
+
+  useEffect(() => {
+    if (!app.workspacesLoading && browseWorkspaceId !== null && !app.workspaces.some((workspace) => workspace.id === browseWorkspaceId)) {
+      setBrowseWorkspaceId(null);
+    }
+  }, [app.workspaces, app.workspacesLoading, browseWorkspaceId]);
 
   useEffect(() => {
     if (!rightOpen || !rightOverlay) return;
@@ -100,6 +115,7 @@ export function App(): ReactNode {
     return () => { document.removeEventListener('keydown', onKey); };
   }, [mobile, sidebarOpen]);
 
+  const browseWorkspace = app.workspaces.find((workspace) => workspace.id === browseWorkspaceId);
   const run = entry?.run;
   const drawer = mobile && sidebarOpen;
   const hasSession = app.sessionId !== null;
@@ -147,7 +163,22 @@ export function App(): ReactNode {
       style={shellStyle}
     >
       <div className={css.sidebarCol}>
-        <Sidebar drawer={mobile} onClose={() => { setSidebarOpen(false); }} />
+        {browseWorkspace ? (
+          <WorkspaceFileTree
+            key={browseWorkspace.id}
+            workspaceId={browseWorkspace.id}
+            name={browseWorkspace.name || browseWorkspace.path}
+            selected={preview?.workspaceId === browseWorkspace.id ? preview.path : null}
+            onBack={() => { setBrowseWorkspaceId(null); }}
+            onSelect={(path) => {
+              setPreview({ workspaceId: browseWorkspace.id, workspaceName: browseWorkspace.name || browseWorkspace.path, path });
+              setRightView('preview');
+              setRightOpen(true);
+              store.setTab('conversation');
+              if (mobile) setSidebarOpen(false);
+            }}
+          />
+        ) : <Sidebar drawer={mobile} onClose={() => { setSidebarOpen(false); }} onBrowseWorkspace={(workspaceId) => { setBrowseWorkspaceId(workspaceId); }} />}
       </div>
       {drawer && <div className={css.drawerMask} onClick={() => { setSidebarOpen(false); }} />}
 
@@ -157,7 +188,6 @@ export function App(): ReactNode {
           onToggleSidebar={() => { setSidebarOpen((value) => !value); }}
           rightOpen={rightActive}
           onToggleRight={() => { setRightView('guide'); setRightOpen(true); }}
-          onOpenObserve={() => { setRightView('observe'); setRightOpen(true); }}
         />
 
         {app.alert !== '' && (
@@ -257,6 +287,7 @@ export function App(): ReactNode {
           <RightPanel
             fullscreen={rightFullscreen}
             view={rightView}
+            preview={preview}
             onViewChange={setRightView}
             onClose={() => { setRightOpen(false); setRightFullscreen(false); }}
             onToggleFullscreen={() => { setRightFullscreen((value) => !value); }}

@@ -1,6 +1,6 @@
-import { mkdir, mkdtemp, writeFile } from 'node:fs/promises';
+import { mkdir, mkdtemp, readFile, readdir, writeFile } from 'node:fs/promises';
 import { tmpdir } from 'node:os';
-import { join } from 'node:path';
+import { isAbsolute, join } from 'node:path';
 import { request as httpRequest, type ServerResponse } from 'node:http';
 import { afterEach, describe, expect, it } from 'vitest';
 import {
@@ -24,6 +24,11 @@ import { WorkspaceRegistry } from './workspaces';
 import { startWebHost } from './server';
 import type { WebHost, WebHostOptions, WebSession } from './server';
 import { replayEndpointHash } from '../../core/src/providers/replay-identity';
+import { hydrateTranscript, userMessageCopyText } from '../ui/src/lib/events';
+import type { PublicMessage } from '../ui/src/lib/wire';
+import { createElement } from 'react';
+import { renderToStaticMarkup } from 'react-dom/server';
+import { UserContent } from '../ui/src/components/ConversationView';
 
 const hosts: WebHost[] = [];
 afterEach(async () => {
@@ -77,6 +82,10 @@ function jsonRequest(body: unknown): RequestInit {
   return { method: 'POST', headers: { 'content-type': 'application/json' }, body: JSON.stringify(body) };
 }
 
+function asyncRequest(body: unknown): RequestInit {
+  return { method: 'POST', headers: { 'content-type': 'application/json', prefer: 'respond-async' }, body: JSON.stringify(body) };
+}
+
 function jsonRequestWith(method: string, body: unknown): RequestInit {
   return { method, headers: { 'content-type': 'application/json' }, body: JSON.stringify(body) };
 }
@@ -98,6 +107,246 @@ function sessionsUrl(base: string, workspaceId: string): string {
 }
 
 describe('workspace web host', () => {
+  it('follows before the initial message is persisted and replays steering in order', async () => {
+    const beforeFirst = signal();
+    const releaseFirst = signal();
+    const releaseEnd = signal();
+    const { base, first } = await setup((id) => ({
+      id,
+      async *send() {
+        beforeFirst.resolve();
+        await releaseFirst.promise;
+        yield { type: 'turn.start', step: 0 };
+        yield { type: 'assistant.delta', text: 'answer' } as never;
+        await releaseEnd.promise;
+        yield { type: 'turn.end', reason: 'end_turn' };
+      },
+      async deliverUserMessage() { return 'queued' as const; },
+      interrupt() { releaseFirst.resolve(); releaseEnd.resolve(); },
+    }));
+    const url = sessionsUrl(base, first.id);
+    const { session } = await (await fetch(url, jsonRequest({}))).json() as { session: { id: string } };
+    const path = `${url}/${session.id}`;
+    const posting = fetch(`${path}/messages`, asyncRequest({ text: 'question' }));
+    await beforeFirst.promise;
+    const detail = await (await fetch(path)).json() as { running: boolean; messages: unknown[] };
+    expect(detail.running).toBe(true);
+    expect(detail.messages).toEqual([]);
+    const follower = await fetch(`${path}/follow`);
+    const reader = follower.body!.getReader();
+    const decoder = new TextDecoder();
+    const snapshot = JSON.parse(decoder.decode((await reader.read()).value).slice(6));
+    expect(snapshot).toMatchObject({ baseline: { messages: [] }, events: [] });
+    releaseFirst.resolve();
+    expect((await posting).status).toBe(202);
+    expect((await fetch(`${path}/messages`, jsonRequest({ text: 'follow up', mode: 'steer' }))).status).toBe(202);
+    const replay = await fetch(`${path}/follow`);
+    const replayReader = replay.body!.getReader();
+    const replaySnapshot = JSON.parse(decoder.decode((await replayReader.read()).value).slice(6));
+    expect(replaySnapshot.events.map((event: { type: string }) => event.type)).toEqual([
+      'run.user.message', 'turn.start', 'assistant.delta', 'run.user.message',
+    ]);
+    expect(replaySnapshot.events.filter((event: { type: string }) => event.type === 'run.user.message')
+      .map((event: { message: { content: unknown } }) => event.message.content)).toEqual([
+      [{ type: 'text', text: 'question' }], [{ type: 'text', text: 'follow up' }],
+    ]);
+    releaseEnd.resolve();
+    await reader.cancel();
+    await replayReader.cancel();
+  });
+
+  it('publishes an in-flight steer before the terminal event', async () => {
+    const deliveryStarted = signal();
+    const deliveryGate = signal();
+    const endGate = signal();
+    const { base, first } = await setup((id) => ({
+      id,
+      async *send() {
+        yield { type: 'turn.start', step: 0 };
+        await endGate.promise;
+        yield { type: 'turn.end', reason: 'end_turn' };
+      },
+      async deliverUserMessage() { deliveryStarted.resolve(); await deliveryGate.promise; return 'queued' as const; },
+      interrupt() { endGate.resolve(); deliveryGate.resolve(); },
+    }));
+    const url = sessionsUrl(base, first.id);
+    const { session } = await (await fetch(url, jsonRequest({}))).json() as { session: { id: string } };
+    const path = `${url}/${session.id}`;
+    expect((await fetch(`${path}/messages`, asyncRequest({ text: 'first' }))).status).toBe(202);
+    const follow = await fetch(`${path}/follow`);
+    const pending = fetch(`${path}/messages`, jsonRequest({ text: 'next', mode: 'steer' }));
+    await deliveryStarted.promise;
+    endGate.resolve();
+    await new Promise((resolve) => setTimeout(resolve, 20));
+    deliveryGate.resolve();
+    expect((await pending).status).toBe(202);
+    const frames = (await follow.text()).split('\n\n').filter(Boolean).map((frame) => JSON.parse(frame.slice(6)));
+    expect(frames.slice(1).map((event) => event.type)).toEqual(['run.user.message', 'turn.end']);
+  });
+
+  it('replays an atomic snapshot and continues after followers disconnect', async () => {
+    const gate = signal();
+    const emitted = signal();
+    const { base, first } = await setup((id) => ({
+      id,
+      async *send() {
+        yield { type: 'turn.start', step: 0 };
+        emitted.resolve();
+        await gate.promise;
+        yield { type: 'assistant.delta', text: 'later' } as never;
+        yield { type: 'turn.end', reason: 'end_turn' };
+      },
+      interrupt() { gate.resolve(); },
+    }));
+    const url = sessionsUrl(base, first.id);
+    const { session } = await (await fetch(url, jsonRequest({}))).json() as { session: { id: string } };
+    const path = `${url}/${session.id}`;
+    const accepted = await fetch(`${path}/messages`, asyncRequest({ text: 'hello' }));
+    expect(accepted.status).toBe(202);
+    expect(await accepted.json()).toEqual({ accepted: true });
+    await emitted.promise;
+    const firstFollow = await fetch(`${path}/follow`);
+    const reader = firstFollow.body!.getReader();
+    const snapshot = new TextDecoder().decode((await reader.read()).value);
+    expect(snapshot).toContain('run.snapshot');
+    expect(snapshot).toContain('turn.start');
+    await reader.cancel();
+    const second = await fetch(`${path}/follow`);
+    gate.resolve();
+    const text = await second.text();
+    const events = text.split('\n\n').filter(Boolean).map((frame) => JSON.parse(frame.slice(6)));
+    expect(events[0]).toMatchObject({ type: 'run.snapshot', baseline: { messages: [] }, events: [{ type: 'run.user.message' }, { type: 'turn.start' }] });
+    expect(events.slice(1).map((event) => event.type)).toEqual(['assistant.delta', 'turn.end']);
+    expect((await fetch(`${path}/follow`)).status).toBe(204);
+  });
+
+  it('retains a bounded replay and remains followable after overflow', async () => {
+    const gate = signal();
+    const emitted = signal();
+    let interrupted = false;
+    const { base, first } = await setup((id) => ({
+      id,
+      async *send() {
+        yield { type: 'assistant.delta', text: 'x'.repeat(8 * 1024 * 1024) } as never;
+        emitted.resolve();
+        await gate.promise;
+        yield { type: 'turn.end', reason: 'end_turn' };
+      },
+      interrupt() { interrupted = true; gate.resolve(); },
+    }));
+    const url = sessionsUrl(base, first.id);
+    const { session } = await (await fetch(url, jsonRequest({}))).json() as { session: { id: string } };
+    const path = `${url}/${session.id}`;
+    expect((await fetch(`${path}/messages`, asyncRequest({ text: 'hello' }))).status).toBe(202);
+    await emitted.promise;
+    const follow = await fetch(`${path}/follow`);
+    expect(follow.status).toBe(200);
+    const reader = follow.body!.getReader();
+    const firstFrame = new TextDecoder().decode((await reader.read()).value);
+    expect(JSON.parse(firstFrame.slice(6))).toMatchObject({ type: 'run.snapshot', truncated: true });
+    expect(interrupted).toBe(false);
+    gate.resolve();
+    expect(new TextDecoder().decode((await reader.read()).value)).toContain('turn.end');
+    await reader.cancel();
+    await expect.poll(async () => (await fetch(path).then((response) => response.json()) as { running: boolean }).running).toBe(false);
+    expect(interrupted).toBe(false);
+  });
+
+  it('recovers a pending approval after the replay limit and accepts its decision', async () => {
+    const broker = new ApprovalBroker({ timeoutMs: 10_000 });
+    const requesting = signal();
+    let decision: string | undefined;
+    const { base, first } = await setup((id, _permissions, workspace) => ({
+      id,
+      async *send() {
+        yield { type: 'assistant.delta', text: 'x'.repeat(8 * 1024 * 1024) } as never;
+        requesting.resolve();
+        decision = await broker.handler(workspace.path, id)!({
+          id: 'call', call: { id: 'call', name: 'write_file', arguments: {}, raw: '{}' }, reason: 'write',
+        }, new AbortController().signal);
+        yield { type: 'turn.end', reason: 'end_turn' };
+      },
+      interrupt() {},
+    }), undefined, undefined, broker);
+    const url = sessionsUrl(base, first.id);
+    const { session } = await (await fetch(url, jsonRequest({}))).json() as { session: { id: string } };
+    const path = `${url}/${session.id}`;
+    expect((await fetch(`${path}/messages`, asyncRequest({ text: 'hello' }))).status).toBe(202);
+    await requesting.promise;
+    let prompt: { requestId: string } | undefined;
+    let follow: Response | undefined;
+    let reader: ReadableStreamDefaultReader<Uint8Array> | undefined;
+    for (let attempt = 0; attempt < 50 && !prompt; attempt++) {
+      follow = await fetch(`${path}/follow`);
+      reader = follow.body!.getReader();
+      const snapshot = JSON.parse(new TextDecoder().decode((await reader.read()).value).slice(6)) as {
+        truncated: boolean; events: Array<{ type: string; requestId: string }>;
+      };
+      expect(snapshot.truncated).toBe(true);
+      prompt = snapshot.events.find((event) => event.type === 'permission.requested');
+      if (!prompt) { await reader.cancel(); await new Promise((resolve) => setTimeout(resolve, 10)); }
+    }
+    expect(prompt).toBeDefined();
+    expect((await fetch(`${path}/approvals`, jsonRequest({ requestId: prompt!.requestId, decision: 'allow' }))).status).toBe(200);
+    await expect.poll(() => decision).toBe('allow');
+    await reader!.cancel();
+  });
+
+  it('reports an async failure before the first event instead of acknowledging a lost run', async () => {
+    const { base, first } = await setup((id) => ({
+      id,
+      async *send() { throw new Error('startup failed'); yield { type: 'turn.start', step: 0 }; },
+      interrupt() {},
+    }));
+    const url = sessionsUrl(base, first.id);
+    const { session } = await (await fetch(url, jsonRequest({}))).json() as { session: { id: string } };
+    const response = await fetch(`${url}/${session.id}/messages`, asyncRequest({ text: 'hello' }));
+    expect(response.status).toBe(500);
+    expect(await response.json()).toMatchObject({ code: 'turn_start_failed_message_may_be_saved' });
+  });
+
+  it('reports an uncertain startup failure after persisting the user message', async () => {
+    const { base, first, store } = await setup((id, _permissions, _workspace, handle) => ({
+      id,
+      async *send(input) {
+        await handle.append({ type: 'message/user', data: { text: input } });
+        throw new Error('failure after persistence');
+        yield { type: 'turn.start', step: 0 };
+      },
+      interrupt() {},
+    }));
+    const url = sessionsUrl(base, first.id);
+    const { session } = await (await fetch(url, jsonRequest({}))).json() as { session: { id: string } };
+    const response = await fetch(`${url}/${session.id}/messages`, asyncRequest({ text: 'already saved' }));
+    expect(response.status).toBe(500);
+    expect(await response.json()).toMatchObject({ code: 'turn_start_failed_message_may_be_saved' });
+    const messages = projectMessages((await store.open(first.path, session.id)).events);
+    expect(messages).toMatchObject([{ role: 'user', content: [{ type: 'text', text: 'already saved' }] }]);
+  });
+
+  it('persists the submitted user message before acknowledging it', async () => {
+    const { base, first, store } = await setup();
+    const url = sessionsUrl(base, first.id);
+    const { session } = await (await fetch(url, jsonRequest({}))).json() as { session: { id: string } };
+    const response = await fetch(`${url}/${session.id}/messages`, asyncRequest({ text: 'persist before acceptance' }));
+    expect(response.status).toBe(202);
+    const handle = await store.open(first.path, session.id);
+    expect(projectMessages(handle.events)).toEqual(expect.arrayContaining([
+      expect.objectContaining({ role: 'user', content: [expect.objectContaining({ text: 'persist before acceptance' })] }),
+    ]));
+  });
+
+  it('reconciles a quickly completed turn through persisted session detail', async () => {
+    const { base, first } = await setup();
+    const url = sessionsUrl(base, first.id);
+    const { session } = await (await fetch(url, jsonRequest({}))).json() as { session: { id: string } };
+    const path = `${url}/${session.id}`;
+    expect((await fetch(`${path}/messages`, asyncRequest({ text: 'hello' }))).status).toBe(202);
+    await expect.poll(async () => (await fetch(`${path}/follow`)).status).toBe(204);
+    const detail = await (await fetch(path)).json() as { messages: Array<{ role: string }> };
+    expect(detail.messages.map((message) => message.role)).toEqual(['user', 'assistant']);
+  });
+
   it('exposes persisted history metadata in both read endpoints', async () => {
     const { base, first, store } = await setup();
     const handle = await store.create({ id: 'history-metadata', workspace: first.path, cwd: first.path });
@@ -540,6 +789,36 @@ describe('workspace web host', () => {
     expect(detail.messages[1]?.content[0]?.text).toBe('hello from model');
   });
 
+  it('interrupts the real session while its user message is being persisted', async () => {
+    const writing = signal();
+    const release = signal();
+    const model = new FakeModel([textResponse('unexpected')]);
+    const { base, first } = await setup((_id, permissions, workspace, handle) => {
+      const append = handle.append.bind(handle);
+      handle.append = async (event) => {
+        if (event.type === 'message/user') {
+          writing.resolve();
+          await release.promise;
+        }
+        return append(event);
+      };
+      return new Session({ cwd: workspace.path, model, session: handle, dshPermissions: permissions });
+    });
+    const url = sessionsUrl(base, first.id);
+    const { session } = await (await fetch(url, jsonRequest({}))).json() as { session: { id: string } };
+    const path = `${url}/${session.id}`;
+    const sending = fetch(`${path}/messages`, jsonRequest({ text: 'hello' }));
+    await writing.promise;
+    try {
+      expect((await fetch(`${path}/interrupt`, jsonRequest({}))).status).toBe(200);
+    } finally {
+      release.resolve();
+    }
+    const response = await sending;
+    expect(await response.text()).toContain('"reason":"interrupted"');
+    expect(model.requests).toHaveLength(0);
+  });
+
   it('rejects an overlapping turn and permits interrupting the active one', async () => {
     let release: (() => void) | undefined;
     let interrupted = false;
@@ -569,7 +848,7 @@ describe('workspace web host', () => {
   });
 
   it('steers a direct message into the active turn and exposes the running state', async () => {
-    const steered: string[] = [];
+    const steered: Array<string | readonly import('../../core/src/domain/message').ContentPart[]> = [];
     let release: (() => void) | undefined;
     let calls = 0;
     const { base, first } = await setup((id) => ({
@@ -583,7 +862,7 @@ describe('workspace web host', () => {
       },
       interrupt() { release?.(); },
       async deliverUserMessage(input) {
-        steered.push(typeof input === 'string' ? input : 'content');
+        steered.push(input);
         return 'queued' as const;
       },
     }));
@@ -598,8 +877,16 @@ describe('workspace web host', () => {
 
     const steer = await fetch(messagesUrl, jsonRequest({ text: 'second', mode: 'steer' }));
     expect(steer.status).toBe(202);
-    expect(await steer.json()).toEqual({ accepted: true, delivery: 'queued' });
+    expect(await steer.json()).toEqual({ accepted: true, delivery: 'queued', broadcast: true });
     expect(steered).toEqual(['second']);
+    const steeredFile = await fetch(messagesUrl, jsonRequest({ mode: 'steer', attachments: [
+      { kind: 'file', name: '../report.dsh', mimeType: 'application/octet-stream', data: 'AAEC' },
+    ] }));
+    expect(steeredFile.status).toBe(202);
+    const parts = steered[1] as readonly { type: string; text?: string }[];
+    const path = JSON.parse(parts[0]!.text!.match(/: ("[^"]+")\./)![1]!);
+    expect(await readFile(path)).toEqual(Buffer.from([0, 1, 2]));
+    expect(parts[0]!.text).toContain('../report.dsh');
     expect((await fetch(messagesUrl, jsonRequest({ text: 'third', mode: 'queue' }))).status).toBe(400);
 
     await fetch(`${url}/${session.id}/interrupt`, jsonRequest({}));
@@ -609,8 +896,8 @@ describe('workspace web host', () => {
     expect(settled.running).toBe(false);
 
     const idleSteer = await fetch(messagesUrl, jsonRequest({ text: 'after', mode: 'steer' }));
-    expect(idleSteer.status).toBe(200);
-    await idleSteer.text();
+    expect(idleSteer.status).toBe(409);
+    expect(calls).toBe(1);
   });
 
   it('uses the permission snapshot captured when a turn is accepted', async () => {
@@ -772,7 +1059,7 @@ describe('workspace web host', () => {
     }
   });
 
-  it('interrupts an active turn when its stream disconnects', async () => {
+  it('continues an active turn when its POST stream disconnects', async () => {
     let release: (() => void) | undefined;
     let interrupted = false;
     const { base, first } = await setup((id) => ({
@@ -790,12 +1077,15 @@ describe('workspace web host', () => {
     const reader = response.body!.getReader();
     await reader.read();
     await reader.cancel();
-    await new Promise<void>((resolve) => {
-      const deadline = Date.now() + 2000;
-      const check = () => interrupted || Date.now() >= deadline ? resolve() : setTimeout(check, 10);
-      check();
-    });
-    expect(interrupted).toBe(true);
+    const follow = await fetch(`${url}/${session.id}/follow`);
+    expect(follow.status).toBe(200);
+    const follower = follow.body!.getReader();
+    expect(new TextDecoder().decode((await follower.read()).value)).toContain('turn.start');
+    expect(interrupted).toBe(false);
+    release!();
+    expect(new TextDecoder().decode((await follower.read()).value)).toContain('turn.end');
+    await follower.cancel();
+    expect(interrupted).toBe(false);
   });
 
   it('releases a disconnected turn while its session is still being created', async () => {
@@ -1087,7 +1377,7 @@ describe('workspace web host', () => {
     }
   });
 
-  it('cleans up losing listeners after repeated SSE backpressure drains', async () => {
+  it('bounds slow SSE followers without stopping the producer', async () => {
     const { base, first, host } = await setup((id) => ({
       id,
       async *send() {
@@ -1100,18 +1390,9 @@ describe('workspace web host', () => {
     }));
     const url = sessionsUrl(base, first.id);
     const { session } = await (await fetch(url, jsonRequest({}))).json() as { session: { id: string } };
-    const listeners: Array<{ close: number; error: number }> = [];
-    host.server.once('request', (_request, response) => {
-      response.setMaxListeners(0);
-      response.on('drain', () => {
-        listeners.push({ close: response.listenerCount('close'), error: response.listenerCount('error') });
-      });
-    });
     const response = await fetch(`${url}/${session.id}/messages`, jsonRequest({ text: 'first' }));
-    await response.arrayBuffer();
-    expect(listeners.length).toBeGreaterThan(10);
-    expect(listeners.at(-1)!.close).toBeLessThanOrEqual(listeners[0]!.close + 1);
-    expect(listeners.at(-1)!.error).toBeLessThanOrEqual(listeners[0]!.error + 1);
+    await response.arrayBuffer().catch(() => undefined);
+    await expect.poll(async () => (await fetch(`${url}/${session.id}`).then((result) => result.json()) as { running: boolean }).running).toBe(false);
   });
 
   it('cleans up a pending SSE drain wait when the client disconnects', async () => {
@@ -1154,7 +1435,7 @@ describe('workspace web host', () => {
       expect(outgoing.listenerCount('drain')).toBe(0);
       // The response keeps one no-op error handler for late EPIPE callbacks.
       expect(outgoing.listenerCount('error')).toBe(1);
-      await expect.poll(() => completed, { timeout: 1000 }).toBe(true);
+      expect(completed).toBe(false);
     } finally {
       response.destroy();
       gate.resolve();
@@ -1456,6 +1737,22 @@ describe('workspace web host', () => {
     expect((await fetch(`${base}/api/workspaces/${first.id}/files?query=${'a'.repeat(1025)}`)).status).toBe(400);
   });
 
+  it('browses and previews files in the requested workspace with safe errors', async () => {
+    const { base, first, second } = await setup();
+    await writeFile(join(first.path, 'only-first.txt'), 'first');
+    await writeFile(join(second.path, 'only-second.txt'), 'second');
+    await writeFile(join(first.path, 'binary'), Buffer.from([0, 1]));
+    const prefix = `${base}/api/workspaces/${first.id}/files`;
+    const tree = await jsonResponse<{ entries: Array<{ path: string }> }>(await fetch(`${prefix}/tree?path=`));
+    expect(tree.entries.map((entry) => entry.path)).toContain('only-first.txt');
+    expect(tree.entries.map((entry) => entry.path)).not.toContain('only-second.txt');
+    expect(await jsonResponse(await fetch(`${prefix}/content?path=only-first.txt`))).toEqual({ path: 'only-first.txt', content: 'first' });
+    expect((await fetch(`${prefix}/content?path=only-second.txt`)).status).toBe(404);
+    expect((await fetch(`${prefix}/content?path=${encodeURIComponent('../only-second.txt')}`)).status).toBe(400);
+    expect((await fetch(`${prefix}/content?path=binary`)).status).toBe(415);
+    expect((await fetch(`${base}/api/workspaces/not-found/files/tree`)).status).toBe(404);
+  });
+
   it('accepts image and text attachments and persists the composed user content', async () => {
     const { base, first, store } = await setup();
     const url = sessionsUrl(base, first.id);
@@ -1465,6 +1762,7 @@ describe('workspace web host', () => {
       text: 'Inspect these files',
       attachments: [
         { kind: 'text', name: 'notes.txt', mediaType: 'text/plain', text: 'release checklist' },
+        { kind: 'file', name: 'report.pdf', mimeType: 'application/pdf', data: Buffer.from('pdf-bytes').toString('base64') },
         { kind: 'image', name: 'screen.png', mediaType: 'image/png', data: image },
       ],
     }));
@@ -1472,24 +1770,78 @@ describe('workspace web host', () => {
     await accepted.text();
 
     const stored = (await store.open(first.path, session.id)).events.find((event) => event.type === 'message/user');
-    expect(stored?.data).toMatchObject({
-      content: [
-        { type: 'text', text: 'Inspect these files' },
-        expect.objectContaining({ type: 'text', text: expect.stringContaining('release checklist') }),
-        { type: 'image', mediaType: 'image/png', data: image },
-      ],
-    });
-    const detail = await jsonResponse<{ messages: Array<{ role: string; content?: Array<Record<string, unknown>> }> }>(
-      await fetch(`${url}/${session.id}`),
-    );
+    const content = (stored?.data as { content: Array<{ type: string; text?: string; fileName?: string; filePath?: string; data?: string; attachment?: { kind: string; name: string; mediaType: string; filePath: string } }> }).content;
+    expect(content[0]).toEqual({ type: 'text', text: 'Inspect these files' });
+    expect(JSON.stringify(content)).not.toContain('release checklist');
+    expect(content[1]?.text).toContain('notes.txt');
+    const notesPath = JSON.parse(content[1]!.text!.match(/: ("[^"]+")\./)![1]!) as string;
+    const pdfPath = content[2]!.attachment!.filePath;
+    const imagePath = content[3]!.attachment!.filePath;
+    expect(content[1]!.attachment).toEqual({ kind: 'file', name: 'notes.txt', mediaType: 'text/plain', filePath: notesPath });
+    expect(content[2]!.attachment).toEqual({ kind: 'file', name: 'report.pdf', mediaType: 'application/pdf', filePath: pdfPath });
+    expect(content[3]!.attachment).toEqual({ kind: 'image', name: 'screen.png', mediaType: 'image/png', filePath: imagePath });
+    expect(isAbsolute(notesPath)).toBe(true);
+    expect(await readFile(notesPath, 'utf8')).toBe('release checklist');
+    expect(await readFile(pdfPath, 'utf8')).toBe('pdf-bytes');
+    expect(content[4]).toEqual({ type: 'image', mediaType: 'image/png', data: image, fileName: 'screen.png', filePath: imagePath });
+    expect(await readFile(imagePath, 'utf8')).toBe('image-bytes');
+    const detail = await jsonResponse<{ messages: PublicMessage[] }>(await fetch(`${url}/${session.id}`));
+    const list = await jsonResponse<{ messages: PublicMessage[] }>(await fetch(`${url}/${session.id}/messages`));
+    expect(list.messages).toEqual(detail.messages);
     const user = detail.messages.find((message) => message.role === 'user');
-    expect(user?.content).toContainEqual({ type: 'image', mediaType: 'image/png', data: image });
+    expect(user?.content).toEqual(content);
+    const replayed = hydrateTranscript(detail.messages).transcript.find((item) => item.kind === 'user');
+    expect(replayed).toMatchObject({ kind: 'user', text: 'Inspect these files', attachments: [
+      { kind: 'file', name: 'notes.txt', mediaType: 'text/plain' },
+      { kind: 'file', name: 'report.pdf', mediaType: 'application/pdf' },
+      { kind: 'image', name: 'screen.png', mediaType: 'image/png', data: image },
+    ] });
+    if (replayed?.kind !== 'user') throw new Error('Expected replayed user message');
+    expect(userMessageCopyText(replayed.text, replayed.attachments)).toBe('Inspect these files');
+    const markup = renderToStaticMarkup(createElement(UserContent, { user: replayed }));
+    expect(markup).toContain('notes.txt');
+    expect(markup).toContain('report.pdf');
+    expect(markup).toContain(`data:image/png;base64,${image}`);
+    expect(markup).not.toContain('Untrusted attachment metadata');
+    for (const path of [notesPath, pdfPath, imagePath]) expect(markup).not.toContain(path);
+    const forked = await jsonResponse<{ session: { id: string } }>(await fetch(`${url}/${session.id}/fork`, jsonRequest({})));
+    expect((await fetch(`${url}/${session.id}`, { method: 'DELETE' })).status).toBe(200);
+    const fork = await jsonResponse<{ messages: Array<{ content?: Array<Record<string, unknown>> }> }>(await fetch(`${url}/${forked.session.id}`));
+    expect(JSON.stringify(fork.messages)).toContain(notesPath);
+    expect(isAbsolute(notesPath)).toBe(true);
+    expect(await readFile(notesPath, 'utf8')).toBe('release checklist');
 
     const invalid = await fetch(`${url}/${session.id}/messages`, jsonRequest({
       attachments: [{ kind: 'image', name: 'bad.svg', mediaType: 'image/svg+xml', data: image }],
     }));
     expect(invalid.status).toBe(400);
     expect((await fetch(`${url}/${session.id}/messages`, jsonRequest({ text: '   ' }))).status).toBe(400);
+  });
+
+  it('rejects invalid or unavailable attachment requests before creating files', async () => {
+    const { base, first } = await setup();
+    const url = sessionsUrl(base, first.id);
+    const { session } = await jsonResponse<{ session: { id: string } }>(await fetch(url, jsonRequest({})));
+    const file = { kind: 'file', name: '../secret.dsh', mimeType: 'application/octet-stream', data: 'YQ==' };
+    expect((await fetch(`${url}/missing/messages`, jsonRequest({ attachments: [file] }))).status).toBe(404);
+    expect((await fetch(`${url}/${session.id}/messages`, jsonRequest({ mode: 'steer', attachments: [file] }))).status).toBe(409);
+    for (const data of ['YQ', 'YR==', 'Y===', 'YQ==\n']) {
+      expect((await fetch(`${url}/${session.id}/messages`, jsonRequest({ attachments: [{ ...file, data }] }))).status).toBe(400);
+    }
+    await expect(readdir(join(first.path, '.omniagent'))).rejects.toMatchObject({ code: 'ENOENT' });
+  });
+
+  it('removes files when a turn fails before accepting its user message', async () => {
+    const { base, first } = await setup((id) => ({
+      id, interrupt() {}, async *send() { throw new Error('failed'); },
+    }));
+    const url = sessionsUrl(base, first.id);
+    const { session } = await jsonResponse<{ session: { id: string } }>(await fetch(url, jsonRequest({})));
+    const response = await fetch(`${url}/${session.id}/messages`, jsonRequest({
+      attachments: [{ kind: 'file', name: 'input.dsh', mimeType: 'application/octet-stream', data: 'YQ==' }],
+    }));
+    expect(await response.text()).toContain('turn.end');
+    await expect(readdir(join(first.path, '.omniagent'))).rejects.toMatchObject({ code: 'ENOENT' });
   });
 
   it('lists recent root sessions with the current workspace first and LIKE filtering', async () => {

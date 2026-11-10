@@ -17,6 +17,9 @@ import { ToolExecutor } from '../exec/executor';
 import type { AuditSink } from '../store/audit';
 import { digestArgs } from '../store/audit';
 import { compactMessages, estimateMessages } from '../context/compaction';
+import { contextBreakdown, contextHistoryHash } from '../context/projection';
+import { projectImageInput } from '../context/image-input';
+import { expandInitCommand } from '../session/init-command';
 
 /**
  * 主循环。
@@ -35,6 +38,7 @@ export type PreparedToolCall =
 export interface AgentLoopDeps {
   model: ModelClient;
   modelId: string;
+  imageInput?: boolean;
   system: string | (() => string);
   tools: ToolRegistry;
   /** Optional dynamic disclosure; execution still resolves through {@link tools}. */
@@ -55,6 +59,14 @@ export interface AgentLoopDeps {
   audit?: AuditSink;
 }
 
+export function projectCommandInput(messages: readonly Message[]): Message[] {
+  return messages.map((message) => {
+    if (message.role !== 'user' || !message.initCommand) return message;
+    const content = expandInitCommand(message.content);
+    return { role: 'user', content: content ?? message.content };
+  });
+}
+
 export const DEFAULT_MAX_STEPS = 25;
 
 export class AgentLoop {
@@ -66,6 +78,10 @@ export class AgentLoop {
     signal?: AbortSignal,
   ): AsyncGenerator<AgentEvent, Message[]> {
     const messages = [...history];
+    // The latest user message starts this turn; subsequent queued messages may
+    // include user steering that must also survive every compaction in this run.
+    const currentUserIndex = messages.findLastIndex((message) => message.role === 'user');
+    let protectedIndices = currentUserIndex < 0 ? [] : [currentUserIndex];
     const maxSteps = this.deps.maxSteps ?? DEFAULT_MAX_STEPS;
 
     for (let step = 0; step < maxSteps; step += 1) {
@@ -75,24 +91,32 @@ export class AgentLoop {
       }
 
       const queued = this.deps.takeQueuedMessages?.() ?? [];
-      if (queued.length > 0) messages.push(...queued);
+      if (queued.length > 0) {
+        queued.forEach((message, index) => {
+          if (message.role === 'user') protectedIndices.push(messages.length + index);
+        });
+        messages.push(...queued);
+      }
 
       yield { type: 'turn.start', step };
 
       const forceCompact = this.deps.takeForceCompact?.() === true;
       if (this.deps.contextWindowTokens !== undefined || forceCompact) {
-        const beforeTokens = estimateMessages(messages);
+        const beforeTokens = estimateMessages(projectImageInput(projectCommandInput(messages), this.deps.imageInput));
         const maxTokens = forceCompact
           ? Math.max(1, Math.floor(beforeTokens / 2))
           : this.deps.contextWindowTokens;
         if (maxTokens !== undefined) {
           const compacted = await compactMessages(messages, {
             maxTokens,
+            protectedIndices,
+            project: (history) => projectImageInput(projectCommandInput(history), this.deps.imageInput),
             ...(forceCompact || this.deps.retainContextTokens === undefined
               ? {}
               : { retainTokens: this.deps.retainContextTokens }),
           });
           if (compacted.compacted) {
+            protectedIndices = compacted.protectedIndices ?? [];
             messages.splice(0, messages.length, ...compacted.messages);
             yield { type: 'context.compacted', beforeTokens, afterTokens: compacted.afterTokens };
           }
@@ -105,19 +129,44 @@ export class AgentLoop {
         const request = {
           model: this.deps.modelId,
           system: typeof this.deps.system === 'function' ? this.deps.system() : this.deps.system,
-          messages,
+          messages: projectImageInput(projectCommandInput(messages), this.deps.imageInput),
           tools: this.deps.toolSpecs ? this.deps.toolSpecs() : this.deps.tools.specs(),
           ...(signal ? { signal } : {}),
         };
 
         let response: ModelResponse;
+        const requestStartedAt = performance.now();
         if (this.deps.model.stream) {
           response = yield* this.forwardStream(this.deps.model.stream(request));
         } else {
           response = await this.deps.model.complete(request);
         }
 
-        assistant = response.message;
+        const requestDurationMs = performance.now() - requestStartedAt;
+
+        // Some compatible endpoints synthesize zero when usage is absent. Do not
+        // treat that sentinel as a measured prompt size.
+        const usage = response.usage;
+        const inputTokens = response.contextInputTokens ?? usage?.inputTokens;
+        assistant = { ...response.message, requestDurationMs };
+        if (Number.isSafeInteger(inputTokens) && inputTokens >= 0
+          && Number.isSafeInteger(usage.outputTokens) && usage.outputTokens >= 0) {
+          const cachedInputTokens = usage.cachedInputTokens;
+          assistant.usage = { inputTokens, outputTokens: usage.outputTokens,
+            ...(Number.isSafeInteger(cachedInputTokens) && cachedInputTokens! >= 0 && cachedInputTokens! <= inputTokens
+              ? { cachedInputTokens } : {}) };
+        } else {
+          delete assistant.usage;
+        }
+        if (assistant.usage && inputTokens > 0) {
+          assistant.contextSample = {
+            provider: this.deps.model.name, model: request.model,
+            historyHash: contextHistoryHash(request.messages),
+            ...contextBreakdown(request.system, request.tools, request.messages),
+          };
+        } else {
+          delete assistant.contextSample;
+        }
         stopReason = response.stopReason;
       } catch (error) {
         // 中断不是错误：UI 主动 abort 时模型流会抛 AbortError，别报成 error 事件。

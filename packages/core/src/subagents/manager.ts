@@ -150,7 +150,7 @@ export class SubagentManager implements SubagentService {
         : parent.cwd;
       const agentId = request.agent ?? parent.agent?.id ?? 'default';
       const binding = this.selectBinding(request);
-      const runtime = await this.options.runtime.resolve({ cwd, agentId, binding, isRoot: false });
+      const runtime = await this.options.runtime.resolve({ cwd, workspace, agentId, binding, isRoot: false });
 
       const depth = parent.depth + 1;
       const handle = await this.options.store.create({
@@ -516,6 +516,7 @@ export class SubagentManager implements SubagentService {
     if (bindingProjection.status !== 'selected') throw new Error(`Agent ${targetId} has no valid model selection`);
     const runtime = await this.options.runtime.resolve({
       cwd: handle.header.cwd,
+      workspace: handle.header.workspace,
       agentId: agentProjection.agent,
       binding: bindingProjection.binding,
       isRoot: false,

@@ -4,6 +4,7 @@ import {
   AssistantMessageSchema, ContentPartSchema, DshReplaySchema, MessageSchema, ProviderReplaySchema, userMessage,
 } from '../domain/message';
 import type { SessionEvent } from './types';
+import { isInitCommand } from './init-command';
 
 export type PublicHistoryMessage = Message & { messageId: string; timestamp: number };
 
@@ -32,7 +33,12 @@ export function projectMessages(events: readonly SessionEvent[]): Message[] {
   for (const event of events) {
     if (event.type === 'message/user' || event.type === 'user/message' || event.type === 'message/notice') {
       const message = readUserMessage(event.data);
-      if (message) messages.push(message);
+      if (message) {
+        const initCommand = event.type !== 'message/notice' && message.content.length === 1
+          && message.content[0]?.type === 'text' && message.content[0].attachment === undefined
+          && isInitCommand(message.content[0].text);
+        messages.push(initCommand ? { ...message, initCommand: true } : message);
+      }
     } else if (event.type === 'subagent/notice') {
       const message = readSubagentNotice(event.data);
       if (message) messages.push(message);
@@ -69,8 +75,10 @@ export function safePublicMessages(messages: readonly Message[]): Message[] {
             ...(call.raw === undefined ? {} : { raw: call.raw }),
           })),
           ...(message.usage === undefined ? {} : {
-            usage: { inputTokens: message.usage.inputTokens, outputTokens: message.usage.outputTokens },
+            usage: { inputTokens: message.usage.inputTokens, outputTokens: message.usage.outputTokens,
+              ...(message.usage.cachedInputTokens === undefined ? {} : { cachedInputTokens: message.usage.cachedInputTokens }) },
           }),
+          ...(message.requestDurationMs === undefined ? {} : { requestDurationMs: message.requestDurationMs }),
         };
       case 'tool':
         return {
@@ -90,8 +98,13 @@ export function safePublicMessages(messages: readonly Message[]): Message[] {
 
 function publicContentPart(part: ContentPart): ContentPart {
   return part.type === 'text'
-    ? { type: 'text', text: part.text }
-    : { type: 'image', mediaType: part.mediaType, data: part.data };
+    ? { type: 'text', text: part.text, ...(part.attachment === undefined ? {} : { attachment: {
+      kind: part.attachment.kind, name: part.attachment.name,
+      mediaType: part.attachment.mediaType, filePath: part.attachment.filePath,
+    } }) }
+    : { type: 'image', mediaType: part.mediaType, data: part.data,
+      ...(part.fileName === undefined ? {} : { fileName: part.fileName }),
+      ...(part.filePath === undefined ? {} : { filePath: part.filePath }) };
 }
 
 function readAssistantMessage(data: unknown): AssistantMessage | undefined {
@@ -99,13 +112,29 @@ function readAssistantMessage(data: unknown): AssistantMessage | undefined {
   const record = data as Record<string, unknown>;
   const dshReplay = DshReplaySchema.safeParse(record.dshReplay);
   const providerReplay = ProviderReplaySchema.safeParse(record.providerReplay);
+  const contextSample = AssistantMessageSchema.shape.contextSample.safeParse(record.contextSample);
+  const requestDurationMs = AssistantMessageSchema.shape.requestDurationMs.safeParse(record.requestDurationMs);
+  const usage = typeof record.usage === 'object' && record.usage !== null && !Array.isArray(record.usage)
+    ? { ...record.usage as Record<string, unknown> } : undefined;
+  if (usage !== undefined) {
+    const cached = usage.cachedInputTokens;
+    if (!Number.isSafeInteger(cached) || (cached as number) < 0 ||
+        typeof usage.inputTokens !== 'number' || (cached as number) > usage.inputTokens) {
+      delete usage.cachedInputTokens;
+    }
+  }
   const parsed = AssistantMessageSchema.safeParse({
     ...record,
+    ...(usage === undefined ? {} : { usage }),
+    requestDurationMs: requestDurationMs.success ? requestDurationMs.data : undefined,
+    contextSample: contextSample.success ? contextSample.data : undefined,
     dshReplay: dshReplay.success ? dshReplay.data : undefined,
     providerReplay: providerReplay.success ? providerReplay.data : undefined,
   });
   if (!parsed.success) return undefined;
   // Avoid adding absent optional properties to legacy messages.
+  if (parsed.data.requestDurationMs === undefined) delete parsed.data.requestDurationMs;
+  if (parsed.data.contextSample === undefined) delete parsed.data.contextSample;
   if (parsed.data.dshReplay === undefined) delete parsed.data.dshReplay;
   if (parsed.data.providerReplay === undefined) delete parsed.data.providerReplay;
   return parsed.data;

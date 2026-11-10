@@ -1,4 +1,5 @@
 import { createHash } from 'node:crypto';
+import { readWorkspaceInstructions } from './workspace-instructions';
 import type { AgentProfileDefinition, ModelCapabilities, ModelDescriptor } from '../config/models';
 import type { ConfigStore } from '../config/store';
 import type { AgentDefinition, AgentCatalog } from '../agents';
@@ -53,6 +54,8 @@ export interface SessionModeOverride {
 
 export interface ResolveSessionInput {
   cwd: string;
+  /** Workspace root, which may differ from a subagent's working directory. */
+  workspace?: string;
   agentId: string;
   binding?: ModelBinding;
   isRoot: boolean;
@@ -115,6 +118,7 @@ export class RuntimeResolver {
     const skills = skillsForSelector(input.mode?.skills ?? profile.skills);
 
     const warnings = [...configSnapshot.catalog.warnings];
+    const instructions = readWorkspaceInstructions(input.workspace ?? input.cwd, warnings);
     let availableSkills: SkillSummary[] = [];
     try {
       const discovered = await discoverSkills({ workspace: input.cwd });
@@ -169,6 +173,7 @@ export class RuntimeResolver {
       skills === '*' ? '*' : [...skills].sort().join(','),
       availableSkills.map((skill) => skill.name).sort().join(','),
       String(todoAllowParallelInProgress),
+      instructions,
     ]);
 
     return {

@@ -351,12 +351,15 @@ export interface ToolResult {
 export interface ContentPart {
   type: 'text';
   text: string;
+  attachment?: { kind: 'file' | 'image'; name: string; mediaType: string; filePath: string };
 }
 
 export interface ImageContentPart {
   type: 'image';
   mediaType: string;
   data: string;
+  fileName?: string;
+  filePath?: string;
 }
 
 export interface WorkspaceFileEntry {
@@ -472,12 +475,56 @@ export function validateScheduleHistory(value: unknown): ScheduleDeliveryHistory
   return page as unknown as ScheduleDeliveryHistoryPage;
 }
 
-export interface SendAttachment {
-  kind: 'image' | 'text';
-  name: string;
-  mediaType: string;
-  data?: string;
-  text?: string;
+export type SendAttachment =
+  | { kind: 'image' | 'file'; name: string; mimeType: string; data: string }
+  // Queues created by older versions may still contain inline text attachments.
+  | { kind: 'text'; name: string; mediaType: string; text: string };
+
+export const MAX_ATTACHMENTS = 8;
+export const MAX_ATTACHMENT_BYTES = 8 * 1024 * 1024;
+// Leave room for base64 expansion, JSON metadata and ordinary message text.
+export const MAX_TOTAL_ATTACHMENT_BYTES = 20 * 1024 * 1024;
+export const MAX_MESSAGE_BODY_BYTES = 32 * 1024 * 1024;
+
+export function attachmentLimitError(size: number, total: number, count: number): 'count' | 'size' | 'total' | null {
+  if (count >= MAX_ATTACHMENTS) return 'count';
+  if (size > MAX_ATTACHMENT_BYTES) return 'size';
+  if (total + size > MAX_TOTAL_ATTACHMENT_BYTES) return 'total';
+  return null;
+}
+
+/** Normalize older persisted images without changing legacy text attachments. */
+export function restoreSendAttachment(value: unknown): SendAttachment | null {
+  if (typeof value !== 'object' || value === null) return null;
+  const item = value as Record<string, unknown>;
+  if (typeof item.name !== 'string') return null;
+  if (item.kind === 'text' && typeof item.mediaType === 'string' && typeof item.text === 'string') {
+    return { kind: 'text', name: item.name, mediaType: item.mediaType, text: item.text };
+  }
+  const mimeType = typeof item.mimeType === 'string' ? item.mimeType : item.mediaType;
+  if ((item.kind === 'image' || item.kind === 'file') && typeof mimeType === 'string' && typeof item.data === 'string') {
+    return { kind: item.kind, name: item.name, mimeType, data: item.data };
+  }
+  return null;
+}
+
+/** Convert legacy queued text to the file protocol without losing UTF-8 bytes. */
+export function toWireAttachments(attachments: readonly SendAttachment[]): Array<Exclude<SendAttachment, { kind: 'text' }>> {
+  return attachments.map((item) => {
+    if (item.kind !== 'text') return item;
+    const bytes = new TextEncoder().encode(item.text);
+    let binary = '';
+    for (let offset = 0; offset < bytes.length; offset += 0x8000) {
+      binary += String.fromCharCode(...bytes.subarray(offset, offset + 0x8000));
+    }
+    return { kind: 'file', name: item.name, mimeType: item.mediaType || 'text/plain', data: btoa(binary) };
+  });
+}
+
+/** Check the exact UTF-8 request size, including text, metadata, and base64. */
+export function messageBodyFits(text: string, attachments: readonly SendAttachment[], steer = false): boolean {
+  const body = { text, ...(attachments.length === 0 ? {} : { attachments: toWireAttachments(attachments) }), ...(steer ? { mode: 'steer' } : {}) };
+  return new TextEncoder().encode(JSON.stringify(body)).byteLength <= MAX_MESSAGE_BODY_BYTES;
 }
 
 export interface PublicMessage {
@@ -492,6 +539,13 @@ export interface PublicMessage {
 export interface ContextEstimate {
   estimatedMessageTokens?: number;
   window?: { tokens: number; source: 'config' | 'model' };
+  modelWindow?: number;
+  projection?: {
+    projectedTokens: number;
+    source: 'usage' | 'estimate';
+    inputTokens?: number;
+    breakdown: { systemTokens: number; toolsTokens: number; messageTokens: number };
+  };
 }
 
 export function validateContextEstimate(value: unknown): ContextEstimate {
@@ -509,9 +563,26 @@ export function validateContextEstimate(value: unknown): ContextEstimate {
       || (candidate.source !== 'config' && candidate.source !== 'model')) throw new Error('Invalid context response.');
     window = { tokens: candidate.tokens as number, source: candidate.source };
   }
+  const nonnegative = (value: unknown): value is number => Number.isSafeInteger(value) && (value as number) >= 0;
+  if (data.modelWindow !== undefined && (!nonnegative(data.modelWindow) || data.modelWindow === 0)) throw new Error('Invalid context response.');
+  let projection: ContextEstimate['projection'];
+  if (data.projection !== undefined) {
+    if (typeof data.projection !== 'object' || data.projection === null || Array.isArray(data.projection)) throw new Error('Invalid context response.');
+    const p = data.projection as Record<string, unknown>;
+    if (typeof p.breakdown !== 'object' || p.breakdown === null || Array.isArray(p.breakdown)) throw new Error('Invalid context response.');
+    const b = p.breakdown as Record<string, unknown>;
+    if (!nonnegative(p.projectedTokens) || (p.source !== 'usage' && p.source !== 'estimate')
+      || (p.inputTokens !== undefined && !nonnegative(p.inputTokens))
+      || !nonnegative(b.systemTokens) || !nonnegative(b.toolsTokens) || !nonnegative(b.messageTokens)) throw new Error('Invalid context response.');
+    projection = { projectedTokens: p.projectedTokens, source: p.source,
+      ...(p.inputTokens === undefined ? {} : { inputTokens: p.inputTokens }),
+      breakdown: { systemTokens: b.systemTokens, toolsTokens: b.toolsTokens, messageTokens: b.messageTokens } };
+  }
   return {
     ...(data.estimatedMessageTokens === undefined ? {} : { estimatedMessageTokens: data.estimatedMessageTokens as number }),
     ...(window === undefined ? {} : { window }),
+    ...(data.modelWindow === undefined ? {} : { modelWindow: data.modelWindow as number }),
+    ...(projection === undefined ? {} : { projection }),
   };
 }
 

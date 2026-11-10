@@ -59,6 +59,12 @@ async function setup() {
   return { first, second, store, url };
 }
 
+async function start(url: string) {
+  const response = await fetch(`${url}/messages`, { ...post({ text: 'write the file' }), headers: { 'content-type': 'application/json', prefer: 'respond-async' } });
+  expect(response.status).toBe(202);
+  return reader(await fetch(`${url}/follow`));
+}
+
 function reader(response: Response) {
   const source = response.body!.getReader();
   const decoder = new TextDecoder();
@@ -84,8 +90,13 @@ function reader(response: Response) {
 
 async function until(stream: ReturnType<typeof reader>, type: string) {
   const events: Record<string, unknown>[] = [];
+  const queued: Record<string, unknown>[] = [];
   while (true) {
-    const event = await stream.next();
+    const event = queued.shift() ?? await stream.next();
+    if (event.type === 'run.snapshot') {
+      queued.push(...event.events as Record<string, unknown>[]);
+      continue;
+    }
     events.push(event);
     if (event.type === type) return { event, events };
     if (event.type === 'turn.end') throw new Error(`Turn ended before ${type}: ${JSON.stringify(events)}`);
@@ -95,9 +106,7 @@ async function until(stream: ReturnType<typeof reader>, type: string) {
 describe('workspace-scoped approval API', () => {
   it('approves only the requested call once and rejects cross-workspace or duplicate responses', async () => {
     const { first, second, store, url } = await setup();
-    const response = await fetch(`${url(first.id)}/messages`, post({ text: 'write the file' }));
-    expect(response.status).toBe(200);
-    const stream = reader(response);
+    const stream = await start(url(first.id));
     try {
       const { event } = await until(stream, 'permission.requested');
       const requestId = event.requestId;
@@ -123,7 +132,7 @@ describe('workspace-scoped approval API', () => {
 
   it('rejects a request without running its tool', async () => {
     const { first, url } = await setup();
-    const stream = reader(await fetch(`${url(first.id)}/messages`, post({ text: 'write the file' })));
+    const stream = await start(url(first.id));
     try {
       const { event } = await until(stream, 'permission.requested');
       expect((await fetch(`${url(first.id)}/approvals`, post({ requestId: event.requestId, decision: 'deny' }))).status).toBe(200);
@@ -137,7 +146,7 @@ describe('workspace-scoped approval API', () => {
 
   it('invalidates a pending request immediately on interruption', async () => {
     const { first, url } = await setup();
-    const stream = reader(await fetch(`${url(first.id)}/messages`, post({ text: 'write the file' })));
+    const stream = await start(url(first.id));
     try {
       const { event } = await until(stream, 'permission.requested');
       expect((await fetch(`${url(first.id)}/interrupt`, post({}))).status).toBe(200);
@@ -149,14 +158,19 @@ describe('workspace-scoped approval API', () => {
     } finally { await stream.cancel(); }
   });
 
-  it('invalidates a pending request when the stream disconnects', async () => {
+  it('keeps a pending request alive across stream disconnection', async () => {
     const { first, store, url } = await setup();
-    const stream = reader(await fetch(`${url(first.id)}/messages`, post({ text: 'write the file' })));
+    const stream = await start(url(first.id));
     const { event } = await until(stream, 'permission.requested');
     await stream.cancel();
-    await expect.poll(async () => (await store.open(first.path, 'same')).events.some((item) => item.type === 'trace/turn.end'), { timeout: 2000 }).toBe(true);
-    expect((await fetch(`${url(first.id)}/approvals`, post({ requestId: event.requestId, decision: 'allow' }))).status).toBe(409);
-    expect((await store.open(first.path, 'same')).events.some((item) => item.type === 'message/tool-result')).toBe(false);
-    expect(await readFile(join(first.path, 'visible.txt'), 'utf8')).toBe(originalContent);
+    const resumed = reader(await fetch(`${url(first.id)}/follow`));
+    const snapshot = await resumed.next();
+    expect(snapshot.type).toBe('run.snapshot');
+    expect(snapshot.events).toEqual(expect.arrayContaining([expect.objectContaining({ type: 'permission.requested', requestId: event.requestId })]));
+    expect((await fetch(`${url(first.id)}/approvals`, post({ requestId: event.requestId, decision: 'allow' }))).status).toBe(200);
+    await until(resumed, 'turn.end');
+    await resumed.cancel();
+    expect((await store.open(first.path, 'same')).events.some((item) => item.type === 'trace/turn.end')).toBe(true);
+    expect(await readFile(join(first.path, 'visible.txt'), 'utf8')).toBe(newContent);
   });
 });

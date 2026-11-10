@@ -61,9 +61,28 @@ describe('DeepSeek Messages model', () => {
     expect(result.deltas).toEqual([{ type: 'text', text: 'Hello' }]);
     expect(result.result).toMatchObject({
       message: { role: 'assistant', content: [{ type: 'text', text: 'Hello' }], toolCalls: [] },
-      usage: { inputTokens: 10, outputTokens: 7 },
+      usage: { inputTokens: 10, outputTokens: 7, cachedInputTokens: 3 },
       dshUsage: { inputTokens: 10, outputTokens: 7, cacheReadTokens: 3 }, stopReason: 'end_turn',
     });
+  });
+
+  it('counts cached input for context without serializing metering metadata', async () => {
+    const result = await collect(model(textEvents()).stream(request));
+    expect(result.result.contextInputTokens).toBe(13);
+    const message = { ...result.result.message, usage: { inputTokens: 13, outputTokens: 7 },
+      contextSample: { provider: 'deepseek-official', model: 'deepseek-flash', historyHash: 'hash',
+        systemTokens: 1, toolsTokens: 2, messageTokens: 3 } };
+    const serialized = JSON.stringify(serializeDshRequest({ ...request, messages: [...request.messages, message] }));
+    expect(serialized).not.toContain('contextSample');
+    expect(serialized).not.toContain('inputTokens');
+    expect(serialized).not.toContain('historyHash');
+  });
+
+  it('does not report prompt occupancy when input usage is missing', async () => {
+    const events = textEvents();
+    events[0] = event('message_start', { message: { usage: { cache_read_input_tokens: 3 } } });
+    const result = await collect(model(events).stream(request));
+    expect(result.result.contextInputTokens).toBeUndefined();
   });
 
   it('forwards reasoning chunks through the plain stream', async () => {

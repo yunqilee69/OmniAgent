@@ -9,6 +9,7 @@ import {
   RuntimeResolver,
   SessionStore,
   createInitialDshPermissionEvent,
+  Session,
   projectAgentSelection,
   projectModeSelection,
   projectModelSelection,
@@ -148,6 +149,11 @@ async function setup() {
         ...(model.reasoning?.default === undefined ? {} : { defaultReasoningEffort: model.reasoning.default }),
       }));
     },
+    replayContext(workspace, handle, permissions, resolved) {
+      if (!resolved.model) return undefined;
+      return new Session({ cwd: workspace.path, session: handle, dshPermissions: permissions,
+        model: resolved.model, modelId: resolved.modelId, system: resolved.system, agent: resolved.sessionAgent }).contextProjection();
+    },
     createRuntimeSession(_workspace, handle, _permissions, resolved) {
       captured.push(resolved);
       return {
@@ -170,6 +176,40 @@ async function create(url: string, body: unknown = {}): Promise<{ sessionUrl: st
 }
 
 describe('configured session API', () => {
+  it('invalidates a cached session when workspace AGENTS.md changes', async () => {
+    const { url, path, captured } = await setup();
+    const { sessionUrl } = await create(url);
+    const send = async () => {
+      const response = await fetch(`${sessionUrl}/messages`, post({ text: 'go' }));
+      expect(response.status).toBe(200);
+      await response.text();
+    };
+    await send();
+    await send();
+    expect(captured).toHaveLength(1);
+    await writeFile(join(path, 'AGENTS.md'), 'NEW RULE');
+    await send();
+    expect(captured).toHaveLength(2);
+    expect(captured[1]!.revision).not.toBe(captured[0]!.revision);
+    await writeFile(join(path, 'AGENTS.md'), 'UPDATED RULE');
+    await send();
+    expect(captured).toHaveLength(3);
+    expect(captured[2]!.revision).not.toBe(captured[1]!.revision);
+  });
+  it('rebuilds a read-only projection for a replayed session', async () => {
+    const { url, store, workspace, captured } = await setup();
+    const { sessionUrl, id } = await create(url);
+    const handle = await store.open(workspace.path, id);
+    await handle.append({ type: 'message/user', data: { text: 'history' } });
+    const before = handle.events.length;
+    const result = await (await fetch(`${sessionUrl}/context`)).json() as { projection: { source: string; breakdown: { messageTokens: number } }; modelWindow: number };
+    expect(result.projection.source).toBe('estimate');
+    expect(result.projection.breakdown.messageTokens).toBeGreaterThan(0);
+    expect(result.modelWindow).toBe(1_048_576);
+    expect((await store.open(workspace.path, id)).events).toHaveLength(before);
+    expect(captured).toHaveLength(0);
+  });
+
   it('reports the effective compaction window and its source', async () => {
     const { url, configDir } = await setup();
     const { sessionUrl } = await create(url);

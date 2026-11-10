@@ -343,9 +343,10 @@ describe('Session', () => {
     const root = await mkdtemp(join(tmpdir(), 'omniagent-session-compact-'));
     const handle = await new SessionStore(root).create({ id: 'agent', workspace: root, cwd: root });
     const session = new Session({
-      cwd: root, model: new FakeModel([textResponse('done')]), dshPermissions: snapshot('read-only'),
+      cwd: root, model: new FakeModel([textResponse('first'), textResponse('done')]), dshPermissions: snapshot('read-only'),
       approve: async () => 'deny', contextWindowTokens: 8, retainContextTokens: 2, session: handle,
     });
+    await collect(session.send('earlier sensitive conversation '.repeat(30)));
     let compacted = false;
     for await (const event of session.send('sensitive conversation '.repeat(30))) {
       if (event.type !== 'context.compacted') continue;
@@ -406,6 +407,34 @@ describe('Session', () => {
     expect(JSON.stringify(trace?.data)).not.toContain('secret-content');
     expect(JSON.stringify(trace?.data).length).toBeLessThan(256);
     expect(fresh.events.at(-1)).toMatchObject({ type: 'trace/turn.end', data: { reason: 'error' } });
+  });
+
+  it('remembers an interrupt while the user message is being persisted', async () => {
+    const root = await temporaryWorkspace('omniagent-session-start-interrupt-');
+    const store = new SessionStore(root);
+    const handle = await store.create({ id: 'agent', workspace: root, cwd: root });
+    const writing = deferred<void>();
+    const release = deferred<void>();
+    const append = handle.append.bind(handle);
+    vi.spyOn(handle, 'append').mockImplementation(async (event) => {
+      if (event.type === 'message/user' && typeof event.data === 'object' && event.data !== null
+        && 'text' in event.data && event.data.text === 'first') {
+        writing.resolve();
+        await release.promise;
+      }
+      return append(event);
+    });
+    const model = new FakeModel([textResponse('second reply')]);
+    const session = new Session({ cwd: root, model, session: handle, dshPermissions: snapshot('read-only') });
+    const first = collect(session.send('first'));
+    await writing.promise;
+    session.interrupt();
+    release.resolve();
+    expect((await first).at(-1)).toEqual({ type: 'turn.end', reason: 'interrupted' });
+    expect(model.requests).toHaveLength(0);
+    expect(projectMessages((await store.open(root, 'agent')).events)).toMatchObject([{ role: 'user' }]);
+    expect((await collect(session.send('second'))).at(-1)).toEqual({ type: 'turn.end', reason: 'end_turn' });
+    expect(model.requests).toHaveLength(1);
   });
 
   it('interrupts an active model request and allows a fresh turn', async () => {

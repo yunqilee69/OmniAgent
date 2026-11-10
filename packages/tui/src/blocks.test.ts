@@ -115,6 +115,7 @@ describe('状态行', () => {
 describe('帮助', () => {
   it('groups commands and keeps every command documented', () => {
     const commands = helpGroups().flatMap((group) => group.rows.map((row) => row.command));
+    expect(commands).toContain('/init [notes]');
     expect(commands).toContain('/color [on|off]');
     expect(commands).toContain('/think [full|compact|off]');
     expect(new Set(commands).size).toBe(commands.length);

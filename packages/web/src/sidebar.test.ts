@@ -27,14 +27,14 @@ function renderSidebar(overrides: Partial<ReturnType<AppStore['getSnapshot']>> =
 afterEach(() => { vi.restoreAllMocks(); });
 
 describe('workspace sidebar', () => {
-  it('renders every workspace and only the active workspace sessions', () => {
+  it('renders non-default workspaces and default sessions in the Tasks section', () => {
     const html = renderSidebar();
     expect(html).toContain('Alpha session');
-    expect(html).toContain('title="/a">Alpha');
+    expect(html).not.toContain('title="/a">Alpha');
     expect(html).toContain('title="/b">Beta');
-    expect(html).toContain('New session in Alpha');
+    expect(html).not.toContain('New session in Alpha');
     expect(html).toContain('New session in Beta');
-    expect(html.match(/aria-expanded="true"/g)).toHaveLength(1);
+    expect(html.indexOf('>Tasks<')).toBeGreaterThan(html.indexOf('title="/b">Beta'));
   });
 
   it.each([
@@ -44,7 +44,7 @@ describe('workspace sidebar', () => {
     { workspaceError: 'Workspace list failed' },
   ])('keeps all workspace rows visible during loading and errors: %o', (state) => {
     const html = renderSidebar(state);
-    expect(html).toContain('title="/a">Alpha');
+    expect(html).not.toContain('title="/a">Alpha');
     expect(html).toContain('title="/b">Beta');
     if (state.sessionsLoading || state.sessionError) expect(html).not.toContain('Alpha session');
     if (state.sessionError) expect(html).toContain(state.sessionError);
@@ -86,32 +86,37 @@ describe('workspace sidebar', () => {
       const select = vi.spyOn(testStore, 'selectSession').mockImplementation((id, workspaceId) => {
         state = { ...state, workspaceId: workspaceId!, sessionId: id, sessions: state.sessionsByWorkspace[workspaceId as 'a' | 'b'].sessions };
       });
-      type Node = { props?: { children?: unknown; role?: string; title?: string; onClick?: () => void; 'aria-expanded'?: boolean; 'aria-selected'?: boolean } };
+      type Node = { type?: unknown; props?: { children?: unknown; role?: string; title?: string; className?: string; items?: { id: string; label?: string }[]; onClick?: () => void; onSelect?: (id: string) => void; 'aria-expanded'?: boolean; 'aria-selected'?: boolean } };
       const nodes = (value: unknown): Node[] => {
         if (Array.isArray(value)) return value.flatMap(nodes);
         if (typeof value !== 'object' || value === null) return [];
         const node = value as Node;
         return [node, ...nodes(node.props?.children)];
       };
-      const render = () => { cursor = 0; return nodes(TestSidebar({ drawer: false, onClose: () => {} })); };
+      const browse = vi.fn();
+      const render = () => { cursor = 0; return nodes(TestSidebar({ drawer: false, onClose: () => {}, onBrowseWorkspace: browse })); };
       const row = (tree: Node[], title: string) => tree.find((node) => node.props?.role === 'treeitem' && node.props.title === title)!;
       let tree = render();
       const workspaceRow = (items: Node[], path: string) => items.find((node) => node.props?.role === 'treeitem' && nodes(node.props.children).some((child) => child.props?.title === path))!;
-      expect(workspaceRow(tree, '/a').props?.['aria-expanded']).toBe(true);
+      expect(workspaceRow(tree, '/b').props?.['aria-expanded']).toBe(false);
+      const menu = nodes(workspaceRow(tree, '/b')).find((node) => node.props?.items?.some((item) => item.id === 'browse-workspace'))!;
+      expect(menu.props?.items?.map((item) => item.id)).toEqual(['browse-workspace', 'remove-workspace']);
+      menu.props?.onSelect?.('browse-workspace');
+      expect(browse).toHaveBeenCalledWith('b');
+      expect(nodes(workspaceRow(tree, '/b')).find((node) => node.type === 'svg')?.props?.className).toBeUndefined();
       workspaceRow(tree, '/b').props?.onClick?.();
       expect(load).toHaveBeenCalledTimes(1);
       expect(load).toHaveBeenCalledWith('b', false);
       state = { ...state, sessionsByWorkspace: { ...state.sessionsByWorkspace, b: { ...state.sessionsByWorkspace.b, loaded: true } } };
       tree = render();
-      expect(workspaceRow(tree, '/a').props?.['aria-expanded']).toBe(true);
       expect(workspaceRow(tree, '/b').props?.['aria-expanded']).toBe(true);
-      const beta = tree.filter((node) => node.props?.role === 'treeitem' && node.props.title === 'shared')[1]!;
+      expect(nodes(workspaceRow(tree, '/b')).find((node) => node.type === 'svg')?.props?.className).toBeTruthy();
+      const beta = tree.filter((node) => node.props?.role === 'treeitem' && node.props.title === 'shared')[0]!;
       beta.props?.onClick?.();
       expect(select).toHaveBeenCalledWith('shared', 'b');
       tree = render();
-      expect(workspaceRow(tree, '/a').props?.['aria-expanded']).toBe(true);
       expect(workspaceRow(tree, '/b').props?.['aria-expanded']).toBe(true);
-      expect(row(tree, 'shared').props?.['aria-selected']).toBe(false);
+      expect(row(tree, 'shared').props?.['aria-selected']).toBe(true);
       workspaceRow(tree, '/b').props?.onClick?.();
       tree = render();
       expect(workspaceRow(tree, '/b').props?.['aria-expanded']).toBe(false);
@@ -119,10 +124,34 @@ describe('workspace sidebar', () => {
       tree = render();
       expect(workspaceRow(tree, '/b').props?.['aria-expanded']).toBe(true);
       expect(load).toHaveBeenCalledTimes(1);
+      state = { ...state, sessionsByWorkspace: { ...state.sessionsByWorkspace, a: { ...state.sessionsByWorkspace.a, loaded: false } } };
+      render();
+      expect(load).toHaveBeenCalledWith('a', false);
     } finally {
       vi.doUnmock('react');
       vi.resetModules();
     }
+  });
+
+  it('renders cached default sessions below an active workspace with localized labels', () => {
+    const html = renderSidebar({
+      locale: 'zh',
+      workspaceId: 'b',
+      sessions: [{ id: 'beta-session', title: 'Beta session' }],
+      sessionsByWorkspace: {
+        a: { sessions: [{ id: 'alpha-session', title: 'Alpha session' }], loading: false, error: '', loaded: true },
+      },
+    });
+    expect(html.indexOf('>任务<')).toBeGreaterThan(html.indexOf('Beta session'));
+    expect(html.indexOf('Alpha session')).toBeGreaterThan(html.indexOf('>任务<'));
+    expect(html).not.toContain('title="/a">Alpha');
+  });
+
+  it('does not render the local draft as a workspace session', () => {
+    const entries = { [JSON.stringify(['a', 'draft-local'])]: { draft: true } } as ReturnType<AppStore['getSnapshot']>['entries'];
+    const html = renderSidebar({ sessionId: 'draft-local', sessions: [], entries });
+    expect(html).toContain('No sessions yet.');
+    expect(html).not.toContain('aria-selected="true"');
   });
 
   it('shows the newly active workspace sessions after a switch', () => {
@@ -132,7 +161,7 @@ describe('workspace sidebar', () => {
     });
     expect(html).toContain('Beta session');
     expect(html).not.toContain('Alpha session');
-    expect(html).toContain('title="/a">Alpha');
+    expect(html).not.toContain('title="/a">Alpha');
     expect(html).toContain('title="/b">Beta');
   });
 });

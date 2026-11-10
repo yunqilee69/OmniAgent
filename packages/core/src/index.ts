@@ -391,6 +391,7 @@ export type { Config, LoadedConfig, ProviderConfig } from './config/load';
 
 // 组合根
 export { DEFAULT_SYSTEM_PROMPT, Session } from './session';
+export { isInitCommand } from './session/init-command';
 export type { SessionOptions } from './session';
 
 // 调度任务

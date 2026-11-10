@@ -13,6 +13,7 @@ import {
   Button,
   IconAgentPresetOutlineRegular,
   IconBrowseOutlineRegular,
+  IconCheckOutlineRegular,
   IconChecklistOutlineRegular,
   IconChevronDownOutlineRegular,
   IconChevronRightOutlineRegular,
@@ -41,12 +42,13 @@ import {
   type MenuEntry,
 } from '../../vendor/primitives/index.ts';
 import {
+  attachmentLimitError,
   isPermissionPreset,
+  MAX_ATTACHMENTS,
   permissionPresets,
   validateRecentSessions,
   workspaceApiPath,
   type AgentSkill,
-  type ModelBinding,
   type PermissionPreset,
   type RecentSessionSummary,
   type SendAttachment,
@@ -54,10 +56,11 @@ import {
 } from '../lib/wire.ts';
 import { authFetch } from '../lib/auth.ts';
 import { store, useApp, useSessionEntry, sessionKey } from '../lib/store.ts';
-import type { SessionEntry } from '../lib/store.ts';
+import type { BusySendMode, SessionEntry } from '../lib/store.ts';
 import {
   detectTrigger,
   directoryReference,
+  enterGesture,
   fileReference,
   replaceRange,
   skillReference,
@@ -66,7 +69,7 @@ import { rankLike } from '../lib/matcher.ts';
 import { relativeDate } from '../lib/trajectory.ts';
 import { translator, type Translate } from '../lib/i18n.ts';
 import { SelectMenu } from './SelectMenu.tsx';
-import { ModelPicker } from './ModelPicker.tsx';
+import { concreteModelBinding, ModelPicker } from './ModelPicker.tsx';
 import { ContextMeter } from './ContextMeter.tsx';
 import { SessionStats } from './SessionStats.tsx';
 import { permissionIcon } from './permission-icon.tsx';
@@ -78,28 +81,7 @@ import todoCss from '../styles/dsh/todo-panel.module.css';
 import heroCss from '../styles/dsh/hero-shell.module.css';
 import appCss from '../styles/app.module.css';
 
-const MAX_ATTACHMENTS = 8;
-const MAX_IMAGE_BYTES = 8 * 1024 * 1024;
-const MAX_TEXT_BYTES = 256 * 1024;
-const TEXT_EXTENSIONS = new Set([
-  'txt', 'md', 'markdown', 'mdx', 'json', 'jsonl', 'yaml', 'yml', 'toml', 'xml', 'csv', 'tsv', 'log',
-  'html', 'htm', 'css', 'scss', 'sass', 'less', 'js', 'mjs', 'cjs', 'jsx', 'ts', 'tsx', 'py', 'rb',
-  'go', 'rs', 'java', 'kt', 'kts', 'c', 'h', 'cc', 'cpp', 'hpp', 'cs', 'php', 'swift', 'sh', 'bash',
-  'zsh', 'fish', 'sql', 'graphql', 'gql', 'proto', 'ini', 'cfg', 'conf', 'env',
-]);
-
-type BusySendMode = 'steer' | 'queue';
-const BUSY_SEND_STORAGE_KEY = 'omniagent.busySend';
-
-function initialBusySendMode(): BusySendMode {
-  try {
-    return localStorage.getItem(BUSY_SEND_STORAGE_KEY) === 'steer' ? 'steer' : 'queue';
-  } catch {
-    return 'queue';
-  }
-}
-
-interface Attachment extends SendAttachment { id: string; size: number; preview?: string }
+type Attachment = Exclude<SendAttachment, { kind: 'text' }> & { id: string; size: number; preview?: string };
 interface Option {
   id: string;
   label: string;
@@ -109,6 +91,7 @@ interface Option {
   icon?: ReactNode;
   disabled?: boolean;
   keepOpen?: boolean;
+  current?: boolean;
   run: () => void;
 }
 type Picker = 'permission' | 'agent' | 'model' | 'export';
@@ -145,12 +128,6 @@ function imageMediaType(file: File): string | undefined {
   return undefined;
 }
 
-function isTextFile(file: File): boolean {
-  return file.type.startsWith('text/')
-    || ['application/json', 'application/xml', 'application/javascript', 'application/x-yaml'].includes(file.type)
-    || TEXT_EXTENSIONS.has(extensionOf(file.name));
-}
-
 function readBase64(file: File): Promise<string> {
   return new Promise((resolve, reject) => {
     const reader = new FileReader();
@@ -165,10 +142,10 @@ function readBase64(file: File): Promise<string> {
   });
 }
 
-function TodoDock({ entry, t }: { entry: SessionEntry | null; t: Translate }): ReactNode {
+export function TodoDock({ entry, t }: { entry: Pick<SessionEntry, 'todos' | 'run' | 'running'> | null; t: Translate }): ReactNode {
   const [collapsed, setCollapsed] = useState(true);
   const todos = entry?.todos ?? null;
-  if (todos === null || todos.length === 0) return null;
+  if ((entry?.run === undefined && entry?.running !== true) || todos === null || todos.length === 0) return null;
   const done = todos.filter((item) => item.status === 'completed').length;
   const active = todos.filter((item) => item.status === 'in_progress').length;
   const pending = todos.length - done - active;
@@ -227,13 +204,19 @@ export function Composer({ hero = false }: { hero?: boolean }): ReactNode {
       ? app.modeOptions.skills
       : app.modeOptions.skills.filter((skill) => selector.includes(skill.name));
   }, [draftSession, draftMode, entry, app.modes, app.modeOptions.skills]);
-  const key = app.workspaceId !== null && app.sessionId !== null ? sessionKey(app.workspaceId, app.sessionId) : 'new';
+  const key = draftSession && app.sessionId !== null
+    ? app.sessionId
+    : app.workspaceId !== null && app.sessionId !== null ? sessionKey(app.workspaceId, app.sessionId) : 'new';
   const drafts = useRef(new Map<string, string>());
+  const currentKey = useRef(key);
+  currentKey.current = key;
   const [draft, setDraft] = useState(drafts.current.get(key) ?? '');
   const [caret, setCaret] = useState(0);
   const [risk, setRisk] = useState<{ preset: PermissionPreset; acknowledged: boolean } | null>(null);
   const [attachments, setAttachments] = useState<Attachment[]>([]);
   const [attachmentError, setAttachmentError] = useState('');
+  const [readingFiles, setReadingFiles] = useState(false);
+  const readingFilesRef = useRef(false);
   const [plusOpen, setPlusOpen] = useState(false);
   const [picker, setPicker] = useState<Picker | null>(null);
   const [files, setFiles] = useState<WorkspaceFileEntry[]>([]);
@@ -244,7 +227,9 @@ export function Composer({ hero = false }: { hero?: boolean }): ReactNode {
   const [recentError, setRecentError] = useState('');
   const [active, setActive] = useState(0);
   const [dismissed, setDismissed] = useState<string | null>(null);
-  const [busySend, setBusySend] = useState<BusySendMode>(initialBusySendMode);
+  const busySend = app.busySend;
+  const [sending, setSending] = useState(false);
+  const sendingRef = useRef(false);
   const textarea = useRef<HTMLTextAreaElement | null>(null);
   const card = useRef<HTMLDivElement | null>(null);
   const plusButton = useRef<HTMLButtonElement | null>(null);
@@ -277,7 +262,15 @@ export function Composer({ hero = false }: { hero?: boolean }): ReactNode {
     element.style.height = `${Math.min(element.scrollHeight, 336)}px`;
   }, [draft, key]);
 
-  useEffect(() => { setActive(0); }, [menuKey]);
+  useEffect(() => {
+    if (mode === 'model') {
+      const resolved = entry?.resolvedModel;
+      setActive(Math.max(0, app.models.findIndex((model) =>
+        model.provider === resolved?.provider && model.model === resolved.model)));
+    } else {
+      setActive(0);
+    }
+  }, [menuKey, mode, app.models, entry?.resolvedModel]);
 
   useEffect(() => {
     if (mode === 'skill' && draftSession && app.modeOptions.skills.length === 0) void store.loadModeOptions();
@@ -391,11 +384,11 @@ export function Composer({ hero = false }: { hero?: boolean }): ReactNode {
   const busy = run !== undefined || entry?.running === true;
   const saving = entry?.permissionSaving === true || entry?.agentSaving === true || entry?.modelSaving === true || entry?.planSaving === true;
   const selectedPermission = isPermissionPreset(entry?.permission) ? entry.permission : null;
-  const canSend = available && !saving && selectedPermission !== null
+  const canSend = available && !saving && !sending && !readingFiles && selectedPermission !== null
     && entry?.agent !== null && entry?.binding !== null && (draft.trim() !== '' || attachments.length > 0)
     && (run === undefined || (run.stopping !== true && run.finishing !== true));
   const locked = !available || busy || saving;
-  const attachLocked = !available || saving;
+  const attachLocked = !available || saving || sending || readingFiles;
   const placeholder = app.workspaceId === null ? t('Select a workspace')
     : creating ? t('Create a session to begin')
       : app.sessionId === null ? t('Select a session to begin')
@@ -442,6 +435,7 @@ export function Composer({ hero = false }: { hero?: boolean }): ReactNode {
   const commands = useMemo<Command[]>(() => [
     { id: 'new', label: t('New session'), description: t('Create a new session in this workspace.'), icon: <IconNewChatOutlineRegular />, available: app.workspaceId !== null, run: () => { void store.startDraftSession(); } },
     { id: 'plan', label: t('Toggle plan mode'), description: t('Toggle plan mode for this session.'), icon: <IconPlanOutlineRegular />, available: app.sessionId !== null && entry?.plan.active !== undefined, run: () => store.togglePlan() },
+    { id: 'init', label: t('Initialize workspace instructions'), description: t('Create or update AGENTS.md for this workspace.'), icon: <IconBrowseOutlineRegular />, available: app.sessionId !== null && app.workspaceId !== null, insert: '/init ' },
     {
       id: 'goal',
       label: t('Set a goal'),
@@ -464,7 +458,7 @@ export function Composer({ hero = false }: { hero?: boolean }): ReactNode {
     { id: 'settings', label: t('Settings'), description: t('Open the settings page.'), icon: <IconSettingsOutlineRegular />, available: true, run: () => store.openSettings() },
     { id: 'export', label: t('Export session'), description: t('Copy the session transcript as Markdown.'), icon: <IconDownloadOutlineRegular />, available: app.sessionId !== null, picker: 'export' },
     { id: 'clear', label: t('Clear draft'), description: t('Clear the composer draft.'), icon: <IconTrashOutlineRegular />, available: true, run: () => { setDraftValue(''); setAttachments([]); setAttachmentError(''); } },
-    { id: 'help', label: t('Show commands'), description: t('Available commands: /new, /plan, /goal, /compact, /permission, /agent, /model, /settings, /export, /clear'), icon: <IconBrowseOutlineRegular />, available: true, run: () => store.showAlert(t('Available commands: /new, /plan, /goal, /compact, /permission, /agent, /model, /settings, /export, /clear')) },
+    { id: 'help', label: t('Show commands'), description: t('Available commands: /new, /plan, /init, /goal, /compact, /permission, /agent, /model, /settings, /export, /clear'), icon: <IconBrowseOutlineRegular />, available: true, run: () => store.showAlert(t('Available commands: /new, /plan, /init, /goal, /compact, /permission, /agent, /model, /settings, /export, /clear')) },
   ], [app.workspaceId, app.sessionId, entry?.mode, entry?.plan.active, entry?.draft, selectedPermission, t]);
 
   const selectCommand = (command: Command): void => {
@@ -537,7 +531,7 @@ export function Composer({ hero = false }: { hero?: boolean }): ReactNode {
         ? [{
           id: 'attach-files',
           label: t('Add files'),
-          description: t('Attach images or text files to the next message.'),
+          description: t('Attach files to the next message.'),
           group: t('Files'),
           icon: <IconPaperclipOutlineRegular />,
           run: () => fileInput.current?.click(),
@@ -601,28 +595,19 @@ export function Composer({ hero = false }: { hero?: boolean }): ReactNode {
       }));
     }
     if (mode === 'model') {
-      const items: Option[] = [{
-        id: 'model:agent', label: t('Follow agent'), group: t('Models'), icon: <IconSparkleRegular />,
-        description: t('Use the model configured by the agent role.'),
-        run: () => {
-          const binding: ModelBinding = { version: 2, kind: 'agent' };
-          if (app.sessionId === null) store.setCreationBinding(binding);
-          else void store.saveSessionModel(binding);
-        },
-      }];
+      const items: Option[] = [];
       for (const model of app.models) {
-        const effort = model.defaultReasoningEffort;
+        const resolved = entry?.resolvedModel ?? null;
+        const binding = concreteModelBinding(model, resolved);
+        const effort = binding.kind === 'model' ? binding.reasoningEffort : undefined;
         items.push({
           id: `model:${model.provider}/${model.model}`,
+          current: resolved?.provider === model.provider && resolved.model === model.model,
           label: model.name,
           description: `${model.provider}/${model.model}${effort === undefined ? '' : ` · ${effort}`}`,
           group: t('Models'),
           icon: <IconSparkleRegular />,
           run: () => {
-            const binding: ModelBinding = {
-              version: 2, kind: 'model', provider: model.provider, model: model.model,
-              ...(effort === undefined ? {} : { reasoningEffort: effort }),
-            };
             if (app.sessionId === null) store.setCreationBinding(binding);
             else void store.saveSessionModel(binding);
           },
@@ -638,7 +623,7 @@ export function Composer({ hero = false }: { hero?: boolean }): ReactNode {
     }
     return [];
   }, [mode, files, commands, trigger?.query, trigger?.start, trigger?.end, recentSessions, availableSkills,
-    app.agents, app.models, app.sessionId, app.workspaceId, app.locale, selectedPermission, t]);
+    app.agents, app.models, app.sessionId, app.workspaceId, app.locale, entry?.resolvedModel, selectedPermission, t]);
 
   const bounded = Math.min(active, Math.max(0, options.length - 1));
   const choose = (option: Option): void => {
@@ -652,30 +637,40 @@ export function Composer({ hero = false }: { hero?: boolean }): ReactNode {
     option.run();
   };
 
-  const submit = async (): Promise<void> => {
+  const submit = async (complementary = false): Promise<void> => {
     const text = draft.trim();
-    if ((text === '' && attachments.length === 0) || !canSend) return;
-    const payload: SendAttachment[] = attachments.map(({ kind, name, mediaType, data, text: content }) => ({
-      kind, name, mediaType,
-      ...(data === undefined ? {} : { data }),
-      ...(content === undefined ? {} : { text: content }),
-    }));
-    const accepted = busy
-      ? busySend === 'queue'
-        ? store.queueMessage(text, payload)
-        : await store.steerMessage(text, payload)
-      : await store.sendMessage(text, payload);
-    if (accepted) {
-      setDraftValue('');
-      setAttachments([]);
-      setAttachmentError('');
-      setCaret(0);
+    if ((text === '' && attachments.length === 0) || !canSend || sendingRef.current) return;
+    const payload: SendAttachment[] = attachments.map(({ kind, name, mimeType, data }) => ({ kind, name, mimeType, data }));
+    const sendMode: BusySendMode = complementary ? (busySend === 'queue' ? 'steer' : 'queue') : busySend;
+    sendingRef.current = true;
+    setSending(true);
+    try {
+      const accepted = busy
+        ? sendMode === 'queue'
+          ? await store.queueMessage(text, payload)
+          : await store.steerMessage(text, payload)
+        : await store.sendMessage(text, payload);
+      if (accepted) {
+        drafts.current.delete(key);
+        if (currentKey.current === key) {
+          setDraft('');
+          setAttachments([]);
+          setAttachmentError('');
+          setCaret(0);
+        }
+      }
+    } finally {
+      sendingRef.current = false;
+      setSending(false);
     }
     textarea.current?.focus();
   };
 
   const onKeyDown = (event: KeyboardEvent<HTMLTextAreaElement>): void => {
     if (event.nativeEvent.isComposing) return;
+    const gesture = enterGesture(event);
+    if (event.key === 'Enter' && gesture === null && (event.altKey || event.getModifierState('AltGraph')
+      || (event.ctrlKey && event.metaKey) || (event.shiftKey && (event.ctrlKey || event.metaKey)))) return;
     if (menuOpen) {
       if (event.key === 'Escape') {
         event.preventDefault();
@@ -695,52 +690,69 @@ export function Composer({ hero = false }: { hero?: boolean }): ReactNode {
         choose(options[bounded]!);
         return;
       }
-      if (event.key === 'Enter' && !event.shiftKey && options.length > 0) {
+      if (gesture === 'plain' && options.length > 0) {
         event.preventDefault();
         choose(options[bounded]!);
         return;
       }
     }
-    if (event.key === 'Enter' && !event.shiftKey) {
+    if (gesture !== null) {
       event.preventDefault();
-      void submit();
+      const complementary = gesture === 'complementary';
+      if (complementary && busy && draft.trim() === '' && attachments.length === 0) {
+        void store.steerQueuedMessages();
+      } else {
+        void submit(complementary);
+      }
     }
   };
 
   const addFiles = async (picked: readonly File[]): Promise<void> => {
-    if (picked.length === 0) return;
+    if (picked.length === 0 || readingFilesRef.current) return;
+    readingFilesRef.current = true;
+    setReadingFiles(true);
     setAttachmentError('');
     const next: Attachment[] = [];
     const errors: string[] = [];
-    for (const file of picked) {
-      if (attachments.length + next.length >= MAX_ATTACHMENTS) {
-        errors.push(t('Attachments are limited to {count} files.', { count: MAX_ATTACHMENTS }));
-        break;
-      }
-      const mediaType = imageMediaType(file);
-      try {
-        if (mediaType !== undefined) {
-          if (file.size > MAX_IMAGE_BYTES) {
-            errors.push(t('Images must be smaller than {size} MB.', { size: 8 }));
-            continue;
-          }
-          const data = await readBase64(file);
-          next.push({ id: `${Date.now()}-${next.length}`, kind: 'image', name: file.name, mediaType, data, preview: `data:${mediaType};base64,${data}`, size: file.size });
-        } else if (isTextFile(file)) {
-          if (file.size > MAX_TEXT_BYTES) {
-            errors.push(t('Text files must be smaller than {size} KB.', { size: 256 }));
-            continue;
-          }
-          next.push({ id: `${Date.now()}-${next.length}`, kind: 'text', name: file.name, mediaType: file.type || 'text/plain', text: await file.text(), size: file.size });
-        } else {
-          errors.push(t('Only images and text-like files can be attached.'));
+    let total = attachments.reduce((sum, item) => sum + item.size, 0);
+    try {
+      for (const file of picked) {
+        const limit = attachmentLimitError(file.size, total, attachments.length + next.length);
+        if (limit === 'count') {
+          errors.push(t('Attachments are limited to {count} files.', { count: MAX_ATTACHMENTS }));
+          break;
         }
-      } catch (error) {
-        errors.push(t('Attachment failed: {message}', { message: (error as Error).message }));
+        if (limit === 'size') {
+          errors.push(t('Each file must be at most {size} MiB.', { size: 8 }));
+          continue;
+        }
+        if (limit === 'total') {
+          errors.push(t('Attachments must total at most {size} MiB.', { size: 20 }));
+          continue;
+        }
+        try {
+          const imageType = imageMediaType(file);
+          if (imageType !== undefined && file.size === 0) {
+            errors.push(t('Images cannot be empty.'));
+            continue;
+          }
+          const mimeType = imageType ?? (file.type || 'application/octet-stream');
+          const data = await readBase64(file);
+          next.push({ id: `${Date.now()}-${next.length}`, kind: imageType === undefined ? 'file' : 'image', name: file.name, mimeType, data,
+            ...(imageType === undefined ? {} : { preview: `data:${mimeType};base64,${data}` }), size: file.size });
+          total += file.size;
+        } catch (error) {
+          errors.push(t('Attachment failed: {message}', { message: (error as Error).message }));
+        }
       }
+      if (currentKey.current === key) {
+        if (next.length > 0) setAttachments((current) => [...current, ...next]);
+        if (errors.length > 0) setAttachmentError([...new Set(errors)].join(' '));
+      }
+    } finally {
+      readingFilesRef.current = false;
+      setReadingFiles(false);
     }
-    if (next.length > 0) setAttachments((current) => [...current, ...next]);
-    if (errors.length > 0) setAttachmentError([...new Set(errors)].join(' '));
   };
 
   const agentValue = entry?.agent?.id ?? (creating ? app.creationAgent : '');
@@ -767,6 +779,7 @@ export function Composer({ hero = false }: { hero?: boolean }): ReactNode {
         <div className={clsx(heroCss.workspaceRow, appCss.heroChips)}>
           <SelectMenu
             value={app.workspaceId}
+            disabled={draftSession && (entry?.run !== undefined || entry?.running === true)}
             items={app.workspaces.map((item) => ({
               id: item.id,
               label: item.name || item.path || item.id,
@@ -844,6 +857,7 @@ export function Composer({ hero = false }: { hero?: boolean }): ReactNode {
                       <span className={menuCss.itemName}>{option.label}</span>
                       {option.alias !== undefined && <span className={menuCss.itemAlias}>{option.alias}</span>}
                       {option.description !== undefined && <span className={menuCss.itemDescription}>{option.description}</span>}
+                      {option.current === true && <span className={menuCss.trailing}><IconCheckOutlineRegular aria-hidden /></span>}
                       {option.keepOpen === true && <span className={menuCss.trailing} aria-hidden><IconChevronRightOutlineRegular /></span>}
                     </button>
                   </div>
@@ -882,7 +896,7 @@ export function Composer({ hero = false }: { hero?: boolean }): ReactNode {
         <div className={css.grow}>
           {draft === '' && attachments.length === 0 && <span className={css.placeholder}>{placeholder}</span>}
           <textarea ref={textarea} className={clsx(css.input, appCss.composerInput)} value={draft} rows={1}
-            disabled={!available && !creating} placeholder="" aria-label={placeholder}
+            disabled={!available && !creating} readOnly={sending} placeholder="" aria-label={placeholder}
             aria-autocomplete="list" aria-expanded={menuOpen} aria-controls={menuOpen ? 'composer-menu' : undefined}
             onChange={(event: ChangeEvent<HTMLTextAreaElement>) => {
               setDraftValue(event.target.value);
@@ -969,6 +983,7 @@ export function Composer({ hero = false }: { hero?: boolean }): ReactNode {
                     roles={app.roles}
                     resolved={entry?.resolvedModel ?? null}
                     allowRoles={false}
+                    concreteOnly
                     onSelect={(next) => {
                       if (app.sessionId === null) store.setCreationBinding(next);
                       else void store.saveSessionModel(next);
@@ -993,9 +1008,7 @@ export function Composer({ hero = false }: { hero?: boolean }): ReactNode {
                       { id: 'steer', label: t('Send into the current reply'), icon: <IconSendOutlineRegular /> },
                     ]}
                     onSelect={(id) => {
-                      const mode: BusySendMode = id === 'steer' ? 'steer' : 'queue';
-                      setBusySend(mode);
-                      try { localStorage.setItem(BUSY_SEND_STORAGE_KEY, mode); } catch { /* ignore */ }
+                      store.setBusySend(id === 'steer' ? 'steer' : 'queue');
                     }}
                     ariaLabel={t('Send behavior')}
                     title={busySend === 'queue'
@@ -1061,9 +1074,16 @@ export function Composer({ hero = false }: { hero?: boolean }): ReactNode {
             <ul className={appCss.queueList}>
               {entry.queued.map((item) => (
                 <li key={item.id} className={appCss.queueItem}>
-                  <span className={appCss.queueText} title={item.text}>
+                  <span className={appCss.queueText} title={item.delivery === 'uncertain' ? t('Delivery status unknown. Check the conversation before removing this message.') : item.text}>
                     {item.text.trim() === '' ? item.attachments.map((attachment) => attachment.name).join(', ') : item.text}
+                    {item.delivery === 'uncertain' ? ` (${t('Delivery status unknown')})` : ''}
                   </span>
+                  <button type="button" className={appCss.queueRemove}
+                    aria-label={t('Steer queued message')} title={t('Steer queued message')}
+                    disabled={item.delivery === 'uncertain' || !busy || run?.stopping === true || run?.finishing === true}
+                    onClick={() => { void store.steerQueuedMessage(item.id); }}>
+                    <IconSendOutlineRegular size={12} />
+                  </button>
                   <button type="button" className={appCss.queueRemove}
                     aria-label={t('Remove queued message')}
                     onClick={() => { store.removeQueuedMessage(item.id); }}>

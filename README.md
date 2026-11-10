@@ -20,7 +20,11 @@ pnpm typecheck
 
 Linux 上，`pnpm install` 后以及 TUI、Web 服务启动时会尝试准备受限 shell 沙盒；其他平台跳过 Linux 准备。准备可能需要可用的系统包管理器及交互授权，具体取决于本机环境，自动准备不保证成功。失败时终端会输出原因，安装或应用仍可继续；没有可用受限后端时，受限 shell 仍会拒绝执行，不会自动降级为无沙盒。使用 `--ignore-scripts` 跳过安装脚本时，应用启动仍会尝试准备。
 
-TUI 支持 `/help`、`/sessions`、`/resume <id>`、`/new`、`/plan [on|off]`、`/todos`、`/permission [preset]`、`/agent [id]`、`/model [序号|agent|role <id>|<provider> <model>]`、`/think [full|compact|off]`、`/verbose`、`/color [on|off]` 和 `/clear`。模型默认跟随当前智能体的角色，因此修改角色指向的模型后，所有引用该角色的智能体都会在下一回合切换。
+TUI 支持 `/help`、`/sessions`、`/resume <id>`、`/new`、`/init [notes]`、`/plan [on|off]`、`/todos`、`/permission [preset]`、`/agent [id]`、`/model [序号|agent|role <id>|<provider> <model>]`、`/think [full|compact|off]`、`/verbose`、`/color [on|off]` 和 `/clear`。模型默认跟随当前智能体的角色，因此修改角色指向的模型后，所有引用该角色的智能体都会在下一回合切换。
+
+在 TUI 或 Web 会话中输入 `/init [notes]`，可请求智能体先检查工作区，再创建或更新工作区根目录的 `AGENTS.md`；可选的 notes 用于补充关注点。该命令通过普通会话发送，实际读取和写入仍受当前权限预设及审批约束，不保证一定写入成功。
+
+智能体每次请求模型时自动读取工作区根目录的 `AGENTS.md`，文件更新会在后续请求生效。仅加载不超过 32 KiB 的 UTF-8 普通文件，不跟随该文件的符号链接；不自动加载全局或子目录中的指令文件。工作区指令不能覆盖更高优先级的系统和开发者指令。
 
 TUI 的排版只有一条规则：**四类内容各有自己的左缘**，所以长对话不用逐字读也能分出层次。
 

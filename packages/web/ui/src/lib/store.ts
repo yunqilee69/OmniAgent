@@ -4,6 +4,9 @@ import {
   api as wireApi,
   isPermissionPreset,
   jsonOptions,
+  messageBodyFits,
+  restoreSendAttachment,
+  toWireAttachments,
   normalizePlan,
   normalizeTodos,
   permissionPresets,
@@ -60,6 +63,7 @@ import {
   type Workspace,
 } from './wire.ts';
 import { DEFAULT_LOCALE, normalizeLocale, translator, type Locale, type Translate } from './i18n.ts';
+import { emptyMetrics, validateSessionMetrics, type SessionMetrics } from './session-metrics.ts';
 import {
   applyAgentEvent,
   createLiveState,
@@ -71,6 +75,7 @@ import {
 
 export type Theme = 'light' | 'dark';
 export type ProcessDisplay = 'collapsed' | 'expanded';
+export type BusySendMode = 'queue' | 'steer';
 export type Tab = 'conversation' | 'automation' | 'settings';
 
 export interface QueuedMessage {
@@ -78,6 +83,7 @@ export interface QueuedMessage {
   text: string;
   attachments: SendAttachment[];
   createdAt: number;
+  delivery?: 'uncertain';
 }
 
 export interface SessionEntry {
@@ -109,6 +115,7 @@ export interface SessionEntry {
   events: unknown[];
   audit: unknown[];
   trajectory: unknown;
+  metrics: SessionMetrics | null;
   loaded: boolean;
   loading: boolean;
   error: string;
@@ -138,6 +145,7 @@ export interface AppState {
   theme: Theme;
   locale: Locale;
   processDisplay: ProcessDisplay;
+  busySend: BusySendMode;
   permissions: PermissionSettings | null;
   permissionsLoading: boolean;
   permissionsSaving: boolean;
@@ -196,14 +204,6 @@ function storageSet(key: string, value: string): void {
   }
 }
 
-function storageRemove(key: string): void {
-  try {
-    localStorage.removeItem(key);
-  } catch {
-    // Persistence is best-effort.
-  }
-}
-
 export function sessionKey(workspaceId: string, sessionId: string): string {
   return JSON.stringify([workspaceId, sessionId]);
 }
@@ -212,20 +212,18 @@ function queueStorageKey(workspaceId: string, sessionId: string): string {
   return `omniagent.queue:${workspaceId}:${sessionId}`;
 }
 
-function readQueued(workspaceId: string, sessionId: string): QueuedMessage[] {
+function readQueued(workspaceId: string, sessionId: string, strict = false): QueuedMessage[] {
   try {
-    const parsed: unknown = JSON.parse(storageGet(queueStorageKey(workspaceId, sessionId)) ?? '[]');
-    if (!Array.isArray(parsed)) return [];
+    const parsed: unknown = JSON.parse(localStorage.getItem(queueStorageKey(workspaceId, sessionId)) ?? '[]');
+    if (!Array.isArray(parsed)) throw new Error('Invalid queue data');
     return parsed.flatMap((item): QueuedMessage[] => {
       if (typeof item !== 'object' || item === null) return [];
-      const record = item as { id?: unknown; text?: unknown; attachments?: unknown; createdAt?: unknown };
+      const record = item as { id?: unknown; text?: unknown; attachments?: unknown; createdAt?: unknown; delivery?: unknown };
       if (typeof record.id !== 'string' || typeof record.text !== 'string') return [];
       const attachments = Array.isArray(record.attachments)
-        ? record.attachments.filter((entry): entry is SendAttachment => {
-          if (typeof entry !== 'object' || entry === null) return false;
-          const value = entry as { kind?: unknown; name?: unknown; mediaType?: unknown };
-          return (value.kind === 'image' || value.kind === 'text')
-            && typeof value.name === 'string' && typeof value.mediaType === 'string';
+        ? record.attachments.flatMap((entry): SendAttachment[] => {
+          const attachment = restoreSendAttachment(entry);
+          return attachment === null ? [] : [attachment];
         })
         : [];
       return [{
@@ -233,15 +231,22 @@ function readQueued(workspaceId: string, sessionId: string): QueuedMessage[] {
         text: record.text,
         attachments: attachments.map((entry) => ({ ...entry })),
         createdAt: typeof record.createdAt === 'number' ? record.createdAt : Date.now(),
+        ...(record.delivery === 'uncertain' ? { delivery: 'uncertain' as const } : {}),
       }];
     });
-  } catch {
+  } catch (error) {
+    if (strict) throw error;
     return [];
   }
 }
 
-function writeQueued(workspaceId: string, sessionId: string, items: readonly QueuedMessage[]): void {
-  storageSet(queueStorageKey(workspaceId, sessionId), JSON.stringify(items));
+function writeQueued(workspaceId: string, sessionId: string, items: readonly QueuedMessage[]): boolean {
+  try {
+    localStorage.setItem(queueStorageKey(workspaceId, sessionId), JSON.stringify(items));
+    return true;
+  } catch {
+    return false;
+  }
 }
 
 /** Pinned sessions lead the sidebar; within each group the newest activity wins. */
@@ -279,6 +284,7 @@ function emptyEntry(): SessionEntry {
     events: [],
     audit: [],
     trajectory: null,
+    metrics: null,
     loaded: false,
     loading: false,
     error: '',
@@ -357,11 +363,11 @@ function resolveBindingModel(
   } else {
     provider = binding.provider;
     modelId = binding.model;
-    const model = models.find((item) => item.provider === binding.provider && item.model === binding.model);
-    effort = binding.reasoningEffort ?? model?.defaultReasoningEffort;
+    effort = binding.reasoningEffort;
   }
   if (provider === undefined || modelId === undefined) return null;
   const summary = models.find((item) => item.provider === provider && item.model === modelId);
+  effort ??= summary?.defaultReasoningEffort;
   return {
     provider,
     model: modelId,
@@ -401,6 +407,7 @@ export class AppStore {
     theme: initialTheme(),
     locale: initialLocale(),
     processDisplay: storageGet('omniagent.processDisplay') === 'expanded' ? 'expanded' : 'collapsed',
+    busySend: storageGet('omniagent.busySend') === 'steer' ? 'steer' : 'queue',
     permissions: null,
     permissionsLoading: true,
     permissionsSaving: false,
@@ -449,16 +456,67 @@ export class AppStore {
   private draftSequence = 0;
   private draftRequest = 0;
   private readonly runningPolls = new Map<string, ReturnType<typeof setTimeout>>();
+  private discoveryTimer?: ReturnType<typeof setTimeout>;
+  private readonly observers = new Map<string, AbortController>();
+  private readonly followBases = new Map<string, { transcript: TranscriptItem[]; turns: TurnMeta[]; metrics?: SessionMetrics }>();
+  private readonly followEvents = new Map<string, unknown[]>();
   private readonly flushingQueues = new Set<string>();
   private readonly liveRuns = new Map<string, LiveTurnState>();
   private disposed = false;
 
-  constructor(private readonly restoreQueued = true) {}
+  constructor(private readonly restoreQueued = true) {
+    if (typeof window !== 'undefined') window.addEventListener('storage', this.onQueueStorage);
+  }
+
+  private readonly onQueueStorage = (event: StorageEvent): void => {
+    if (event.key !== null && !event.key.startsWith('omniagent.queue:')) return;
+    for (const key of Object.keys(this.state.entries)) {
+      const [workspaceId, sessionId] = JSON.parse(key) as [string, string];
+      if (event.key !== null && event.key !== queueStorageKey(workspaceId, sessionId)) continue;
+      try {
+        const queued = readQueued(workspaceId, sessionId, true);
+        this.patchEntry(key, { queued });
+        if (queued.length > 0) void this.flushQueue(workspaceId, sessionId);
+      } catch {
+        // Never replace a usable snapshot with an unreadable storage value.
+      }
+    }
+  };
+
+  private async queueLock<T>(workspaceId: string, sessionId: string, kind: 'data' | 'delivery', action: () => Promise<T> | T): Promise<T> {
+    if (typeof navigator === 'undefined' || navigator.locks === undefined || typeof navigator.locks.request !== 'function') {
+      throw new Error('Queue unavailable: browser locking is not supported.');
+    }
+    return navigator.locks.request(`omniagent.queue.${kind}:${sessionKey(workspaceId, sessionId)}`, async () => {
+      if (this.disposed) throw new Error('Workspace closed.');
+      return action();
+    });
+  }
+
+  private async updateQueue<T>(workspaceId: string, sessionId: string, update: (items: QueuedMessage[]) => { items: QueuedMessage[]; result: T; write?: boolean }): Promise<T> {
+    return this.queueLock(workspaceId, sessionId, 'data', () => {
+      const current = readQueued(workspaceId, sessionId, true);
+      const { items, result, write = true } = update(current);
+      if (write && !writeQueued(workspaceId, sessionId, items)) throw new Error('Could not save the queue. Browser storage may be full.');
+      this.patchEntry(sessionKey(workspaceId, sessionId), { queued: items });
+      return result;
+    });
+  }
+
+  private queueError(error: unknown): void {
+    if (!this.disposed) this.showAlert((error as Error).message || 'Queue unavailable.');
+  }
 
   dispose(): void {
+    if (typeof window !== 'undefined') window.removeEventListener('storage', this.onQueueStorage);
     this.disposed = true;
     for (const timer of this.runningPolls.values()) clearTimeout(timer);
     this.runningPolls.clear();
+    if (this.discoveryTimer !== undefined) clearTimeout(this.discoveryTimer);
+    for (const observer of this.observers.values()) observer.abort();
+    this.observers.clear();
+    this.followBases.clear();
+    this.followEvents.clear();
     this.liveRuns.clear();
     this.listeners.clear();
   }
@@ -739,6 +797,11 @@ export class AppStore {
   setProcessDisplay(display: ProcessDisplay): void {
     storageSet('omniagent.processDisplay', display);
     this.patch({ processDisplay: display });
+  }
+
+  setBusySend(mode: BusySendMode): void {
+    storageSet('omniagent.busySend', mode);
+    this.patch({ busySend: mode });
   }
 
   /** Choose the agent a new session starts from. */
@@ -1052,6 +1115,23 @@ export class AppStore {
     void this.loadMcpServers();
     void this.loadModes();
     await this.loadWorkspaces();
+    this.scheduleDiscovery();
+  }
+
+  private scheduleDiscovery(): void {
+    if (this.disposed || this.discoveryTimer !== undefined) return;
+    this.discoveryTimer = setTimeout(() => {
+      this.discoveryTimer = undefined;
+      const { workspaceId, sessionId } = this.state;
+      if (workspaceId !== null && sessionId !== null) {
+        const entry = this.state.entries[sessionKey(workspaceId, sessionId)];
+        if (entry?.loaded && !entry.draft && !entry.loading && entry.run === undefined) {
+          void this.loadDetail(workspaceId, sessionId, false, true);
+        }
+      }
+      this.scheduleDiscovery();
+    }, 3000);
+    (this.discoveryTimer as { unref?: () => void }).unref?.();
   }
 
   async loadWorkspaces(preferredId?: string): Promise<void> {
@@ -1260,13 +1340,17 @@ export class AppStore {
       return false;
     }
     try {
-      await this.api(sessionApiPath(workspaceId, id), { method: 'DELETE' });
+      await this.queueLock(workspaceId, id, 'delivery', async () => {
+        await this.api(sessionApiPath(workspaceId, id), { method: 'DELETE' });
+        await this.queueLock(workspaceId, id, 'data', () => {
+          if (typeof localStorage !== 'undefined') localStorage.removeItem(queueStorageKey(workspaceId, id));
+        });
+      });
       const sessions = (this.state.sessionsByWorkspace[workspaceId]?.sessions ?? []).filter((session) => session.id !== id);
       const entries = { ...this.state.entries };
       delete entries[key];
       this.clearRunningPoll(key);
       this.liveRuns.delete(key);
-      storageRemove(queueStorageKey(workspaceId, id));
       const selected = { ...this.state.selectedByWorkspace };
       if (selected[workspaceId] === id) {
         if (sessions[0] === undefined) delete selected[workspaceId];
@@ -1290,15 +1374,15 @@ export class AppStore {
     }
   }
 
-  async loadDetail(workspaceId: string, sessionId: string, reconcile = false): Promise<boolean> {
+  async loadDetail(workspaceId: string, sessionId: string, reconcile = false, silent = false): Promise<boolean> {
     const key = sessionKey(workspaceId, sessionId);
     const entry = this.getEntry(workspaceId, sessionId);
     if (entry.draft || (entry.run !== undefined && !reconcile) || entry.permissionSaving || entry.agentSaving || entry.modelSaving) return false;
     const request = ++entry.request;
-    this.patchEntry(key, { loading: true, error: '' });
+    if (!silent) this.patchEntry(key, { loading: true, error: '' });
     try {
       const body = await this.api<Record<string, unknown>>(sessionApiPath(workspaceId, sessionId));
-      if (this.state.entries[key]?.request !== request) return false;
+      if (this.state.entries[key]?.request !== request || (silent && this.state.entries[key]?.run !== undefined)) return false;
       if (typeof body.permission !== 'object' || body.permission === null
         || !Object.hasOwn(body.permission, 'preset')
         || ((body.permission as { preset?: unknown }).preset !== null
@@ -1333,6 +1417,7 @@ export class AppStore {
         events,
         audit: Array.isArray(body.audit) ? body.audit : [],
         trajectory: body.trajectory ?? null,
+        metrics: validateSessionMetrics(body.metrics),
         loaded: true,
         loading: false,
         error: '',
@@ -1340,7 +1425,7 @@ export class AppStore {
         running: body.running === true,
       });
       if (body.running === true) {
-        this.scheduleRunningPoll(workspaceId, sessionId);
+        if (this.state.entries[key]?.run === undefined) this.followRun(workspaceId, sessionId);
       } else {
         this.clearRunningPoll(key);
         void this.flushQueue(workspaceId, sessionId);
@@ -1348,13 +1433,14 @@ export class AppStore {
       return true;
     } catch (error) {
       if (this.state.entries[key]?.request !== request) return false;
+      if (silent) return false;
       const message = (error as Error).message;
       this.patchEntry(key, {
         error: message,
         loading: false,
         ...(entry.loaded ? { permissionError: 'Could not refresh session permission. Choose a permission or reload the session.' } : {}),
       });
-      if (this.isCurrent(workspaceId, sessionId)) this.showAlert(translator(this.state.locale)('Could not load session: {message}', { message }));
+      if (!reconcile && this.isCurrent(workspaceId, sessionId)) this.showAlert(translator(this.state.locale)('Could not load session: {message}', { message }));
       return false;
     }
   }
@@ -1474,29 +1560,26 @@ export class AppStore {
     const { workspaceId: current, sessionId, entries } = this.state;
     if (current === null || sessionId === null || current === workspaceId) return;
     const entry = entries[sessionKey(current, sessionId)];
-    if (entry?.draft !== true) return;
-    const modeId = entry.mode?.mode;
-    const permission = entry.permission;
-    const plan = entry.plan;
-    const binding = entry.binding;
-    void this.startDraftSession({ workspaceId, ...(modeId === undefined ? {} : { modeId }) }).then(() => {
-      const next = this.state.sessionId;
-      if (next === null || this.state.workspaceId !== workspaceId) return;
-      this.patchEntry(sessionKey(workspaceId, next), {
-        permission,
-        plan,
-        ...(binding === null ? {} : {
-          binding,
-          resolvedModel: resolveBindingModel(
-            binding,
-            entry.mode?.agent,
-            this.state.agents,
-            this.state.roles,
-            this.state.models,
-          ),
-        }),
-      });
-    });
+    if (entry?.draft !== true || entry.run !== undefined || entry.running) return;
+    if (!this.state.workspaces.some((workspace) => workspace.id === workspaceId)) return;
+    this.draftRequest += 1;
+    const oldKey = sessionKey(current, sessionId);
+    const nextKey = sessionKey(workspaceId, sessionId);
+    const nextEntries = { ...entries, [nextKey]: entry };
+    delete nextEntries[oldKey];
+    const cached = this.state.sessionsByWorkspace[workspaceId];
+    this.state = {
+      ...this.state,
+      workspaceId,
+      sessions: cached?.sessions ?? [],
+      sessionsLoading: cached?.loading ?? false,
+      sessionError: cached?.error ?? '',
+      permissionsError: '',
+      entries: nextEntries,
+    };
+    this.persistSelection();
+    this.emit();
+    void this.loadSessions(workspaceId, false);
   }
 
   /** Drop the UI-only draft session without touching persisted sessions. */
@@ -1590,29 +1673,56 @@ export class AppStore {
   async steerMessage(text: string, attachments: readonly SendAttachment[] = []): Promise<boolean> {
     const { workspaceId, sessionId } = this.state;
     if (workspaceId === null || sessionId === null) return false;
+    return this.steerForSession(workspaceId, sessionId, text, attachments);
+  }
+
+  private async steerForSession(workspaceId: string, sessionId: string, text: string, attachments: readonly SendAttachment[], onUncertain?: () => void): Promise<boolean> {
     if (text.trim() === '' && attachments.length === 0) return false;
+    if (!messageBodyFits(text, attachments, true)) {
+      this.showAlert(translator(this.state.locale)('Message and attachments exceed the 32 MiB request limit.'));
+      return false;
+    }
     const key = sessionKey(workspaceId, sessionId);
     const entry = this.getEntry(workspaceId, sessionId);
     if (!entry.loaded || entry.loading || entry.permissionSaving || entry.agentSaving || entry.modelSaving
       || !isPermissionPreset(entry.permission) || entry.agent === null || entry.binding === null) return false;
+    let posting = false;
+    let responseReceived = false;
     try {
+      posting = true;
       const response = await this.fetch(sessionApiPath(workspaceId, sessionId, 'messages'), jsonOptions('POST', {
         text,
-        ...(attachments.length === 0 ? {} : { attachments }),
+        ...(attachments.length === 0 ? {} : { attachments: toWireAttachments(attachments) }),
         mode: 'steer',
       }));
+      responseReceived = true;
       if (!response.ok) {
+        if (response.status >= 500) onUncertain?.();
         if (response.status === 409) {
+          await this.loadDetail(workspaceId, sessionId, true);
           const current = this.state.entries[key];
-          if (current?.run === undefined && current?.running !== true) {
-            return this.startTurn(workspaceId, sessionId, text, attachments);
+          if (current?.running !== true) {
+            this.observers.get(key)?.abort();
+            this.observers.delete(key);
+            this.clearRunningPoll(key);
+            this.followBases.delete(key);
+            this.liveRuns.delete(key);
+            if (current?.run !== undefined) this.patchEntry(key, { run: undefined });
+            this.followEvents.delete(key);
+            return this.startTurn(workspaceId, sessionId, text, attachments, undefined, onUncertain);
           }
         }
         throw new Error(await responseError(response));
       }
+      let broadcast = false;
+      try {
+        broadcast = (await response.json() as { broadcast?: unknown }).broadcast === true;
+      } catch {
+        // Older servers may not return a JSON response.
+      }
       const current = this.state.entries[key];
       const live = this.liveRuns.get(key) ?? current?.run;
-      if (live !== undefined) {
+      if (live !== undefined && !broadcast) {
         const turn = live.turns.at(-1)?.index ?? 0;
         live.transcript.push({
           kind: 'user',
@@ -1620,45 +1730,127 @@ export class AppStore {
           turn,
           timestamp: Date.now(),
           text,
-          ...(attachments.length === 0 ? {} : { attachments: attachments.map((item) => ({ ...item })) }),
+          ...(attachments.length === 0 ? {} : { attachments: toWireAttachments(attachments).map((item) => ({ ...item })) }),
         });
         this.patchEntry(key, { run: { ...live } });
       } else {
-        void this.loadDetail(workspaceId, sessionId, true);
+        this.scheduleRunningPoll(workspaceId, sessionId);
       }
       return true;
     } catch (error) {
+      if (posting && !responseReceived) onUncertain?.();
       this.showAlert(translator(this.state.locale)('Could not send message: {message}', { message: (error as Error).message }));
       return false;
     }
   }
 
   /** Keep a message for the next turn instead of interrupting the active reply. */
-  queueMessage(text: string, attachments: readonly SendAttachment[] = []): boolean {
+  async queueMessage(text: string, attachments: readonly SendAttachment[] = []): Promise<boolean> {
     const { workspaceId, sessionId } = this.state;
     if (workspaceId === null || sessionId === null) return false;
     if (text.trim() === '' && attachments.length === 0) return false;
-    const key = sessionKey(workspaceId, sessionId);
-    const entry = this.getEntry(workspaceId, sessionId);
-    const queued: QueuedMessage[] = [...entry.queued, {
-      id: `queued-${Date.now()}-${entry.queued.length}`,
-      text,
-      attachments: attachments.map((item) => ({ ...item })),
-      createdAt: Date.now(),
-    }];
-    this.patchEntry(key, { queued });
-    writeQueued(workspaceId, sessionId, queued);
-    return true;
+    if (!messageBodyFits(text, attachments, true)) {
+      this.showAlert(translator(this.state.locale)('Message and attachments exceed the 32 MiB request limit.'));
+      return false;
+    }
+    this.getEntry(workspaceId, sessionId);
+    try {
+      await this.updateQueue(workspaceId, sessionId, (items) => ({
+        items: [...items, {
+          id: `queued-${crypto.randomUUID()}`,
+          text,
+          attachments: attachments.map((item) => ({ ...item })),
+          createdAt: Date.now(),
+        }],
+        result: true,
+      }));
+      void this.flushQueue(workspaceId, sessionId);
+      return true;
+    } catch (error) {
+      this.queueError(error);
+      return false;
+    }
   }
 
-  removeQueuedMessage(id: string): void {
+  private async deliverQueued(workspaceId: string, sessionId: string, id: string | undefined, steer: boolean): Promise<boolean> {
+    const key = sessionKey(workspaceId, sessionId);
+    try {
+      return await this.queueLock(workspaceId, sessionId, 'delivery', async () => {
+        const entry = this.state.entries[key];
+        if (entry === undefined || !entry.loaded || entry.loading || entry.draft
+          || (steer ? entry.run === undefined && !entry.running : entry.run !== undefined || entry.running)) return false;
+        if (!steer) {
+          const detail = await this.api<Record<string, unknown>>(sessionApiPath(workspaceId, sessionId));
+          if (typeof detail.running !== 'boolean') throw new Error('Could not verify the session run state.');
+          if (detail.running) {
+            this.patchEntry(key, { running: true });
+            this.followRun(workspaceId, sessionId);
+            return false;
+          }
+        }
+        const item = await this.updateQueue(workspaceId, sessionId, (items) => {
+          const selected = id === undefined ? items[0] : items.find((candidate) => candidate.id === id);
+          if (selected === undefined || selected.delivery === 'uncertain') return { items, result: undefined, write: false };
+          return {
+            items: items.map((candidate) => candidate.id === selected.id ? { ...candidate, delivery: 'uncertain' as const } : candidate),
+            result: selected,
+          };
+        });
+        if (item === undefined) return false;
+        let uncertain = false;
+        const markUncertain = (): void => { uncertain = true; };
+        const accepted = steer
+          ? await this.steerForSession(workspaceId, sessionId, item.text, item.attachments, markUncertain)
+          : await this.startTurn(workspaceId, sessionId, item.text, item.attachments, undefined, markUncertain);
+        await this.updateQueue(workspaceId, sessionId, (items) => ({
+          items: accepted ? items.filter((candidate) => candidate.id !== item.id)
+            : uncertain ? items : items.map((candidate) => {
+              if (candidate.id !== item.id) return candidate;
+              const { delivery: _delivery, ...rest } = candidate;
+              return rest;
+            }),
+          result: undefined,
+        }));
+        return accepted;
+      });
+    } catch (error) {
+      this.queueError(error);
+      return false;
+    }
+  }
+
+  async steerQueuedMessage(id: string): Promise<boolean> {
+    const { workspaceId, sessionId } = this.state;
+    if (workspaceId === null || sessionId === null) return false;
+    return this.deliverQueued(workspaceId, sessionId, id, true);
+  }
+
+  async steerQueuedMessages(): Promise<void> {
     const { workspaceId, sessionId } = this.state;
     if (workspaceId === null || sessionId === null) return;
-    const key = sessionKey(workspaceId, sessionId);
-    const entry = this.getEntry(workspaceId, sessionId);
-    const queued = entry.queued.filter((item) => item.id !== id);
-    this.patchEntry(key, { queued });
-    writeQueued(workspaceId, sessionId, queued);
+    let ids: string[];
+    try {
+      ids = await this.updateQueue(workspaceId, sessionId, (items) => ({ items, result: items.map((item) => item.id), write: false }));
+    } catch (error) {
+      this.queueError(error);
+      return;
+    }
+    for (const id of ids) {
+      if (this.state.workspaceId !== workspaceId || this.state.sessionId !== sessionId || !await this.steerQueuedMessage(id)) break;
+    }
+  }
+
+  async removeQueuedMessage(id: string): Promise<void> {
+    const { workspaceId, sessionId } = this.state;
+    if (workspaceId === null || sessionId === null) return;
+    try {
+      await this.queueLock(workspaceId, sessionId, 'delivery', async () => {
+        await this.updateQueue(workspaceId, sessionId, (items) => ({ items: items.filter((item) => item.id !== id), result: undefined }));
+      });
+      void this.flushQueue(workspaceId, sessionId);
+    } catch (error) {
+      this.queueError(error);
+    }
   }
 
   private async startTurn(
@@ -1667,6 +1859,7 @@ export class AppStore {
     text: string,
     attachments: readonly SendAttachment[],
     onAccepted?: () => void,
+    onUncertain?: () => void,
   ): Promise<boolean> {
     const key = sessionKey(workspaceId, sessionId);
     const entry = this.getEntry(workspaceId, sessionId);
@@ -1674,11 +1867,16 @@ export class AppStore {
       || !isPermissionPreset(entry.permission) || entry.agent === null || entry.binding === null
       || entry.run !== undefined || entry.running) return false;
     if (text.trim() === '' && attachments.length === 0) return false;
+    if (!messageBodyFits(text, attachments)) {
+      this.showAlert(translator(this.state.locale)('Message and attachments exceed the 32 MiB request limit.'));
+      return false;
+    }
     let baseTurn = -1;
     for (const item of entry.transcript) baseTurn = Math.max(baseTurn, item.turn);
     for (const turn of entry.turns) baseTurn = Math.max(baseTurn, turn.index);
     baseTurn += 1;
     const run = createLiveState();
+    run.metrics = entry.metrics === null ? emptyMetrics() : structuredClone(entry.metrics);
     run.turns.push({ index: baseTurn, startedAt: Date.now() });
     run.transcript = [
       ...entry.transcript,
@@ -1688,11 +1886,14 @@ export class AppStore {
         turn: baseTurn,
         timestamp: Date.now(),
         text,
-        ...(attachments.length === 0 ? {} : { attachments: attachments.map((item) => ({ ...item })) }),
+        ...(attachments.length === 0 ? {} : { attachments: toWireAttachments(attachments).map((item) => ({ ...item })) }),
       },
     ];
+    entry.request += 1;
     this.patchEntry(key, { run, outcome: '', todos: null, transcript: run.transcript, turns: run.turns });
     let accepted = false;
+    let posting = false;
+    let rejected = false;
     let targetId = sessionId;
     let targetKey = key;
     try {
@@ -1730,49 +1931,58 @@ export class AppStore {
         this.updateWorkspaceSessions(workspaceId, (sessions) => sortSessions([created.session, ...sessions.filter((item) => item.id !== targetId)]));
         if (created.setupError !== null) throw created.setupError;
       }
-      const response = await this.fetch(sessionApiPath(workspaceId, targetId, 'messages'), jsonOptions('POST', {
-        text,
-        ...(attachments.length === 0 ? {} : { attachments }),
-      }));
+      posting = true;
+      const response = await this.fetch(sessionApiPath(workspaceId, targetId, 'messages'), {
+        ...jsonOptions('POST', {
+          text,
+          ...(attachments.length === 0 ? {} : { attachments: toWireAttachments(attachments) }),
+        }),
+        headers: { 'content-type': 'application/json', prefer: 'respond-async' },
+      });
       if (!response.ok) {
+        let uncertainStart = false;
+        try {
+          const body = await response.clone().json() as { code?: unknown };
+          uncertainStart = body.code === 'turn_start_failed_message_may_be_saved';
+        } catch {
+          // An unreadable error response cannot establish the special error code.
+        }
+        rejected = response.status < 500 && !uncertainStart;
         const message = await responseError(response);
         throw new Error(response.status === 409 ? translator(this.state.locale)('Another turn is already running. {message}', { message }) : message);
       }
       accepted = true;
       onAccepted?.();
-      if (response.body === null) throw new Error(translator(this.state.locale)('The server returned an empty event stream.'));
-      void this.consumeStream(workspaceId, targetId, targetKey, run, response.body);
+      if (response.status === 202 || response.headers.get('content-type')?.includes('application/json')) {
+        this.followRun(workspaceId, targetId, run);
+      } else if (response.body !== null) {
+        void this.consumeStream(workspaceId, targetId, targetKey, run, response.body);
+      } else {
+        this.followRun(workspaceId, targetId, run);
+      }
       return true;
     } catch (error) {
-      this.patchEntry(targetKey, { run: undefined, transcript: entry.transcript, turns: entry.turns, outcome: 'error' });
+      const uncertain = posting && !rejected && !accepted;
+      this.patchEntry(targetKey, { run: undefined, transcript: entry.transcript, turns: entry.turns, outcome: uncertain ? '' : 'error' });
       this.showAlert(translator(this.state.locale)('Could not complete turn: {message}', { message: (error as Error).message }));
+      if (uncertain) {
+        onUncertain?.();
+        void this.loadDetail(workspaceId, targetId, true);
+      }
       return accepted;
     }
   }
 
   /** Send the oldest queued message once the session is no longer running. */
   private async flushQueue(workspaceId: string, sessionId: string): Promise<void> {
-    const generation = auth.getGeneration();
     const key = sessionKey(workspaceId, sessionId);
     if (this.disposed || this.flushingQueues.has(key)) return;
     const entry = this.state.entries[key];
     if (entry === undefined || !entry.loaded || entry.loading || entry.draft
       || entry.run !== undefined || entry.running || entry.queued.length === 0) return;
-    const next = entry.queued[0]!;
-    const rest = entry.queued.slice(1);
     this.flushingQueues.add(key);
-    this.patchEntry(key, { queued: rest });
-    writeQueued(workspaceId, sessionId, rest);
     try {
-      const accepted = await this.startTurn(workspaceId, sessionId, next.text, next.attachments);
-      if (!accepted && !this.disposed && generation === auth.getGeneration()) {
-        const current = this.state.entries[key];
-        if (current !== undefined) {
-          const restored = [next, ...current.queued];
-          this.patchEntry(key, { queued: restored });
-          writeQueued(workspaceId, sessionId, restored);
-        }
-      }
+      await this.deliverQueued(workspaceId, sessionId, undefined, false);
     } finally {
       this.flushingQueues.delete(key);
     }
@@ -1799,19 +2009,144 @@ export class AppStore {
     this.runningPolls.delete(key);
   }
 
+  /** Observe an active run independently of the request that started it. */
+  private followRun(workspaceId: string, sessionId: string, existing?: LiveTurnState): void {
+    const key = sessionKey(workspaceId, sessionId);
+    const entry = this.state.entries[key];
+    if (this.disposed || entry === undefined || this.observers.has(key)) return;
+    const run = existing ?? createLiveState();
+    if (existing === undefined) {
+      run.transcript = entry.transcript.slice();
+      run.turns = entry.turns.map((turn) => ({ ...turn }));
+    }
+    let base = this.followBases.get(key);
+    if (base === undefined) {
+      const lastUser = run.transcript.findLastIndex((item) => item.kind === 'user');
+      base = {
+        transcript: lastUser < 0 ? run.transcript.slice() : run.transcript.slice(0, lastUser + 1),
+        turns: run.turns.filter((turn) => lastUser < 0 || turn.index <= run.transcript[lastUser]!.turn).map((turn) => ({ ...turn })),
+        metrics: existing?.metrics === undefined ? undefined : structuredClone(existing.metrics),
+      };
+      this.followBases.set(key, base);
+    }
+    const snapshotBase = base;
+    const controller = new AbortController();
+    this.observers.set(key, controller);
+    this.liveRuns.set(key, run);
+    this.patchEntry(key, { run: { ...run }, running: true });
+    let finished = false;
+    void (async () => {
+      try {
+        const response = await this.fetch(sessionApiPath(workspaceId, sessionId, 'follow'), { signal: controller.signal });
+        if (response.status === 204) {
+          finished = await this.finishObservedRun(workspaceId, sessionId, key, run);
+        } else {
+          if (!response.ok || response.body === null) throw new Error('Unable to follow run');
+          finished = await this.consumeStream(workspaceId, sessionId, key, run, response.body, (baseline) => {
+            const stopping = this.state.entries[key]?.run?.stopping;
+            const fresh = createLiveState();
+            const hydrated = baseline === undefined ? undefined : hydrateTranscript(baseline.messages as never);
+            fresh.transcript = hydrated?.transcript ?? snapshotBase.transcript.slice();
+            fresh.turns = hydrated?.turns ?? snapshotBase.turns.map((turn) => ({ ...turn }));
+            if (hydrated !== undefined && fresh.turns.length > 0) fresh.turns[fresh.turns.length - 1]!.endedAt = 0;
+            const metrics = baseline === undefined ? snapshotBase.metrics : validateSessionMetrics(baseline.metrics) ?? undefined;
+            fresh.metrics = metrics === undefined ? undefined : structuredClone(metrics);
+            fresh.stopping = stopping;
+            Object.assign(run, fresh, {
+              approval: undefined, planReview: undefined, outcome: undefined, error: undefined,
+              streamAssistantId: undefined, streamReasoningId: undefined, finishing: false,
+              metricsStepsSeen: undefined, metricsLastStep: undefined, metricsRunEnded: undefined,
+            });
+          }, true);
+        }
+      } catch {
+        // An observer failure says nothing about the server-side run.
+      } finally {
+        if (this.observers.get(key) !== controller) return;
+        this.observers.delete(key);
+        if (finished) void this.flushQueue(workspaceId, sessionId);
+        if (!finished && !this.disposed && this.state.entries[key]?.run !== undefined) {
+          const timer = setTimeout(() => {
+            this.runningPolls.delete(key);
+            this.followRun(workspaceId, sessionId, run);
+          }, 1500);
+          (timer as { unref?: () => void }).unref?.();
+          this.runningPolls.set(key, timer);
+        }
+      }
+    })();
+  }
+
+  private async finishObservedRun(workspaceId: string, sessionId: string, key: string, run: LiveTurnState): Promise<boolean> {
+    if (run.outcome !== undefined) this.patchEntry(key, { run: { ...run, finishing: true } });
+    const reconciled = await this.loadDetail(workspaceId, sessionId, true);
+    const current = this.state.entries[key];
+    if (!reconciled || current === undefined || current.running) {
+      if (current?.run !== undefined && run.outcome !== undefined) this.patchEntry(key, { run: { ...run, finishing: false } });
+      return false;
+    }
+    const lastInput = current.events.findLastIndex((event) => typeof event === 'object' && event !== null
+      && ['message/user', 'user/message'].includes(String((event as { type?: unknown }).type)));
+    const lastEndIndex = current.events.findLastIndex((event) => typeof event === 'object' && event !== null
+      && (event as { type?: unknown }).type === 'trace/turn.end');
+    const lastEnd = lastInput >= 0 && lastEndIndex > lastInput ? current.events[lastEndIndex] as { data?: { reason?: unknown } } : undefined;
+    const reason = run.outcome ?? lastEnd?.data?.reason;
+    this.patchEntry(key, {
+      run: undefined,
+      outcome: reason === 'interrupted' ? 'interrupted' : reason === 'error' || run.error !== undefined ? 'error' : '',
+    });
+    this.liveRuns.delete(key);
+    this.followBases.delete(key);
+    this.followEvents.delete(key);
+    if (!this.observers.has(key)) void this.flushQueue(workspaceId, sessionId);
+    if (this.state.workspaceId === workspaceId) {
+      void this.loadSessions(workspaceId, false);
+      void this.refreshSubagentSessions(workspaceId);
+    }
+    return true;
+  }
+
   private async consumeStream(
     workspaceId: string,
     sessionId: string,
     key: string,
     run: LiveTurnState,
     body: ReadableStream<Uint8Array>,
-  ): Promise<void> {
+    resetSnapshot?: (baseline?: { messages: unknown[]; metrics?: unknown }) => void,
+    observed = false,
+  ): Promise<boolean> {
     this.liveRuns.set(key, run);
     const decoder = new TextDecoder();
-    let parserError: Error | undefined;
     const { createSSEParser } = await import('./events.ts');
     const parser = createSSEParser((event) => {
-      applyAgentEvent(run, event as never);
+      const snapshot = event as { type?: unknown; events?: unknown; truncated?: unknown; baseline?: unknown } | null;
+      if (snapshot?.type === 'run.snapshot') {
+        if (!Array.isArray(snapshot.events) || resetSnapshot === undefined) throw new Error('Invalid run snapshot');
+        const snapshotEvents = snapshot.events;
+        const previous = this.followEvents.get(key);
+        const prefixMatches = previous !== undefined && previous.length <= snapshotEvents.length
+          && previous.every((item, index) => JSON.stringify(item) === JSON.stringify(snapshotEvents[index]));
+        if ((snapshot.truncated === true || previous !== undefined) && !prefixMatches) {
+          this.showAlert(snapshot.truncated === true
+            ? 'Live history is incomplete because the run snapshot was truncated.'
+            : 'Live history could not be reconciled after reconnecting.');
+          throw new Error('Unrecoverable run snapshot');
+        }
+        if (prefixMatches) {
+          for (const item of snapshot.events.slice(previous.length)) applyAgentEvent(run, item as never);
+        } else {
+          const baseline = snapshot.baseline;
+          if (baseline !== undefined && (typeof baseline !== 'object' || baseline === null
+            || !Array.isArray((baseline as { messages?: unknown }).messages))) throw new Error('Invalid run baseline');
+          resetSnapshot(baseline as { messages: unknown[]; metrics?: unknown } | undefined);
+          for (const item of snapshot.events) applyAgentEvent(run, item as never);
+        }
+        this.followEvents.set(key, snapshot.events.slice());
+      } else {
+        applyAgentEvent(run, event as never);
+        const events = this.followEvents.get(key);
+        if (observed && events !== undefined) events.push(event);
+      }
       const type = typeof event === 'object' && event !== null ? (event as { type?: unknown }).type : undefined;
       if (type === 'session.title') {
         const title = typeof (event as { title?: unknown }).title === 'string'
@@ -1853,42 +2188,22 @@ export class AppStore {
       } finally {
         reader.releaseLock();
       }
-      if (run.outcome === undefined) throw new Error(translator(this.state.locale)('The event stream ended before the turn finished.'));
+      if (run.outcome === undefined) {
+        if (!observed) this.followRun(workspaceId, sessionId, run);
+        return false;
+      }
       if (run.error !== undefined) {
         this.showAlert(translator(this.state.locale)(run.error));
       }
-    } catch (error) {
-      parserError = error as Error;
-      this.showAlert(translator(this.state.locale)('Could not complete turn: {message}', { message: parserError.message }));
+    } catch {
+      if (!observed && !this.disposed) this.followRun(workspaceId, sessionId, run);
     } finally {
-      if (this.disposed) return;
-      const entry = this.state.entries[key];
-      if (entry !== undefined) {
-        const outcome = run.outcome === 'interrupted'
-          ? 'interrupted'
-          : run.error !== undefined || run.outcome === 'error' || parserError !== undefined ? 'error' : '';
-        this.patchEntry(key, {
-          run: { ...run, finishing: true },
-          outcome,
-          transcript: run.transcript,
-          turns: run.turns,
-        });
+      if (this.disposed || run.outcome === undefined) return false;
+      const finished = await this.finishObservedRun(workspaceId, sessionId, key, run);
+      if (!finished && !observed && !this.disposed && this.state.entries[key]?.run !== undefined) {
+        this.followRun(workspaceId, sessionId, run);
       }
-      await this.loadDetail(workspaceId, sessionId, true);
-      const current = this.state.entries[key];
-      if (current !== undefined) {
-        const fallback = current.transcript.length === 0
-          ? { transcript: run.transcript, turns: run.turns }
-          : {};
-        this.patchEntry(key, { run: undefined, ...fallback });
-      }
-      this.liveRuns.delete(key);
-      if (this.state.entries[key]?.running === true) this.scheduleRunningPoll(workspaceId, sessionId);
-      else void this.flushQueue(workspaceId, sessionId);
-      if (this.state.workspaceId === workspaceId) {
-        await this.loadSessions(workspaceId, false);
-        void this.refreshSubagentSessions(workspaceId);
-      }
+      return finished;
     }
   }
 
@@ -1901,12 +2216,22 @@ export class AppStore {
     const running = entry?.running === true;
     if (entry?.draft === true || (run === undefined && !running)
       || (run !== undefined && (run.stopping === true || run.finishing === true))) return;
-    if (run !== undefined) this.patchEntry(key, { run: { ...run, stopping: true } });
+    if (run !== undefined) {
+      run.stopping = true;
+      const live = this.liveRuns.get(key);
+      if (live !== undefined) live.stopping = true;
+      this.patchEntry(key, { run: { ...run } });
+    }
     try {
       await this.api(sessionApiPath(workspaceId, sessionId, 'interrupt'), jsonOptions('POST', {}));
       if (run === undefined) this.scheduleRunningPoll(workspaceId, sessionId);
     } catch (error) {
-      if (run !== undefined) this.patchEntry(key, { run: { ...run, stopping: false } });
+      if (run !== undefined) {
+        const live = this.liveRuns.get(key);
+        if (live !== undefined) live.stopping = false;
+        const latest = this.state.entries[key]?.run;
+        if (latest !== undefined) this.patchEntry(key, { run: { ...latest, stopping: false } });
+      }
       this.showAlert(translator(this.state.locale)('Could not stop turn: {message}', { message: (error as Error).message }));
     }
   }
@@ -1941,6 +2266,8 @@ export class AppStore {
         decision,
       }));
       const latest = this.state.entries[key]?.run;
+      const live = this.liveRuns.get(key);
+      if (live?.approval?.requestId === approval.requestId) live.approval = undefined;
       if (latest?.approval?.requestId === approval.requestId) {
         this.patchEntry(key, { run: { ...latest, approval: undefined } });
       }
@@ -1971,6 +2298,8 @@ export class AppStore {
         ...(trimmed === '' ? {} : { feedback: trimmed }),
       }));
       const latest = this.state.entries[key]?.run;
+      const live = this.liveRuns.get(key);
+      if (live?.planReview?.requestId === review.requestId) live.planReview = undefined;
       if (latest?.planReview?.requestId === review.requestId) {
         this.patchEntry(key, { run: { ...latest, planReview: undefined } });
       }

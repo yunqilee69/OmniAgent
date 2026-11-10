@@ -2,12 +2,24 @@ import { describe, expect, it } from 'vitest';
 import {
   detectTrigger,
   directoryReference,
+  enterGesture,
   fileReference,
   replaceRange,
   skillReference,
 } from '../ui/src/lib/composer-trigger';
 
 describe('composer trigger detection', () => {
+  it('distinguishes plain and complementary Enter without stealing modified shortcuts', () => {
+    const base = { key: 'Enter', shiftKey: false, ctrlKey: false, metaKey: false, altKey: false, getModifierState: () => false };
+    expect(enterGesture(base)).toBe('plain');
+    expect(enterGesture({ ...base, ctrlKey: true })).toBe('complementary');
+    expect(enterGesture({ ...base, metaKey: true })).toBe('complementary');
+    expect(enterGesture({ ...base, shiftKey: true })).toBeNull();
+    expect(enterGesture({ ...base, altKey: true })).toBeNull();
+    expect(enterGesture({ ...base, ctrlKey: true, metaKey: true })).toBeNull();
+    expect(enterGesture({ ...base, ctrlKey: true, shiftKey: true })).toBeNull();
+    expect(enterGesture({ ...base, getModifierState: (key) => key === 'AltGraph' })).toBeNull();
+  });
   it('detects @ file references at a token boundary', () => {
     expect(detectTrigger('@', 1)).toEqual({ kind: 'file', prefix: '@', query: '', start: 0, end: 1 });
     expect(detectTrigger('open @src/main.ts', 17)).toEqual({
@@ -39,6 +51,8 @@ describe('composer trigger detection', () => {
   it('detects / commands but not URLs or paths', () => {
     expect(detectTrigger('/', 1)).toEqual({ kind: 'command', prefix: '/', query: '', start: 0, end: 1 });
     expect(detectTrigger('/compact', 8)).toMatchObject({ kind: 'command', query: 'compact' });
+    expect(detectTrigger('/init', 5)).toMatchObject({ kind: 'command', query: 'init' });
+    expect(replaceRange('/init', 0, 5, '/init ')).toEqual({ value: '/init ', caret: 6 });
     expect(detectTrigger('//', 2)).toBeNull();
     expect(detectTrigger('/api/files', 10)).toBeNull();
     expect(detectTrigger('https://example.com', 19)).toBeNull();

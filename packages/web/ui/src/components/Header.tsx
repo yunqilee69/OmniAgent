@@ -2,43 +2,23 @@ import { useState, useSyncExternalStore, type ReactNode } from 'react';
 import clsx from 'clsx';
 import {
   IconAgentPresetOutlineRegular,
-  IconClockOutlineRegular,
   IconCopyOutlineRegular,
   IconDownloadOutlineRegular,
   IconEllipsisOutlineRegular,
   IconPanelLeftOutlineRegular,
   Menu,
-  StateDot,
   Tooltip,
 } from '../../vendor/primitives/index.ts';
 import { auth } from '../lib/auth.ts';
 import { store, useApp, useSessionEntry } from '../lib/store.ts';
-import { translator, type Translate } from '../lib/i18n.ts';
+import { translator } from '../lib/i18n.ts';
 import css from '../styles/app.module.css';
 
-function statusOf(app: ReturnType<typeof useApp>, entry: ReturnType<typeof useSessionEntry>, t: Translate): { label: string; tone: 'idle' | 'running' | 'error' | 'warning' } {
-  const run = entry?.run;
-  if (run !== undefined) {
-    if (run.stopping === true) return { label: t('Stopping'), tone: 'warning' };
-    if (run.finishing === true) return { label: t('Finishing'), tone: 'running' };
-    if (run.planReview !== undefined) return { label: t('Plan review'), tone: 'warning' };
-    if (run.approval !== undefined) return { label: t('Approval needed'), tone: 'warning' };
-    return { label: t('Running'), tone: 'running' };
-  }
-  if (entry?.error !== undefined && entry.error !== '') return { label: t('Error'), tone: 'error' };
-  if (entry?.outcome === 'error') return { label: t('Error'), tone: 'error' };
-  if (entry?.outcome === 'interrupted') return { label: t('Interrupted'), tone: 'warning' };
-  if (entry?.loading === true || app.sessionsLoading || app.workspacesLoading) return { label: t('Loading'), tone: 'idle' };
-  if (entry?.plan.active === true) return { label: t('Plan mode'), tone: 'idle' };
-  return { label: t('Ready'), tone: 'idle' };
-}
-
-export function Header({ sidebarOpen, onToggleSidebar, rightOpen, onToggleRight, onOpenObserve }: {
+export function Header({ sidebarOpen, onToggleSidebar, rightOpen, onToggleRight }: {
   sidebarOpen: boolean;
   onToggleSidebar: () => void;
   rightOpen: boolean;
   onToggleRight: () => void;
-  onOpenObserve: () => void;
 }): ReactNode {
   const app = useApp();
   const authState = useSyncExternalStore(auth.subscribe, auth.getSnapshot);
@@ -59,7 +39,6 @@ export function Header({ sidebarOpen, onToggleSidebar, rightOpen, onToggleRight,
         : entry?.blank === true
           ? t('New Session')
           : t('Untitled');
-  const status = statusOf(app, entry, t);
   const hasSession = app.sessionId !== null && entry?.draft !== true && !onAutomation && !onSettings;
   const draftSession = app.sessionId !== null && entry?.draft === true && !onAutomation && !onSettings;
   const agentName = entry?.agent?.name?.trim();
@@ -106,19 +85,6 @@ export function Header({ sidebarOpen, onToggleSidebar, rightOpen, onToggleRight,
           )}
         </div>
         <div className={css.headerUtilities}>
-          {hasSession && (
-            <span className={css.status} data-tone={status.tone} title={status.label} aria-label={status.label}>
-              <StateDot state={status.tone === 'error' ? 'error' : status.tone === 'warning' ? 'warning' : status.tone === 'running' ? 'ongoing' : 'idle'} />
-              {status.tone !== 'idle' && <span>{status.label}</span>}
-            </span>
-          )}
-          {hasSession && (
-            <Tooltip label={t('Open trajectory')} delayMs={400}>
-              <button type="button" className={css.iconButton} aria-label={t('Open trajectory')} aria-controls="right-panel" onClick={onOpenObserve}>
-                <IconClockOutlineRegular />
-              </button>
-            </Tooltip>
-          )}
           <Menu
             open={menuOpen}
             onClose={() => { setMenuOpen(false); }}

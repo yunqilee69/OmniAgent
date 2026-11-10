@@ -159,11 +159,15 @@ export async function* translateDshEvents(
   const blocks = new Map<number, Block>();
   const usage: DshUsage = { inputTokens: 0, outputTokens: 0 };
   let started = false;
+  let inputReported = false;
   let reason: 'end_turn' | 'tool_use' | 'max_tokens' | undefined;
   for await (const event of events) {
     if (event.type === 'message_start') {
       if (started) return malformed('duplicate message_start');
-      updateUsage(usage, object(event.message).usage); started = true; continue;
+      const rawUsage = object(event.message).usage;
+      inputReported = rawUsage !== undefined && Object.hasOwn(object(rawUsage), 'input_tokens');
+      if (rawUsage !== undefined) updateUsage(usage, rawUsage);
+      started = true; continue;
     }
     if (!['content_block_start', 'content_block_delta', 'content_block_stop', 'message_delta', 'message_stop'].includes(String(event.type))) continue;
     if (!started) return malformed('event precedes message_start');
@@ -199,7 +203,10 @@ export async function* translateDshEvents(
         else if (delta.stop_reason === 'tool_use' || delta.stop_reason === 'max_tokens') reason = delta.stop_reason;
         else return malformed(`unsupported stop reason ${String(delta.stop_reason)}`);
       }
-      if (event.usage !== undefined) updateUsage(usage, event.usage);
+      if (event.usage !== undefined) {
+        if (Object.hasOwn(object(event.usage), 'input_tokens')) inputReported = true;
+        updateUsage(usage, event.usage);
+      }
     } else {
       if (!reason) return malformed('message_stop without a stop reason');
       const hasTool = [...blocks.values()].some((block) => block.content.type === 'tool_use');
@@ -226,7 +233,10 @@ export async function* translateDshEvents(
       return { message: { role: 'assistant', content, toolCalls,
         dshReplay: { kind: 'deepseek-messages', version: 1, provider: 'deepseek-official', model,
           endpoint: replayEndpointHash(endpoint), blocks: replay } },
-      usage: { inputTokens: usage.inputTokens, outputTokens: usage.outputTokens }, dshUsage: usage, stopReason: reason };
+      usage: { inputTokens: usage.inputTokens, outputTokens: usage.outputTokens,
+        ...(inputReported && usage.cacheReadTokens !== undefined ? { cachedInputTokens: usage.cacheReadTokens } : {}) },
+      ...(inputReported ? { contextInputTokens: usage.inputTokens + (usage.cacheReadTokens ?? 0) + (usage.cacheWriteTokens ?? 0) } : {}),
+      dshUsage: usage, stopReason: reason };
     }
   }
   throw new DeepSeekMessagesError('DeepSeek Messages stream ended before message_stop', 'STREAM_CLOSED');

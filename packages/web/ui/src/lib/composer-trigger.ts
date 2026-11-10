@@ -7,6 +7,15 @@
 export type ComposerTriggerKind = 'file' | 'command' | 'session' | 'skill';
 export type ComposerTriggerPrefix = '@' | '#' | '/' | '$';
 
+export function enterGesture(event: {
+  key: string; shiftKey: boolean; ctrlKey: boolean; metaKey: boolean; altKey: boolean;
+  getModifierState: (key: 'AltGraph') => boolean;
+}): 'plain' | 'complementary' | null {
+  if (event.key !== 'Enter' || event.shiftKey || event.altKey || event.getModifierState('AltGraph')
+    || (event.ctrlKey && event.metaKey)) return null;
+  return event.ctrlKey || event.metaKey ? 'complementary' : 'plain';
+}
+
 export interface ComposerTrigger {
   kind: ComposerTriggerKind;
   prefix: ComposerTriggerPrefix;

@@ -99,7 +99,7 @@ export async function* toModelStream(
 ): AsyncGenerator<ModelStreamDelta, ModelResponse> {
   let content = '';
   let finishReason: string | null | undefined;
-  let usage: { prompt_tokens?: number; completion_tokens?: number } | undefined;
+  let usage: ChatCompletionChunk['usage'];
   const toolCalls = new Map<number, { id: string; name: string; arguments: string }>();
 
   for await (const chunk of chunks) {
@@ -164,6 +164,9 @@ export async function* toModelStream(
     usage: {
       inputTokens: usage?.prompt_tokens ?? 0,
       outputTokens: usage?.completion_tokens ?? 0,
+      ...(usage?.prompt_tokens_details?.cached_tokens === undefined ? {} : {
+        cachedInputTokens: usage.prompt_tokens_details.cached_tokens,
+      }),
     },
     stopReason: mapFinishReason(finishReason, calls.length),
   };
@@ -261,6 +264,9 @@ export function toModelResponse(completion: ChatCompletion): ModelResponse {
     usage: {
       inputTokens: completion.usage?.prompt_tokens ?? 0,
       outputTokens: completion.usage?.completion_tokens ?? 0,
+      ...(completion.usage?.prompt_tokens_details?.cached_tokens === undefined ? {} : {
+        cachedInputTokens: completion.usage.prompt_tokens_details.cached_tokens,
+      }),
     },
     stopReason: mapFinishReason(choice.finish_reason, toolCalls.length),
   };

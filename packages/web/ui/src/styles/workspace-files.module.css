@@ -1,0 +1,59 @@
+.tree, .preview {
+  display: flex;
+  flex-direction: column;
+  min-width: 0;
+  min-height: 0;
+  height: 100%;
+  color: var(--dsw-alias-label-primary);
+}
+.treeHeader, .previewPath {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  min-width: 0;
+  min-height: 48px;
+  padding: 0 12px;
+  border-bottom: 0.5px solid var(--dsw-alias-border-l3);
+  font-size: 13px;
+}
+.iconButton {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  width: 28px;
+  height: 28px;
+  flex: none;
+  border: 0;
+  border-radius: 4px;
+  background: transparent;
+  color: inherit;
+  cursor: pointer;
+}
+.treeBody { flex: 1; min-height: 0; overflow: auto; padding: 8px 0; }
+.row {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  width: 100%;
+  min-width: 0;
+  height: 30px;
+  padding: 0 12px;
+  border: 0;
+  background: transparent;
+  color: inherit;
+  font: inherit;
+  font-size: 13px;
+  text-align: left;
+  cursor: pointer;
+}
+.row svg { flex: none; color: var(--dsw-alias-label-tertiary); }
+.row:hover, .iconButton:hover, .row[aria-current='true'] { background: var(--dsw-alias-interactive-bg-hover); }
+.name { min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.spacer { width: 14px; flex: none; }
+.status { padding: 12px; color: var(--dsw-alias-label-secondary); font-size: 13px; }
+.status button { border: 0; background: transparent; color: inherit; text-decoration: underline; cursor: pointer; }
+.preview { flex: 1; height: auto; }
+.previewPath { flex: none; align-items: flex-start; flex-direction: column; justify-content: center; gap: 2px; padding: 8px 12px; }
+.previewPath strong, .previewPath span { max-width: 100%; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.previewPath span { color: var(--dsw-alias-label-secondary); font-family: var(--ds-font-family-code); font-size: 12px; }
+.content { flex: 1; min-height: 0; margin: 0; padding: 16px; overflow: auto; font-family: var(--ds-font-family-code); font-size: 12px; line-height: 1.5; tab-size: 2; }

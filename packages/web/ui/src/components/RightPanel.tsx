@@ -24,9 +24,10 @@ import { store, useApp } from '../lib/store.ts';
 import { translator, type Translate } from '../lib/i18n.ts';
 import { workspaceApiPath, type WorkspaceFileEntry } from '../lib/wire.ts';
 import { TrajectoryView } from './TrajectoryView.tsx';
+import { WorkspaceFilePreview, type FileSelection } from './WorkspaceFilePreview.tsx';
 import css from '../styles/dsh/right-panel.module.css';
 
-export type RightView = 'guide' | 'files' | 'terminal' | 'observe';
+export type RightView = 'guide' | 'files' | 'terminal' | 'observe' | 'preview';
 
 function CompassGlyph({ size = 16, className }: { size?: number; className?: string }): ReactNode {
   return (
@@ -50,6 +51,7 @@ function MoreToolsGlyph(): ReactNode {
 }
 
 function viewTitle(view: RightView, t: Translate): string {
+  if (view === 'preview') return t('File preview');
   if (view === 'files') return t('Workspace files');
   if (view === 'terminal') return t('Terminal');
   if (view === 'observe') return t('Observe');
@@ -77,7 +79,8 @@ function EntryCard({ icon, title, description, onClick }: EntryCardProps): React
   );
 }
 
-export function RightPanel({ fullscreen, view, onViewChange: setView, onClose, onToggleFullscreen }: {
+export function RightPanel({ fullscreen, view, onViewChange: setView, onClose, onToggleFullscreen, preview }: {
+  preview?: FileSelection | null;
   fullscreen: boolean;
   view: RightView;
   onViewChange: (view: RightView) => void;
@@ -239,6 +242,7 @@ export function RightPanel({ fullscreen, view, onViewChange: setView, onClose, o
         </div>
       )}
 
+      {view === 'preview' && preview && <WorkspaceFilePreview file={preview} />}
       {view === 'observe' && <TrajectoryView />}
 
       {view === 'files' && (

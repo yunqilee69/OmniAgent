@@ -66,7 +66,7 @@ export function MessageActions({ text, timestamp, t }: { text: string; timestamp
   );
 }
 
-function UserContent({ user }: { user: UserItem }): ReactNode {
+export function UserContent({ user }: { user: UserItem }): ReactNode {
   const attachments = user.attachments ?? [];
   return (
     <UserMessageBubble>
@@ -76,7 +76,7 @@ function UserContent({ user }: { user: UserItem }): ReactNode {
             <img
               key={`${attachment.name}-${index}`}
               className={css.userImage}
-              src={`data:${attachment.mediaType};base64,${attachment.data}`}
+              src={`data:${attachment.mimeType ?? attachment.mediaType};base64,${attachment.data}`}
               alt={attachment.name}
             />
           ) : (
@@ -162,7 +162,6 @@ function ProcessItem({ item, live, t }: { item: TranscriptItem; live: boolean; t
           <div className={assistantCss.body}>
             <MarkdownText text={item.text} labels={markdownLabels(t)} />
           </div>
-          <MessageActions text={item.text} timestamp={item.timestamp} t={t} />
         </div>
       );
     case 'compaction':
@@ -253,7 +252,7 @@ export function ConversationView({ entry, processDisplay }: {
   const t = translator(app.locale);
   const scroll = useRef<HTMLDivElement | null>(null);
   const [awayFromBottom, setAwayFromBottom] = useState(false);
-  const running = entry.run !== undefined;
+  const running = entry.run !== undefined || entry.running;
   const source = entry.run ?? entry;
   const turns = groupTurns(source.transcript, source.turns, running);
   const live = entry.run;

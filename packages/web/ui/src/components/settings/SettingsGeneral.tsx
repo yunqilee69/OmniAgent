@@ -86,6 +86,26 @@ export function SettingsGeneral(): ReactNode {
       </section>
 
       <section className={css.settingsSection}>
+        <h3>{t('Conversation')}</h3>
+        <div className={css.settingsRow}>
+          <div>
+            <span className={css.settingsLabel}>{t('Send while responding')}</span>
+            <span className={css.settingsDescription}>{t('Choose how messages are delivered while the agent is working.')}</span>
+          </div>
+          <SegmentedControl
+            id="settings-busy-send"
+            value={app.busySend}
+            options={[
+              { value: 'queue', label: t('Queue') },
+              { value: 'steer', label: t('Steer') },
+            ]}
+            onChange={(value) => { if (value === 'queue' || value === 'steer') store.setBusySend(value); }}
+            label={t('Send while responding')}
+          />
+        </div>
+      </section>
+
+      <section className={css.settingsSection}>
         <h3>{t('Appearance')}</h3>
         <div className={css.settingsRow}>
           <div>

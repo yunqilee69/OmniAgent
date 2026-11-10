@@ -198,6 +198,7 @@ export class SessionScheduleHost implements ScheduleDeliveryHost {
     const selectedMode = projectModeSelection(handle.events);
     const runtime = await this.options.runtime.resolve({
       cwd: handle.header.cwd ?? workspacePath,
+      workspace: workspacePath,
       agentId: agent.agent,
       binding: binding.binding,
       isRoot: true,
