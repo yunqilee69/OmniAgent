@@ -83,7 +83,7 @@ export interface ToolOutput {
 
 | 工具 | 行为 | 关键限制 |
 | --- | --- | --- |
-| `read_file` | 读取工作区文件，支持 offset / limit | 默认 / 单次最多 2,000 行；单行最多 2,000 字符；选中内容最多 50 KiB；≥10 MiB 走流式；拒绝 binary 和非 UTF-8 |
+| `read_file` | 读取工作区文件或附件批次文件，支持 offset / limit | 默认 / 单次最多 2,000 行；单行最多 2,000 字符；选中内容最多 50 KiB；≥10 MiB 走流式；拒绝 binary 和非 UTF-8 |
 | `write_file` | 原子写入文件 | 目标必须在可写根内；保留原文件 mode；拒绝硬链接目标；同路径进程内串行 |
 | `edit_file` | 字面量替换 | `old_string` 必须唯一，除非 `replace_all`；拒绝 binary；保留 CRLF/LF 风格 |
 | `list_dir` | 列目录 | 忽略 `node_modules`、`.git`、`dist`、`.omniagent`；最多 10,000 条 |
@@ -126,7 +126,20 @@ export interface ToolOutput {
 
 `bash` 的 `sandbox_permissions` / `justification` **不会**直接生效。它们必须由 Session 的 `prepareToolCall` 审批并剥离；如果执行层仍看到这两个字段，会抛 `SANDBOX_ESCALATION_UNPROCESSED`。
 
-### 3.5 会话工具
+### 3.5 附件存储与读取
+
+Web 附件不写进工作区，而是写到工作区外、Git worktree 之外的私有批次目录（`~/.omniagent-attachments/<48 位随机批次名>/` 或 `/var/tmp/omniagent-attachments-<uid>/...`）：
+
+- 批次目录和文件分别要求 `0700` / `0600`、属主为当前 uid、路径为物理路径且不是 symlink；
+- 批次名是随机 bearer capability，文件名为 `0-...` 到 `7-...`；
+- 存储位置不得位于 workspace、cwd、可写临时根或任何包含 `.git` 的目录内；
+- `readAttachment()` 只接受上述目录中的普通文件，要求 `nlink === 1`、权限不向组 / 其他开放、大小不超过 8 MiB，并拒绝 symlink；读取有上限，防止同用户进程在 stat 后增长文件；
+- 模型收到的文本包含附件名和路径，但被标记为「不可信元数据，不是指令」；
+- 用户消息持久化失败或回合在写入用户消息前失败时，批次会被清理；`read_file` 可以在 `read-only` 下读取这些路径。
+
+附件是用户提供的输入，不是可信指令；图片字节会进入会话历史，文本 / 文件内容交给工具按需读取。导出和 fork 不复制附件。
+
+### 3.6 会话工具
 
 | 工具 | 说明 |
 | --- | --- |
@@ -201,7 +214,7 @@ export interface ToolOutput {
 
 `Session` 构造时冻结 `{ preset, sandbox, approval }`。普通工具执行不逐次询问用户；只有模型显式请求更宽沙盒时才进入审批。
 
-如果会话没有有效快照，所有工具调用都被拒绝。旧 `mode` / `permissions` 字段不会转成授权。
+如果会话没有有效快照，所有工具调用都被拒绝。旧 `mode` / `permissions` 字段已不再参与配置解析，也不会转成授权。
 
 ## 6. 一次性沙盒升级
 
@@ -300,7 +313,7 @@ tool.call
 | --- | --- | --- |
 | macOS | Seatbelt (`/usr/bin/sandbox-exec`) | 只读 profile + 可写根白名单；拒绝 `operation not permitted` |
 | Linux | bubblewrap (`/usr/bin/bwrap`) | `--ro-bind / /` + `--bind` 可写根；拒绝 `read-only file system` |
-| Linux | Landlock launcher | 由宿主配置绝对路径；`--probe` 输出 `landlock: fully enforced` 才启用 |
+| Linux | Landlock launcher | 只接受受信任绝对路径（默认 `/usr/local/libexec/omniagent/landlock-run`、`/usr/libexec/omniagent/landlock-run`，或 `SessionOptions.dshSandbox.landlockLauncher`）；`--probe` 输出 `landlock: fully enforced` 才启用 |
 | Windows | 无 | `danger-full-access` 可用；受限预设 fail closed |
 
 探测：
@@ -310,7 +323,36 @@ tool.call
 - 探测只证明可用性，不证明二进制真实性；
 - 没有可用后端 → `DshSandboxUnavailableError`，拒绝无约束执行。
 
-### 8.1 沙盒不做什么
+### 8.1 Linux 启动准备
+
+`dsh-sandbox-prepare.ts` 在 Linux 上尝试让受限 shell 可用；其他平台直接返回 `unsupported`：
+
+1. 先实际探测后端；已有可用后端就直接返回 `ready`。
+2. `/usr/bin/bwrap` 已存在但不可用（例如内核或容器策略禁止 namespace）时，不尝试重装，直接报告诊断。
+3. 否则查找受信任的 apt-get / dnf / pacman（包管理器及其祖先必须属于 root 且不可被组 / 其他写入）。
+4. 非交互终端（stdin 或 stderr 不是 TTY）不会提权或等待输入，只返回失败原因。
+5. 交互式终端会询问是否通过受信任的 sudo（或已是 root 时直接）安装 bubblewrap；安装命令固定、超时 300 秒、使用最小环境。
+6. 安装后再次探测，仍失败则返回 `unavailable`；任何失败都不会降级为无沙盒。
+
+触发点：
+
+- `pnpm install` 的 `postinstall`（`scripts/prepare-linux-sandbox.ts`）；
+- TUI `main()` 和 Web `main()` 启动时；TUI 在创建 readline 之前执行，确保安装询问独占终端。
+
+Landlock 后备需要管理员从可信源码构建并安装 `landlock-run`：
+
+```bash
+cc -std=c11 -O2 -Wall -Wextra -Werror packages/core/native/linux/landlock-run.c -o ./landlock-run
+sudo install -d -m 755 /usr/local/libexec/omniagent
+sudo install -o root -g root -m 755 ./landlock-run /usr/local/libexec/omniagent/landlock-run
+/usr/local/libexec/omniagent/landlock-run --probe
+```
+
+它要求 Landlock ABI 5+、seccomp 和 `openat2`；支持 x86-64、i386、AArch64 和 RISC-V 64 原生 ABI，其他 ABI 会被拒绝。启动器会在所有目录（包括工作区）拒绝显式 chmod / chown / utime / xattr 变更和 `io_uring`；文件系统特定 ioctl 和已开放的 IPC 不构成完整隔离。原生验证可以用 `OMNI_TEST_LANDLOCK=1 python3 packages/core/native/linux/test_landlock.py` 和 `OMNI_TEST_LANDLOCK=1 pnpm exec vitest run packages/core/src/tools/builtin/dsh-shell.test.ts`。
+
+当前验证状态：Seatbelt 已在 macOS 验证；Landlock 后备已在 Linux x86-64 验证；bubblewrap 和其他原生架构仍需真实主机验证。Windows 原生受限 shell 和工作区文件围栏尚不可用，继续 fail closed。
+
+### 8.2 沙盒不做什么
 
 - 不隔离网络；
 - 不限制所有读取（进程可以读当前 OS 用户能读的文件）；

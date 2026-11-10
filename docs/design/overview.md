@@ -18,10 +18,10 @@ OmniAgent 是一个本机运行的个人智能体。它不是为了再做一个�
 
 | 非目标 | 含义 |
 | --- | --- |
-| 多用户服务 | Web 只监听 loopback，不做本地用户认证；Host/Origin 检查是浏览器侧保护，不是授权边界 |
+| 多用户服务 | Web 默认只监听 loopback；可选账号密码认证只保护 HTTP 访问，不是多用户隔离，也不能隔离同 OS 用户的其他进程 |
 | 完整 OS 隔离 | 沙盒限制文件写入和 shell 执行，不隔离网络、不限制所有读取，也不是虚拟机 |
 | 通用插件运行时 | 没有 DSH/Cordis 插件系统；MCP 和 skills 是受控扩展点 |
-| 自动权限推断 | 旧 `mode` / `permissions` 字段不会转换成 DSH 授权；缺少显式选择时 fail closed |
+| 自动权限推断 | 旧 `mode` / `permissions` 字段不再解析，也不会转换成 DSH 授权；缺少显式选择时 fail closed |
 | 无损压缩 | 自动压缩默认只生成一条条数占位摘要，不调用额外模型 |
 | 云端同步 | 会话、配置、审计和计划任务都保存在本机 `~/.omniagent/` |
 
@@ -46,7 +46,7 @@ OmniAgent 是一个本机运行的个人智能体。它不是为了再做一个�
 
 ### 3.4 显式选择，失败关闭
 
-缺少 agent 选择、缺少 v2 模型绑定、角色引用不存在的模型、模型不支持所选 reasoning effort、图片输入不被模型支持、配置 JSON 非法——这些情况都会明确失败，而不是回退到默认模型或旧配置。
+缺少 agent 选择、缺少 v2 模型绑定、角色引用不存在的模型、模型不支持所选 reasoning effort、配置 JSON 非法——这些情况都会明确失败，而不是回退到默认模型或旧配置。图片能力不足不再失败：不支持图片的模型会在请求期收到带文件名 / 路径的文本占位，历史中的图片保持不变。
 
 ### 3.5 事件日志是事实来源
 
@@ -55,6 +55,7 @@ OmniAgent 是一个本机运行的个人智能体。它不是为了再做一个�
 - 模型历史由 `projectMessages()` 从事件日志投影得到。
 - TUI 的会话列表、Web 的详情页、轨迹图和导出都从同一份日志投影。
 - 工具参数、权限决策、压缩元数据等分别以 `trace/*`、`todo/write`、`goal/change` 等事件持久化。
+- 请求期投影（`/init` 展开、不支持图片时的文本占位、`contextSample` 回放）不修改日志；日志始终保存用户原始输入和原始图片。
 
 ### 3.6 allowlist 只减少暴露面，不授予权限
 
@@ -124,15 +125,15 @@ OmniAgent 是一个本机运行的个人智能体。它不是为了再做一个�
 1. **选择会话**：UI 通过 workspace id + session id 打开会话；服务端用注册表解析真实路径。
 2. **准入校验**：`GET /sessions/:id` 或发送消息前，服务端投影 `permission/dsh-preset`、`agent/selected`、v2 `model/selected` 和可选 `mode/selected`。缺失或非法返回 `409`，不回退默认值。
 3. **解析运行时**：`RuntimeResolver.resolve()` 刷新配置和 agent 目录，校验 usage、profile、工具 / skill allowlist 和模型绑定，构造 `ModelClient`、system prompt、上下文窗口和 revision。
-4. **获取 Session**：Web 按 `(workspace, session)` + 权限预设 + 模型 binding + resolver revision 缓存 `Session`；TUI 用相同维度懒创建。
-5. **写入用户消息**：`Session.send()` 追加 `message/user` 事件，更新内存历史，准备标题。
-6. **进入循环**：`AgentLoop.run()` 每个 step 发 `turn.start`，按需压缩历史，向 provider 请求。
-7. **流式事件**：provider 的文本 / 思考增量转为 `assistant.delta` / `assistant.reasoning.delta`；完整消息以 `assistant.message` 发出。
-8. **工具批处理**：每个调用依次经过 `tool.call` → `prepareToolCall`（权限 / 审批 / 沙盒策略）→ `permission.decided` → 执行或拒绝 → `tool.result` → 审计。
+4. **获取 Session**：Web 按 `(workspace, session)` + 权限预设 + 模型 binding + resolver revision 缓存 `Session`；TUI 用相同维度懒创建。Web 可以用 `Prefer: respond-async` 立即返回 202，再用 `.../follow` 的 `run.snapshot` + 实时事件观察回合，断线不会停止服务端回合。
+5. **写入用户消息**：附件先写到工作区外的私有批次目录，再合成为文本元数据 + 图片 part；`Session.send()` 追加 `message/user` 事件，更新内存历史，准备标题。`/init [notes]` 仍按原文持久化，只在请求期展开。
+6. **进入循环**：`AgentLoop.run()` 每个 step 发 `turn.start`，按需压缩历史（当前用户消息和 steering 受保护），向 provider 请求；system prompt 由 `Session` 在每次请求时追加工作区 `AGENTS.md`。
+7. **流式事件**：provider 的文本 / 思考增量转为 `assistant.delta` / `assistant.reasoning.delta`；完整消息以 `assistant.message` 发出，并带上耗时、usage（含 cache）和内部 context sample。
+8. **工具批处理**：每个调用依次经过 `tool.call` → `prepareToolCall`（权限 / 审批 / 沙盒策略）→ `permission.decided` → 执行或拒绝 → `tool.result` → 审计。不支持图片的模型在这一步之前已把图片投影为文本占位。
 9. **结果回灌**：本 step 的所有工具结果合并成一条 `role: 'tool'` 消息，进入下一个 step。
 10. **回合结束**：`turn.end` 携带 `end_turn` / `max_tokens` / `max_steps` / `interrupted` / `error`。
 11. **续轮**：如果存在 active + armed 的 goal，Session 自动追加一轮 goal 消息，继续循环；否则等待下一条用户消息或后台通知。
-12. **对账**：Web UI 用服务端返回的 `messages`、`events`、`trajectory`、`audit` 重新投影，把流式视图收敛到持久化日志。
+12. **对账**：Web UI 用服务端返回的 `messages`（含 messageId / timestamp）、`events`、`trajectory`、`metrics`、`audit` 重新投影，把流式视图收敛到持久化日志；Context Meter 通过 `.../context` 单独刷新。
 
 ## 7. 配置分层
 
@@ -192,6 +193,9 @@ agentProfiles / modes  →  read-only                      →  文件围栏 / S
 - plan 模式只是提示词与 `exit_plan_mode` 的可见性，不是权限或沙盒机制。
 - 子代理继承创建者的权限预设，但使用自己的 agent 角色解析模型。
 - MCP 工具在服务器进程执行，不受本地文件沙盒约束，因此被视为 trusted；配置者必须自行信任该服务器。
+- Web 认证默认关闭；启用后所有业务 API（包括 SSE / follow）要求登录 cookie。它只保护 HTTP 访问，不隔离同 OS 用户的其他进程，也不提供传输加密。
+- 附件存放在工作区外的私有批次目录，模型只收到「不可信元数据 + 路径」；`read_file` 可在只读预设下读取附件，但内容仍是被审查的用户输入。
+- Linux 启动时会尝试准备 bubblewrap；不可用时报告原因或要求管理员安装 Landlock 启动器，不会自动降级为无沙盒。
 
 详见 [design/tools-permissions-sandbox.md](tools-permissions-sandbox.md)。
 
@@ -204,9 +208,12 @@ agentProfiles / modes  →  read-only                      →  文件围栏 / S
 | Web 模式预设 | `~/.omniagent/modes.json` | `ModeStore` |
 | 智能体定义 | `~/.omniagent/agents/*.md` | `AgentCatalog` |
 | 工作区注册 | `~/.omniagent/workspaces.json` | `WorkspaceRegistry` |
+| Web 附件 | `~/.omniagent-attachments/` 或 `/var/tmp/omniagent-attachments-<uid>/` | 按批次路径读取，不在内存中常驻 |
+| Web 账号密码 | `~/.omniagent/config.json` 的 `web.auth` | 启动时读取，重启生效 |
 | 计划任务与投递记录 | `~/.omniagent/schedules.json` | `ScheduleStore` / `ScheduleService` |
 | Web 审计 | `~/.omniagent/web-audit/*.jsonl` | 每次请求尾部读取 |
 | TUI 审计 | `<workspace>/.omniagent/audit.jsonl` | `AuditLog` |
+| 会话指标 | 事件日志的纯投影 | 每次请求重算 / UI 增量维护 |
 
 会话日志是 append-only 的；标题、pin、模式等「最新值」都是对事件流做 fold 得到的投影。配置类文件是读穿式加载，变更通过内容哈希 revision 生效。
 

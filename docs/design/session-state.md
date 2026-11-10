@@ -4,7 +4,8 @@
 
 - 会话组合根：`packages/core/src/session.ts`
 - 历史投影：`packages/core/src/session/projection.ts`
-- 上下文压缩：`packages/core/src/context/compaction.ts`
+- 输入投影：`packages/core/src/session/init-command.ts`、`workspace-instructions.ts`、`packages/core/src/context/image-input.ts`
+- 上下文压缩与投影：`packages/core/src/context/compaction.ts`、`projection.ts`
 - todo / plan / goal：`packages/core/src/session/todo.ts`、`plan.ts`、`goal.ts`、`goal-controller.ts`
 - 标题：`packages/core/src/session/title.ts`
 
@@ -37,7 +38,7 @@
 | 运行环境 | `cwd`、`workspace`、`session`、`sessionId`、`depth` |
 | 模型 | `model`、`modelId`、`modelCapabilities` |
 | agent / profile | `agent`（含 tools / skills 白名单）、`todoAllowParallelInProgress` |
-| 权限 | `dshPermissions`、`approve`；legacy `mode` / `rules` 仅兼容，不授权 |
+| 权限与沙盒 | `dshPermissions`、`approve`、`dshSandbox`（受信任 host 配置） |
 | plan | `reviewPlan`、`planActive` |
 | 循环 | `maxSteps`、`contextWindowTokens`、`retainContextTokens`、`audit` |
 | 扩展 | `tools`、`mcpTools`、`subagents`、`schedule`、`agentAuthoring`、`title` |
@@ -88,7 +89,56 @@
 - 会话日志仍然精确记录「有调用、没有结果」的真实状态；
 - 下一次读取会话时，修复会重新发生，而不是把合成结果永久写进日志。
 
-### 3.3 为什么不在日志里补结果
+`projectPublicHistory()` 在 `projectMessages()` 之上为每条消息生成稳定的 `messageId`（身份 + 事件哈希）和 `timestamp`（事件时间），供 Web 复制消息、显示时间和对账；它还会合并连续的 tool 消息。这些元数据只出现在 API / UI，不进入 provider 请求。
+
+### 3.4 `/init`、工作区指令与图片投影
+
+**`/init`**：`isInitCommand()` 只匹配单段纯文本且没有附件展示元数据的 `/init [notes]`。`Session` 把用户消息标记为 `initCommand: true`，日志仍保存用户原始输入；`projectCommandInput()` 在每次请求前把它展开成「检查仓库并创建 / 更新根 `AGENTS.md`」的完整指令，可选 notes 附在末尾。这样摘要和导出看到的是用户实际输入，模型看到的是展开后的任务。
+
+**工作区指令**：`systemText()` 每次请求都会读取工作区根目录的 `AGENTS.md`：
+
+- 只接受普通文件，`O_NOFOLLOW`，不跟随 symlink；
+- 最大 32 KiB，必须是合法 UTF-8；
+- 内容被 JSON 转义后放进 `<workspace_agents_md_json>`，并明确声明优先级低于 system / developer 指令、只能当作数据；
+- 缺失、超限、非法编码或读取失败的 `AGENTS.md` 会被跳过，不影响会话。
+
+`/init` 只是让模型去创建或更新这个文件；实际读写仍受权限预设、文件围栏和审批约束。
+
+**图片**：模型能力由 `modelCapabilities.imageInput` 决定：
+
+- `imageInput !== false`（包括能力未知）时，图片原样发给 provider；
+- `imageInput === false` 时，`projectImageInput()` 在**每次请求**把 image part 替换成带文件名和路径的文本占位；会话历史、日志和磁盘附件中的图片字节保持不变；
+- 这是请求期投影，不修改历史，因此切换模型后仍能重新使用图片；
+- 支持图片的模型看到的是原始图片；不支持图片的模型可以通过 `read_file` 读取附件路径的文本内容（图片本身仍不可预览）。
+
+### 3.5 上下文投影与用量观测
+
+`projectContext(messages, system, tools, provider, model)`（`context/projection.ts`）给 Web / TUI 提供 Context Meter 数据：
+
+```ts
+{
+  breakdown: { systemTokens, toolsTokens, messageTokens },
+  projectedTokens: number,
+  source: 'usage' | 'estimate',
+  inputTokens?: number
+}
+```
+
+算法：
+
+1. 计算当前 system / tools / messages 的估算；
+2. 从后向前找最近一条同时有 `usage.inputTokens > 0` 和 `contextSample` 的 assistant；
+3. 要求 `contextSample.provider / model` 与当前路由一致，且 `historyHash` 等于该消息之前请求历史的哈希；
+4. 命中时 `projectedTokens = 上次真实 inputTokens + (当前估算 - 上次采样估算)`，`source: 'usage'`；
+5. 否则直接使用三段估算之和，`source: 'estimate'`。
+
+`contextSample` 在每次成功请求后写入 assistant 消息，包含 provider / model、历史哈希和三段估算。它和 `usage` 一样不发给 provider；估算使用 UTF-8 JSON 字节 / 4，图片按每张 1,024 token 的固定近似，不读取图片真实尺寸。
+
+`Session.contextProjection()` / `contextMessageEstimate()` 只在没有活动回合时可用。Web 的 `GET .../context` 会优先使用匹配当前 preset / 模型 / revision 的 live Session，其次用 replay 构造临时 Session；运行中的回合不返回估算，避免把旧数据当成实时值。
+
+会话指标（runs / steps / requests / usage / cache / throughput）不是新的持久化事件，而是 `projectSessionMetrics()` 对持久化 trace 和 assistant usage 的投影；Web UI 在流式过程中增量维护同一形状，并在 reconnect 时用服务器 baseline 重建。
+
+### 3.6 为什么不在日志里补结果
 
 补写会伪造历史：模型可能以为工具执行过，或者审计与轨迹出现不存在的记录。当前设计选择「输入修复、日志保真」。代价是每次读取都要重新计算，同时压缩后的 provider 输入不会替换原始历史，后续 turn 可能重复压缩。
 
@@ -98,46 +148,54 @@
 
 ```ts
 estimateMessageTokens(message) =
-  max(1, ceil(UTF8(JSON.stringify(message)).length / 4))
+  max(1, ceil(UTF8(JSON.stringify(messageWithoutUsageAndContextSample)).length / 4))
+  + imageCount * 1024
 ```
 
-这是一个 provider 无关的保守估算，包含 JSON 字段名、tool 参数 / 结果全文和图片 base64。它不是真实 tokenizer。
+这是一个 provider 无关的保守估算，包含 JSON 字段名、tool 参数 / 结果全文，但不包含 `usage` / `contextSample`（它们是本地计量元数据，不会发给 provider）。图片不按 base64 长度计算，而是每张固定 1,024 token 的视觉近似。
 
 ### 4.2 算法
 
-`compactMessages(input, { maxTokens, retainTokens?, summarize? })`（`context/compaction.ts:27-94`）：
+`compactMessages(input, { maxTokens, retainTokens?, summarize?, project?, protectedIndices? })`：
 
 1. 深拷贝消息。
-2. 估算 `beforeTokens`；不超过 `maxTokens` 就原样返回。
+2. 用 `project(messages)`（如果提供）估算 `beforeTokens`；不超过 `maxTokens` 就原样返回。
 3. `retainTokens` 默认是 `maxTokens * 0.25`。
 4. 把消息分组：
    - assistant 带 tool calls + 紧随其后的 tool 消息 → 一组；
    - 其他消息单条一组。
-5. 从尾部向前累计到 `retainTokens`，得到保留后缀起点。
-6. 继续从前面丢弃组，直到后缀本身不超过 `maxTokens`。
-7. 被移除的前缀作为 `removed`；保留后缀不动。
-8. 摘要默认是 `Earlier conversation compacted (N messages).`。
-9. 结果 = 一条 `user` 消息 `[conversation summary]\n<summary>` + 保留后缀。
-10. 如果压缩后 token 数没有减少，返回未压缩副本，避免「摘要反而变大」。
+5. `protectedIndices` 指向的消息所在组标记为受保护，压缩时永不丢弃。AgentLoop 至少保护当前 turn 的最新用户消息，以及队列中新增的 steering 用户消息。
+6. 从尾部向前累计到 `retainTokens`，得到保留后缀起点。
+7. 继续从前面丢弃未受保护的组，直到「保留后缀 + 受保护组」不超过 `maxTokens`。
+8. 被移除的前缀作为 `removed`；保留后缀和受保护组不动。
+9. 如果没有任何可移除的消息，返回未压缩副本。
+10. 摘要默认是 `Earlier conversation compacted (N messages).`。
+11. 结果 = 一条 `user` 消息 `[conversation summary]\n<summary>` + 保留消息。
+12. 如果压缩后 token 数没有减少，返回未压缩副本，避免「摘要反而变大」。
+13. 返回更新后的 `protectedIndices`（摘要插入后索引整体后移一位）。
 
 ### 4.3 触发方式
 
-- **自动**：只有配置了 `contextWindowTokens` 时，AgentLoop 每个 step 都会尝试压缩（`agent-loop.ts:83-100`）。
+- **自动**：配置了 `contextWindowTokens` 时，AgentLoop 每个 step 都会尝试压缩。
 - **手动**：`Session.requestCompaction()` 设置一次性标志；下一个 step 消费它。
   - 手动压缩的 `maxTokens = max(1, floor(beforeTokens / 2))`；
   - 不传 `retainTokens`，因此使用默认的 1/4。
 
+两种路径都通过 `project: history => projectImageInput(projectCommandInput(history), imageInput)` 估算「真正发给 provider 的消息」：图片按 1,024 token 计，不支持图片的模型按占位文本计，`/init` 按展开后的长指令计。
+
 ### 4.4 重要限制
 
-- 预算只计算 `messages`，**不包含 system prompt、tool JSON schema 和输出预留**。`contextWindowTokens` 实际是「历史消息预算」。
+- 压缩预算只计算 `messages`，**不包含 system prompt、tool JSON schema 和输出预留**；`contextWindowTokens` 在 AgentLoop 里是「历史消息预算」。
+- Context Meter 的投影包含 system + tools + messages，因此即使投影接近模型窗口，压缩预算仍可能只按消息部分计算；需要更保守时手动把 `contextWindowTokens` 调小。
 - 没有真实摘要：AgentLoop 不传 `summarize`，被移除的内容只留下条数占位符。
-- 图片 base64 会被当作普通文本计入估算，可能触发过早压缩。
+- 图片按固定 1,024 token 近似，可能高估或低估实际视觉成本。
 - 压缩结果只存在于内存 / 本次循环，**不写回会话日志**。重新打开会话会从完整历史重建，内存视图与日志视图可能不同。
 - 如果历史修复发生（`repaired=true`），本次循环的压缩结果会被整体丢弃。
+- 受保护的用户消息可能让保留部分超过 `maxTokens`；这是有意的，优先保证当前输入和 steering 不丢失。
 
 ### 4.5 配置建议
 
-- `contextWindowTokens` 应该设为「模型上下文窗口减去 system prompt、工具 schema 和期望输出」后的值，而不是模型的完整窗口。
+- `contextWindowTokens` 取配置值或模型目录的 `contextWindow`，是压缩触发窗口；需要为 system prompt、工具 schema 和输出预留空间时，显式配置得更小。
 - 需要保留更多近期上下文时调大 `retainContextTokens`；但保留越多，压缩越频繁。
 - 需要真正摘要时，应在 `compactMessages` 的调用处注入 `summarize`，并接受额外的模型调用成本。
 
@@ -332,7 +390,7 @@ goal 轮中完成或阻塞后，Session 通过 `deferGoalContext()` 注入 `<goa
 | 状态 | 写入方 | 读取方 |
 | --- | --- | --- |
 | `message/user` | `Session.send` / `deliverUserMessage` / goal 续轮 | `projectMessages`、UI |
-| `message/assistant` | `runTurn` | `projectMessages`、UI |
+| `message/assistant` | `runTurn` | `projectMessages`、UI；含 `usage`、`requestDurationMs`、`contextSample` |
 | `message/tool-result` | `runTurn` | `projectMessages`、UI |
 | `todo/write` | `todo_write` 工具 | `projectTodos`、TUI/Web |
 | `plan/mode` | `/plan` 或 Web plan 路由 | `projectPlanMode`、Session |
@@ -350,6 +408,11 @@ goal 轮中完成或阻塞后，Session 通过 `deferGoalContext()` 注入 `<goa
 - **权限快照在构造时捕获**：不是每个 turn 重新捕获。修改预设后必须重建 Session；前端在 revision / preset 变化时会重建。
 - **压缩无真实摘要**：见 4.4。
 - **压缩不持久化**：重新打开会话后内存历史会回到完整版本。
+- **Context 投影只在空闲时可信**：运行中的回合由 AgentLoop 持有可变历史，`contextProjection()` / `contextMessageEstimate()` 返回 `undefined`；Web 不返回活动回合的估算。
+- **Context sample 会失效**：provider / model 变化、历史哈希不匹配或前一条 assistant 没有有效 usage 时，投影退回纯估算；切换路由后会先显示估算值，直到产生新的真实 usage。
+- **工作区 `AGENTS.md` 不进入事件日志**：每次请求重新读取，修改后立即影响下一次请求；超过 32 KiB、非法 UTF-8 或 symlink 会被跳过。它不能覆盖 system / developer 指令。
+- **`/init` 日志与请求不同**：日志保存用户输入的 `/init ...`，模型看到的是展开后的指令；导出也保留用户原文。
+- **不支持图片的模型不再失败**：图片在请求期被替换为文本占位，原始图片仍留在历史和磁盘附件中；`read_file` 只能读取附件的文本内容。
 - **`max_tokens` 留下悬空 tool calls**：由下一次历史修复补齐，但日志保持原样。
 - **后台 turn 的错误可能被吞掉**：`runBackgroundTurn` 捕获异常后只记录 `runTurn` 已写的 trace；如果异常发生在 `runTurn` 之前，可能没有可见错误。
 - **标题请求不随 `interrupt()` 取消**：`interrupt()` 只 abort 主 turn 的 controller；标题请求有独立超时。

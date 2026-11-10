@@ -313,27 +313,76 @@ TUI 和 Web 的审计文件互不读取、不迁移。
 
 导出仍包含对话文本和工具输出，可能含敏感信息，分享前必须检查。
 
+### 8.4 会话指标
+
+`projectSessionMetrics()`（`web/src/session-metrics.ts`）把事件日志投影为数值聚合，不写新事件：
+
+```ts
+{
+  version: 1,
+  runs: { started, completed, durationMs, knownDurationCount },
+  steps: { started },
+  requests: { count, durationMs, knownDurationCount },
+  usage: { inputTokens, outputTokens, inputKnownCount, outputKnownCount },
+  throughput: { outputTokens, durationMs, count },
+  cache: { inputTokens, cachedInputTokens, count }
+}
+```
+
+规则：
+
+- `trace/turn.start` 按 step 序列切分 run；step 回退或为 0 时视为新 run；
+- `trace/turn.end` 只结束当前 run，并累计已知 duration；
+- `message/assistant` / `assistant/message` 只接受 assistant（或未标注 role）的消息，累计请求数、usage、cache 和吞吐；
+- 用户消息不作为 run 边界；
+- 所有字段都只接受有限、非负、安全的整数，遇到异常值就跳过该字段。
+
+指标不是持久化事实，随时可以从日志重建；Web UI 在流式过程中维护同一形状，并在 `run.snapshot` baseline 或会话详情加载时重建。
+
 ## 9. 工作区注册表
 
 `~/.omniagent/workspaces.json`：
 
 ```json
 [
-  { "id": "uuid", "path": "/canonical/path", "name": "basename", "lastUsedAt": 1234567890 }
+  { "id": "uuid", "path": "/canonical/path", "name": "basename", "lastUsedAt": 1234567890, "isDefault": true }
 ]
 ```
 
 - `add()`：`realpath` 规范化路径，必须是已存在目录；同一 canonical path 复用已有记录；
-- `remove()`：只删除注册项，不删除目录或会话；
+- `ensureDefault()`：创建并登记 `~/.omniagent/default-workspace`，把该记录标为 `isDefault: true`，并清除其他记录的默认标记；
+- `remove()`：只删除注册项，不删除目录或会话；默认记录拒绝删除；
 - `touch()`：更新 `lastUsedAt`；
 - 读取校验：数组、字段类型、id / path 唯一；
 - 写入：临时文件 + rename，**没有 fsync**，只保证单进程串行。
 
-Web 会话路由以注册表为权威：workspace id 必须存在，mutation 时还会校验注册路径。
+Web 启动时先 `ensureDefault(~/.omniagent/default-workspace)`，再 `add(process.cwd())`；两者 canonical path 相同时复用同一条记录（保留已有 id / name / 默认标记）。Web 会话路由以注册表为权威：workspace id 必须存在，mutation 时还会校验注册路径。默认工作区不可取消登记，但可以照常创建和删除会话。
 
-## 10. 实时会话与缓存
+## 10. 附件存储
 
-### 10.1 LiveSessionRegistry
+Web 附件（图片、文件、文本）不写进工作区，也不写进会话目录，而是写入工作区外的私有批次目录：
+
+```text
+~/.omniagent-attachments/<48 位随机批次名>/0-<name>
+/var/tmp/omniagent-attachments-<uid>/<48 位随机批次名>/...
+```
+
+选择顺序和约束：
+
+- 只支持 Linux / macOS，且必须有 `uid`；
+- 批次目录必须位于 workspace、cwd、Git worktree 和可写临时根之外；`/tmp` 被排除，因为 bwrap 可能用 tmpfs 遮蔽它；
+- 父目录不能可被组 / 其他写入（除非有 sticky bit），批次目录和文件要求 `0700` / `0600`、属主为当前 uid；
+- 批次名是 24 字节随机数（48 位 hex），作为 bearer capability；文件名固定为 `<index>-<safe-name>`；
+- 写入使用 `O_EXCL | O_NOFOLLOW`，写入前重新校验目录身份，拒绝 symlink 替换；
+- 单文件最大 8 MiB，批内最多 8 个附件。
+
+用户消息成功持久化后保留批次；回合在写入用户消息前失败或被拒绝时删除已写文件。`readAttachment()` 只接受上述目录中的普通文件，要求物理路径、`nlink === 1`、权限不向组 / 其他开放、大小不超过 8 MiB，并拒绝 symlink；`read_file` 可以用它读取附件内容。
+
+附件不进入导出、fork 或子代理复制；图片字节仍会随用户消息写入 `session.jsonl`，文本 / 文件内容只在批次目录中，直到用户自行清理。
+
+## 11. 实时会话与缓存
+
+### 11.1 LiveSessionRegistry
 
 `packages/web/src/live-sessions.ts`：
 
@@ -341,7 +390,7 @@ Web 会话路由以注册表为权威：workspace id 必须存在，mutation 时
 - LRU，默认上限 128；
 - 作用：让 Web 标签页、计划任务、子代理共享同一个 `Session` 实例，避免两个实例写同一份日志。
 
-### 10.2 Web Session 缓存
+### 11.2 Web Session 缓存
 
 `server.ts` 的 `getSession()`：
 
@@ -353,7 +402,7 @@ Web 会话路由以注册表为权威：workspace id 必须存在，mutation 时
 - 超过 `MAX_CACHED_WEB_SESSIONS = 64` 时按插入序淘汰，跳过当前 key 和 running 中的 key；
 - 权限 / agent / model / plan 变更、删除会话时主动失效。
 
-## 11. 手工检查数据
+## 12. 手工检查数据
 
 ```bash
 # 列出所有会话文件
@@ -378,16 +427,18 @@ jq . ~/.omniagent/workspaces.json
 - 如果必须删除，只能删除整个会话目录，并确保没有进程正在运行该会话；
 - 审计和会话都可能包含敏感内容。
 
-## 12. 隐私边界
+## 13. 隐私边界
 
 | 数据 | 可能包含 | 暴露面 |
 | --- | --- | --- |
-| `session.jsonl` | 对话、工具参数 / 结果、图片、权限决策、goal / todo | 本机文件；Web API 只返回脱敏消息和 trace |
+| `session.jsonl` | 对话、工具参数 / 结果、图片、用量、权限决策、goal / todo | 本机文件；Web API 只返回脱敏消息和 trace（含 usage / 时间，不含 contextSample） |
+| `~/.omniagent-attachments/`、`/var/tmp/omniagent-attachments-*` | 上传的图片、文件、文本原文 | 仅当前 uid 可读；模型可通过 `read_file` 按路径读取 |
+| `config.json` | provider 凭据、`web.auth` 明文账号密码 | 本机文件；建议 `0600`，同用户进程仍可读 |
 | `web-audit/*.jsonl` | 工具名、参数摘要、权限 source、决策 | Web API 不返回摘要和 source |
 | `schedules.json` | prompt、目标会话、投递记录 | 本机文件 |
-| `workspaces.json` | 本地路径 | Web API 返回注册信息 |
-| 实时 SSE | 完整 assistant / tool 事件 | 只在本机 loopback；不是脱敏导出 |
+| `workspaces.json` | 本地路径、默认工作区标记 | Web API 返回注册信息 |
+| 实时 SSE / `run.snapshot` | 完整 assistant / tool 事件、baseline 消息与指标 | 认证关闭时只受 loopback 和 Host/Origin 保护；不是脱敏导出 |
 | 会话导出 | 对话文本、工具输出 | 可能含秘密，需人工检查 |
 | 轨迹 / trace | 元数据，无正文 / 参数 / 结果 | 相对安全，但仍暴露工具调用模式 |
 
-没有本地用户认证。Host / Origin 检查只防止浏览器跨站请求，不阻止同 OS 用户的其他进程。
+Web 认证默认关闭；启用后所有业务 API（包括 SSE / follow）要求登录 cookie。认证只限制通过 HTTP 的访问，不隔离同一 OS 用户的其他进程：它们仍可读取会话文件、附件、审计和明文配置。Host / Origin 检查始终只是浏览器侧保护。

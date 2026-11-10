@@ -65,7 +65,7 @@ store / context / exec
 | 文件 | 内容 |
 | --- | --- |
 | `events.ts` | `AgentEvent`、`StopReason`、`AgentError`、`AgentCommand`、`isTerminalEvent` |
-| `permission.ts` | `PermissionMode`、`Decision`、`Rule`、`PermissionRequest`、`PermissionGate`、`ApprovalHandler` |
+| `permission.ts` | `Decision`、`PermissionRequest`、`PermissionGate`、`ApprovalHandler` |
 | `reasoning.ts` | `REASONING_EFFORTS` |
 
 这是 core 与 UI 的唯一契约层。
@@ -139,19 +139,19 @@ store / context / exec
 | `ripgrep.ts` | glob / grep 的 ripgrep 传输、限额、超时、采样 |
 | `limits.ts` | 输出 / 目录条目上限 |
 | `index.ts` | `createDefaultRegistry()` |
+| `attachment-storage.ts` | 附件批目录：工作区外私有存储、随机批次名、`readAttachment()` 校验 |
 | `builtin/*.ts` | 各内置工具 |
+
+`read_file` 会先尝试 `readAttachment()`：附件批次中的文件可以在 `read-only` 下读取，但仍拒绝 binary、非 UTF-8 和超限内容。
 
 ### 3.10 `permissions/`
 
 | 文件 | 内容 |
 | --- | --- |
-| `dsh-permissions.ts` | 三个预设、bundle、事件投影、快照 |
+| `dsh-permissions.ts` | 三个预设、bundle、事件投影、快照、默认预设解析 |
 | `dsh-escalation.ts` | 独立的一次性升级 helper（与 Session 内逻辑等价） |
-| `gate.ts` | `RuleBasedGate`（legacy 规则引擎，Session 不使用） |
-| `evaluate.ts` | 规则决策、模式默认 |
-| `rules.ts` | 规则解析、命令拆分、路径匹配、glob |
-| `modes.ts` | legacy 模式、编辑工具、受保护路径 |
-| `bash.ts` | shell 命令拆分 |
+
+旧的规则引擎（`gate.ts` / `evaluate.ts` / `rules.ts` / `modes.ts` / `bash.ts`）已删除；授权只来自 DSH 预设和 Session 的一次性升级。
 
 ### 3.11 `sandbox/`
 
@@ -161,7 +161,10 @@ store / context / exec
 | `dsh-fs.ts` | 文件围栏、symlink / hardlink 检查 |
 | `dsh-hardlinks.ts` | shell 可写根硬链接预检 |
 | `dsh-sandbox.ts` | Seatbelt / bwrap / Landlock 探测与 argv 包装 |
+| `dsh-sandbox-prepare.ts` | Linux 启动准备：探测、可信包管理器、交互安装 bubblewrap |
 | `runner.ts` | 较早的独立 sandbox helper（Session 的 bash 不使用） |
+
+Linux 启动准备由仓库根 `scripts/prepare-linux-sandbox.ts` 调用，`pnpm install` 的 `postinstall`、`pnpm dev` 和 Web 启动都会触发；macOS 等非 Linux 平台直接返回 `unsupported`。Landlock 启动器的原生源码在 `packages/core/native/linux/landlock-run.c`。
 
 ### 3.12 `session/`
 
@@ -171,7 +174,9 @@ store / context / exec
 | `agent-selection.ts` | `agent/selected` 投影、切换、usage 校验 |
 | `model-binding.ts` | v2 模型绑定、role → model、effort 优先级 |
 | `mode-selection.ts` | `mode/selected` 投影与快照 |
-| `projection.ts` | 事件 → `Message[]`、公开消息脱敏 |
+| `init-command.ts` | `/init [notes]` 识别与展开为工作区指令生成提示 |
+| `workspace-instructions.ts` | 读取工作区根 `AGENTS.md`（32 KiB、不跟随 symlink） |
+| `projection.ts` | 事件 → `Message[]`、公开消息脱敏、`projectPublicHistory()` |
 | `todo.ts` | todo 校验与投影 |
 | `plan.ts` | plan/mode 投影、guidance |
 | `goal.ts` | goal schema、fold、投影、round 重放 |
@@ -224,7 +229,9 @@ store / context / exec
 
 | 文件 | 内容 |
 | --- | --- |
-| `context/compaction.ts` | token 估算、压缩算法 |
+| `context/compaction.ts` | token 估算、图片固定成本、压缩算法、受保护消息 |
+| `context/projection.ts` | system / tools / messages 分解、context sample 与投影 |
+| `context/image-input.ts` | 不支持图片的模型按请求替换为文本占位 |
 | `eval/harness.ts` | case 运行、fixture、断言 |
 | `eval/run.ts` | CLI 入口 |
 | `eval/suites/basic.ts` | 内置能力 / 权限用例 |
@@ -242,12 +249,15 @@ barrel 只放在包边界；模块之间不要 `export *` 满天飞。
 
 ```ts
 type Message =
-  | { role: 'user'; content: UserContent[] }
-  | { role: 'assistant'; content: AssistantContent[]; toolCalls: ToolCall[]; usage?: Usage; dshReplay?; providerReplay? }
+  | { role: 'user'; content: UserContent[]; initCommand?: true }
+  | { role: 'assistant'; content: AssistantContent[]; toolCalls: ToolCall[]; usage?: Usage;
+      requestDurationMs?: number; contextSample?: ContextSample; dshReplay?; providerReplay? }
   | { role: 'tool'; results: ToolResult[] };
 ```
 
-`AssistantContent` 目前只含 text；reasoning 通过流式事件展示，不进入可见正文。
+`ContentPart` 的文本部分可带附件展示元数据（kind / name / mediaType / filePath），图片部分带 `fileName`、`filePath`；图片字节仍随历史持久化。`Usage` 增加可选的 `cachedInputTokens`。`AssistantContent` 目前只含 text；reasoning 通过流式事件展示，不进入可见正文。
+
+`contextSample` 记录该次请求的 provider / model、历史哈希和 system / tools / messages 估算，用于下一次 `projectContext()` 在真实 `inputTokens` 基础上计算增量；它和 `usage` 一样不发给 provider。
 
 ### 4.2 工具
 
@@ -288,7 +298,7 @@ interface ModelClient {
 
 ```text
 1. 解析 session id / header / 事件
-2. 冻结 DSH 权限快照
+2. 冻结 DSH 权限快照与 host 提供的 dshSandbox 选项
 3. 投影 history / plan / todos / goal
 4. 创建 GoalController
 5. 注册工具
@@ -298,14 +308,16 @@ interface ModelClient {
    ├─ 替换 skill 为 allowlist 版本
    └─ 追加会话工具 / MCP / subagent / schedule / authoring
 6. 创建 AgentLoop
-   ├─ model
-   ├─ system（动态）
+   ├─ model + modelId + imageInput
+   ├─ system（动态；包含工作区 AGENTS.md）
    ├─ toolSpecs（动态）
    ├─ takeQueuedMessages
    ├─ takeForceCompact
    └─ prepareToolCall
-7. 准备 title / background event
+7. 准备 title / background event / context projection
 ```
+
+`Session.systemText()` 每次请求都会重新读取工作区根 `AGENTS.md`；`contextProjection()` 与 `contextMessageEstimate()` 只在空闲时可用，运行中的回合由 `AgentLoop` 持有可变历史。`/init` 消息在历史中带 `initCommand: true`，发送给 provider 前由 `projectCommandInput()` 展开，日志里仍只保存用户原始输入。
 
 前端只负责：
 
@@ -322,9 +334,15 @@ ConfigStore + AgentCatalog + ModeStore + RuntimeResolver
 | --- | --- |
 | 改主循环行为 | `loop/agent-loop.ts`、`session.ts` 的 `runTurn` |
 | 改工具参数 / 输出 | `tools/builtin/<tool>.ts`、`tools/tool.ts` |
-| 加权限规则 | `permissions/dsh-permissions.ts`、`session.ts` 的 `prepareToolCall` |
+| 加权限规则 / 预设 | `permissions/dsh-permissions.ts`、`session.ts` 的 `prepareToolCall` |
+| 改一次性升级 | `permissions/dsh-escalation.ts`、`session.ts` |
 | 改沙盒 | `sandbox/dsh-*.ts` |
-| 加模型协议 | `providers/create.ts`、`providers/*` |
+| 改 Linux 沙盒准备 | `sandbox/dsh-sandbox-prepare.ts`、`scripts/prepare-linux-sandbox.ts` |
+| 改 Landlock 启动器 | `packages/core/native/linux/landlock-run.c` |
+| 改附件存储 / 读取 | `tools/attachment-storage.ts`、`tools/builtin/read-file.ts` |
+| 改上下文估算 / Context Meter | `context/compaction.ts`、`context/projection.ts`、`context/image-input.ts` |
+| 改工作区指令 / `/init` | `session/workspace-instructions.ts`、`session/init-command.ts` |
+| 改模型协议 | `providers/create.ts`、`providers/*` |
 | 改配置 schema | `config/load.ts`、`config/models.ts` |
 | 改 agent 文件格式 | `agents/catalog.ts`、`frontmatter.ts` |
 | 改会话日志 | `session/store.ts`、`session/types.ts` |

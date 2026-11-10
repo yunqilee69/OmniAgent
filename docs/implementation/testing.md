@@ -34,19 +34,19 @@ TypeScript 配置是 strict + `noUncheckedIndexedAccess` + `verbatimModuleSyntax
 | --- | --- |
 | 主循环 | `loop/agent-loop.test.ts` |
 | Session | `session.test.ts`、`session-agent.test.ts`、`session-continuation.test.ts`、`session-dsh-permissions.test.ts`、`session-goal.test.ts`、`session-plan.test.ts`、`session-title.test.ts`、`session-todo.test.ts` |
-| 会话子模块 | `session/agent-selection.test.ts`、`goal.test.ts`、`mode-selection.test.ts`、`model-binding.test.ts`、`model-replay.test.ts`、`ownership.test.ts`、`plan.test.ts`、`projection.test.ts`、`runtime.test.ts`、`session-management.test.ts`、`store.test.ts`、`todo.test.ts` |
-| 配置 | `config/dsh-config.test.ts`、`models.test.ts`、`store.test.ts` |
+| 会话子模块 | `session/agent-selection.test.ts`、`goal.test.ts`、`init-command.test.ts`、`mode-selection.test.ts`、`model-binding.test.ts`、`model-replay.test.ts`、`ownership.test.ts`、`plan.test.ts`、`projection.test.ts`、`runtime.test.ts`、`session-management.test.ts`、`store.test.ts`、`todo.test.ts` |
+| 配置 | `config/dsh-config.test.ts`、`models.test.ts`、`store.test.ts`、`web-config.test.ts` |
 | 智能体 | `agents/catalog.test.ts`、`authoring.test.ts` |
 | 模式 | `modes/store.test.ts` |
 | Provider | `providers/dsh-deepseek.test.ts`、`dsh-registry.test.ts`、`openai.test.ts`、`pi-model.test.ts` |
-| 工具 | `tools/builtin/fs-tools.test.ts`、`search.test.ts`、`skill.test.ts`、`web-fetch.test.ts`、`dsh-shell.test.ts`、`tools/paths.test.ts` |
-| 权限 | `permissions/dsh-permissions.test.ts`、`dsh-escalation.test.ts`、`permissions.test.ts` |
-| 沙盒 | `sandbox/dsh-fs.test.ts`、`dsh-sandbox.test.ts`、`runner.test.ts` |
+| 工具 | `tools/builtin/fs-tools.test.ts`、`search.test.ts`、`skill.test.ts`、`web-fetch.test.ts`、`dsh-shell.test.ts`、`tools/attachment-storage.test.ts`、`tools/paths.test.ts` |
+| 权限 | `permissions/dsh-permissions.test.ts`、`dsh-escalation.test.ts` |
+| 沙盒 | `sandbox/dsh-fs.test.ts`、`dsh-sandbox.test.ts`、`dsh-sandbox-prepare.test.ts`、`runner.test.ts` |
 | 持久化 | `store/audit.test.ts`、`session/store.test.ts` |
 | 子代理 | `subagents/runtime-manager.test.ts` |
 | 计划任务 | `schedule/schedule.test.ts` |
 | MCP | `mcp/config.test.ts`、`mcp/service.test.ts` |
-| 压缩 | `context/compaction.test.ts` |
+| 压缩 / 投影 | `context/compaction.test.ts`、`context/projection.test.ts` |
 | 执行器 | `exec/executor.test.ts` |
 | 集成 | `dsh-runtime.integration.test.ts` |
 
@@ -55,6 +55,7 @@ TypeScript 配置是 strict + `noUncheckedIndexedAccess` + `verbatimModuleSyntax
 | 文件 | 覆盖 |
 | --- | --- |
 | `main.test.ts` | 命令解析、会话切换、模型选择 |
+| `sandbox-startup.test.ts` | 启动沙盒准备顺序与失败诊断 |
 | `render.test.ts` | 事件 → 终端输出、块间距、工具卡、状态行 |
 | `blocks.test.ts` | 纯文本构建、调色板角色 |
 
@@ -62,8 +63,11 @@ TypeScript 配置是 strict + `noUncheckedIndexedAccess` + `verbatimModuleSyntax
 
 | 文件 | 覆盖 |
 | --- | --- |
-| `server.test.ts` | 路由、SSE、会话生命周期 |
+| `server.test.ts` | 路由、SSE、异步 follow、会话生命周期 |
 | `server-contract.test.ts` | API 契约 |
+| `auth.test.ts` / `ui-auth.test.ts` | 登录 cookie、限流、401 与前端认证状态 |
+| `attachments.test.ts` | 附件解析、大小限制、批次清理 |
+| `session-metrics.test.ts` / `session-metrics-live.test.ts` | 指标投影与流式增量 |
 | `approval.test.ts` / `approval-route.test.ts` | 审批代理与 HTTP 回填 |
 | `permissions.test.ts` / `dsh-permission-route.test.ts` | 默认权限设置 |
 | `model-settings.test.ts` / `model-route.test.ts` / `model-sources-route.test.ts` | 模型来源与角色 |
@@ -74,8 +78,14 @@ TypeScript 配置是 strict + `noUncheckedIndexedAccess` + `verbatimModuleSyntax
 | `session-export.test.ts` / `export-route.test.ts` | 导出 |
 | `trajectory.test.ts` / `trajectory-route.test.ts` | 轨迹 |
 | `trace-projection.test.ts` | trace 投影 |
-| `workspaces.test.ts` / `workspace-files.test.ts` | 工作区与文件搜索 |
-| `ui-store.test.ts` / `ui-protocol.test.ts` | 前端状态仓库与事件 reducer |
+| `model-picker.test.ts` | 模型选择器 |
+| `workspaces.test.ts` / `workspace-files.test.ts` | 工作区注册、文件搜索、目录浏览与预览 |
+| `workspace-file-ui.test.ts` | 文件树 / 预览组件 |
+| `sidebar.test.ts` | 多工作区侧栏、默认工作区不可移除 |
+| `header-trajectory.test.ts` | Header 状态与轨迹入口 |
+| `context-meter.test.ts` | `/context` 估算路由 |
+| `todo-dock.test.ts` | 底部 todo 状态 |
+| `ui-store.test.ts` / `ui-protocol.test.ts` | 前端状态仓库、run snapshot、事件 reducer |
 | `composer-trigger.test.ts` / `matcher.test.ts` | Composer 触发器与 LIKE 匹配 |
 | `i18n.test.ts` | 翻译 key |
 | `audit.test.ts` | Web 审计 |
@@ -141,6 +151,23 @@ Web 路由测试通常：
 
 例如 `basicSuite` 的「只读预设阻止写文件」断言 `decisions: ['allow']` 和 `absentFiles: ['secret.txt']`。这不是矛盾：DSH 工具准入允许调用，但真实写入被围栏拒绝。
 
+### 3.6 平台相关测试
+
+- 使用 `it.runIf(...)` / `describe.runIf(...)`，不要假设 Linux 路径语义在 macOS 成立；
+- `sandbox/dsh-sandbox.test.ts` 的 `/tmp` 遮蔽用例只在 `/tmp` 是物理路径时运行：macOS 的 `/tmp` 解析为 `/private/tmp`，物理根不可能位于字面量 `/tmp` 之下；
+- 原生 Landlock 测试需要 `OMNI_TEST_LANDLOCK=1` 和真实 Linux 主机；
+- Seatbelt 测试可以模拟 `platform: 'darwin'`，但实际执行仍需 macOS。
+
+### 3.7 异步回合测试
+
+`Prefer: respond-async` + `GET .../follow` 的测试通常：
+
+1. 用可控 FakeModel / 延迟第一步，让 turn 保持在运行中；
+2. POST 消息并断言 `202`；
+3. GET follow，解析首帧 `run.snapshot`，断言 baseline 消息 / 指标和已发生事件；
+4. 继续推进模型，断言 follower 收到后续事件和 `turn.end`；
+5. 断开 POST / follower，断言服务端回合继续并在结束后清理 running 状态。
+
 ## 4. eval harness
 
 ### 4.1 生命周期
@@ -177,7 +204,7 @@ Web 路由测试通常：
 }
 ```
 
-旧 `mode` / `permissions` 字段仍可出现在类型中，但**不授权执行**；`permissionPreset` 是唯一授权来源。
+`permissionPreset` 是唯一授权来源；未指定预设时工具调用会被拒绝。旧的 `mode` / `permissions` 字段已从 `EvalCase` 类型中移除。
 
 ### 4.2 断言
 
@@ -212,12 +239,11 @@ Web 路由测试通常：
 
 **权限 eval**
 
-- 某次调用应该 allow / ask / deny；
-- 本质是分类问题；
-- 最重要的是 **false allow**（该拒却放行），不是总体准确率；
-- `auto` 权限模式必须先有标注用例，否则无法判断分类器准不准。
+- 验证 DSH 预设、一次性审批和沙盒围栏在允许与拒绝场景中的实际行为；
+- 重点检查不应放行的调用，以及只读 / workspace-write 下写入是否真的被围栏拒绝；
+- 需要分类器指标时再引入标注用例，当前 harness 不做混淆矩阵。
 
-当前 harness 覆盖能力和权限决策；混淆矩阵（precision / recall / false-allow）是后续工作。设计细节见 [spec/eval-harness.md](../spec/eval-harness.md)。
+当前 harness 覆盖能力和权限决策，也可以通过文件断言验证沙盒结果。设计细节见 [spec/eval-harness.md](../spec/eval-harness.md)。
 
 ## 5. 写新测试的检查清单
 
@@ -295,8 +321,9 @@ pnpm web:serve # 另一个终端
 ## 7. 常见陷阱
 
 - **只测 HTTP 200，不测 SSE 事件顺序**：前端依赖顺序，尤其是 `tool.call` → `permission.requested` → `permission.decided`。
+- **只测同步 SSE**：Web 现在默认使用 `Prefer: respond-async` + `follow`；异步启动失败会用 `500` + 特殊 code 表达「消息可能已保存」。
 - **把 FakeModel 的步骤数写死**：`max_steps` 和 provider 行为可能让实际步骤数不同。
-- **忘记设置 `permissionPreset`**：legacy 字段不授权，测试会得到与预期不同的拒绝。
+- **忘记设置 `permissionPreset`**：未指定预设时调用会被拒绝，测试会得到与预期不同的结果。
 - **在测试中写真实 `~/.omniagent`**：使用临时目录和显式路径。
 - **依赖系统时区**：计划任务测试使用显式 `time_zone`。
-- **依赖平台 sandbox**：Linux 上的 bwrap / Landlock 测试可能跳过；macOS 的 Seatbelt 行为不能假定在 Linux 存在。
+- **依赖平台 sandbox**：Linux 上的 bwrap / Landlock 测试可能跳过；macOS 的 Seatbelt 行为不能假定在 Linux 存在。需要平台路径语义的用例用 `runIf` 守卫，例如 `/tmp` 在 macOS 是 symlink。

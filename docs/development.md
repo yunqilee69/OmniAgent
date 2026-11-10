@@ -12,6 +12,8 @@
 pnpm install
 ```
 
+`postinstall` 会在 Linux 上调用 `scripts/prepare-linux-sandbox.ts`，尝试探测或安装 bubblewrap；macOS 等平台直接跳过。TUI 和 Web 启动时也会再准备一次。自动准备失败不会阻断应用，但没有可用受限后端时 shell 仍会 fail closed。
+
 ## 2. 命令
 
 | 命令 | 作用 |
@@ -29,8 +31,10 @@ pnpm install
 
 端口：
 
-- Web Host：`OMNIAGENT_PORT`，默认 4317；
+- Web Host：`web.port`（默认 4317），`OMNIAGENT_PORT` 覆盖；
 - Vite dev：4318。
+
+Web 认证默认关闭。需要时在 `config.json` 中设置 `web.auth.enabled`、`username`、`password`，重启 Host 后生效；账号密码明文保存，建议 `chmod 600 ~/.omniagent/config.json`。
 
 ## 3. 配置
 
@@ -57,16 +61,20 @@ cp config.example.json ~/.omniagent/config.json
 
 ```text
 ~/.omniagent/
-├── config.json          providers / models / roles / profiles / 默认权限 / MCP
+├── config.json          providers / models / roles / profiles / 默认权限 / MCP / web
 ├── modes.json           Web 模式预设
 ├── agents/              智能体定义
 ├── sessions/            会话 JSONL
 ├── schedules.json       计划任务
-├── workspaces.json      Web 工作区
+├── workspaces.json      Web 工作区（含默认工作区）
+├── default-workspace/   Web 默认工作区
 └── web-audit/           Web 审计
+
+~/.omniagent-attachments/<batch>/                Web 附件（图片 / 文件 / 文本）
+/var/tmp/omniagent-attachments-<uid>/<batch>/     home 不可用时的备选
 ```
 
-TUI 的审计在 `<workspace>/.omniagent/audit.jsonl`。
+TUI 的审计在 `<workspace>/.omniagent/audit.jsonl`。附件批次由 Web 回合创建；在写入用户消息前失败或取消的回合会自动清理，成功写入后批次保留，需用户自行清理。
 
 ## 4. 代码约定
 
@@ -360,11 +368,13 @@ jq . ~/.omniagent/schedules.json
 **Web**
 
 - 是否校验 Host / Origin？
+- 认证开启时，新路由是否落在 `/api/*` 的 cookie 保护内？
 - 是否限制请求体大小？
 - 是否校验 Content-Type？
 - 是否对 500 脱敏？
 - 是否在运行中拒绝权限 / agent / model / plan 变更？
-- 是否避免返回 API key、headers、argsDigest、规则文本？
+- 是否避免返回 API key、headers、argsDigest、规则文本、认证密码？
+- 附件是否写入工作区外、校验权限和 symlink、失败时清理？
 
 **持久化**
 
@@ -386,12 +396,14 @@ jq . ~/.omniagent/schedules.json
 ## 9. 已知限制
 
 - Windows 上没有受限文件沙盒；`read-only` / `workspace-write` 会 fail closed。
-- Linux 的 bwrap / Landlock 实现尚未在真实 Linux 主机上完整验证。
+- Linux 的 Landlock 后备已在 x86-64 验证；bubblewrap 和其他原生架构仍需真实 Linux 主机验证。
 - 会话 append 每次复制整个日志，长会话写入成本线性增长。
 - 工作区注册表只保证单进程写入，没有 fsync。
 - 自动压缩没有真实摘要，且不持久化。
 - `wait_agent` 等待调用者下一步输入，不是等待子代理完成。
 - 计划任务错过的触发只补最近一次，崩溃可能重复投递。
-- Web 不做本地用户认证；Host / Origin 不是授权边界。
+- Web 认证默认关闭；启用后也只保护 HTTP 访问，不能隔离同 OS 用户的其他进程，且使用明文配置和 HTTP 传输。
+- 附件保存在工作区外，成功回合不会自动清理。
 - MCP 工具不受本地沙盒约束，必须信任服务器配置。
 - agent profile / mode 的 allowlist 只减少暴露面，不授予权限。
+- 不支持图片的模型会把图片投影为文本占位；历史中仍保留图片字节。

@@ -43,24 +43,27 @@ Agent 的本质是一个很小的循环：
 
 2. 排空队列消息 takeQueuedMessages()
    └─ 把运行期间到达的 steering / 通知 / 外部 agent 消息追加到 messages
+   └─ 新的 steering 用户消息加入 protectedIndices
 
 3. yield turn.start { step }
 
 4. 按需压缩历史
    ├─ 条件：配置了 contextWindowTokens，或本轮有手动 compact 请求
-   ├─ compactMessages()
+   ├─ 估算与压缩都通过 projectImageInput(projectCommandInput(messages)) 计算
+   ├─ 当前用户消息和本轮 steering 消息受保护，不会被丢弃
    └─ 成功则 yield context.compacted { beforeTokens, afterTokens }
 
 5. 构造 ModelRequest
    ├─ model
-   ├─ system（可以是函数，动态求值）
-   ├─ messages
+   ├─ system（可以是函数，动态求值；Session 在此注入工作区 AGENTS.md）
+   ├─ messages（发送前展开 /init、按模型能力投影图片）
    ├─ tools（优先 toolSpecs()，否则注册表的 specs）
    └─ signal
 
 6. 调用模型
    ├─ 有 stream() → forwardStream()，逐条转发增量
    └─ 否则 complete()
+   └─ 记录 requestDurationMs；归一化 usage / cachedInputTokens，并写入 contextSample
 
 7. 模型异常
    ├─ signal 已中断 → turn.end(interrupted)
@@ -189,6 +192,26 @@ tool call 的分片在 provider 内部累积，循环只有在流结束拿到完
 
 `assistant.reasoning.delta` 只用于实时展示，**不会写入会话日志**。持久化的 assistant 消息只包含可见文本、tool calls 和 provider replay 元数据。
 
+### 5.1 用量、时长与上下文采样
+
+每次模型调用结束后，循环把以下信息写入 assistant 消息：
+
+- `requestDurationMs`：从发起请求到流结束的耗时，包含流式输出；
+- `usage.inputTokens` / `outputTokens`：provider 报告的真实用量；如果 provider 用 `contextInputTokens` 区分「prompt 占用」和「未缓存输入」（DeepSeek / pi-ai），则优先使用 `contextInputTokens`；
+- `usage.cachedInputTokens`：仅当 provider 报告且不超过 input 时保留；
+- `contextSample`：仅当 input > 0 时写入，包含 provider / model、请求历史哈希和 system / tools / messages 三段估算。
+
+如果 provider 没有报告可用 usage（例如兼容端点合成 0），消息不写 `usage`，也不写 `contextSample`，避免把哨兵值当成真实计量。`contextSample` 只在内部历史中用于下一次 `projectContext()`；公开会话响应会返回 `usage` 和 `requestDurationMs`，但不返回采样字段。会话指标（runs / steps / requests / cache / throughput）由 trace + usage 投影得到，不新增 `AgentEvent`。
+
+### 5.2 输入投影
+
+发给 provider 的 messages 与持久化历史并不完全相同：
+
+- 带 `initCommand: true` 的用户消息会被 `projectCommandInput()` 展开为完整 `/init` 指令；
+- 不支持图片的模型会把 image part 替换为文本占位（模型能力未知时保持原样）。
+
+两者都是请求期投影，不修改 `Session.history`，也不改写会话日志。
+
 ## 6. 中断
 
 中断通过 `AbortSignal` 传播，不通过事件协议发送命令。
@@ -203,6 +226,8 @@ tool call 的分片在 provider 内部累积，循环只有在流结束拿到完
 任何一处命中都立即 `turn.end(interrupted)` 并返回当前 messages。已经在执行的工具不会因为检查点而停止；它的 `execute` 会收到同一个 signal，由工具自己决定如何响应。
 
 模型请求被 abort 时抛出的 `AbortError` 不会被当作 `error` 事件；循环检测到 signal 已中断后直接以 `interrupted` 结束。
+
+`Session.interrupt()` 在回合仍在准备阶段（例如持久化用户消息）时也会记录 `interruptRequested`；等 AbortController 创建后立即 abort，避免启动窗口内的中断丢失。
 
 ## 7. 错误语义
 

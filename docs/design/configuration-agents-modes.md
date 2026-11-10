@@ -33,9 +33,10 @@ modes.json          →  Web 新会话的 agent + 模型 + tools + skills 组合
 - 内容不变 → 直接复用上次解析结果；
 - 内容变化 → 重新解析并构建 catalog；
 - `revision = sha256(raw)`；
-- JSON / schema 非法 → 抛 `ConfigError`，不回退旧快照。
+- JSON / schema 非法 → 抛 `ConfigError`，不回退旧快照；
+- schema 错误信息只暴露允许的字段名和 issue code，其他路径折叠为 `*`，避免把敏感值带进错误消息。
 
-运行中的 turn 持有自己开始时拿到的 snapshot；修改从下一回合生效。Web / TUI 用 `resolver.revision` 判断是否需要重建 `Session`。
+运行中的 turn 持有自己开始时拿到的 snapshot；修改从下一回合生效。Web / TUI 用 `resolver.revision` 判断是否需要重建 `Session`。Web 的 `web.host` / `web.port` / `web.auth` 是例外：它们在启动时读取，修改后需要重启 Host。
 
 ## 3. config.json schema
 
@@ -43,6 +44,7 @@ modes.json          →  Web 新会话的 agent + 模型 + tools + skills 组合
 
 | 字段 | 默认 / 规则 |
 | --- | --- |
+| `web` | Web Host 配置：`host`（默认 `127.0.0.1`）、`port`（默认 4317）、`auth`（`enabled` / `username` / `password`） |
 | `model` | 非空，默认 `fake`（演示模式） |
 | `provider` | 字符串（DSH/pi-ai）或对象（legacy OpenAI） |
 | `providers` | provider route 表 |
@@ -52,15 +54,17 @@ modes.json          →  Web 新会话的 agent + 模型 + tools + skills 组合
 | `reasoningEffort` | canonical effort |
 | `maxTokens` / `contextWindowTokens` / `retainContextTokens` | 正整数 |
 | `dsh` | 保留给显式权限默认值修复 |
-| `mode` | legacy 权限模式，**不映射到 DSH preset** |
 | `maxSteps` | 默认 25 |
 | `subagents.maxDepth` | 默认 1 |
 | `subagents.maxActive` | 默认 8 |
 | `todo.allowParallelInProgress` | 默认 `false` |
 | `system` | 可选全局 system prompt 前缀 |
-| `permissions` | legacy allow/ask/deny 规则，当前不用于 DSH 执行 |
 
-顶层使用 `.passthrough()`，未知字段保留；嵌套的关键结构（provider route、role、profile、模型 reasoning）是 strict 的。
+顶层使用 `.passthrough()`，未知字段保留；嵌套的关键结构（web、provider route、role、profile、模型 reasoning）是 strict 的。旧的 `mode` / `permissions` 字段已不再参与解析，也不会转成 DSH 授权；它们只会作为未知字段保留在原始文件中。
+
+`web.auth` 启用时必须同时提供非空 `username` 和 `password`，否则 schema 校验失败。Web 监听与认证配置只在进程启动时读取；修改后必须重启 Web 服务。其他配置仍按内容哈希在新回合生效。
+
+注意：`host` 允许配置为 loopback 或具体监听地址；`0.0.0.0` / `::` 会被 Host 校验按通配监听处理，只接受实际本地地址。认证使用 HTTP + 登录 cookie，不提供传输加密。
 
 ### 3.2 Provider route
 
@@ -522,6 +526,7 @@ profile: search-only
     - `config.system` + agent body；
     - 只有工具表包含 `skill` 时注入 skill catalog；
     - 只有工具表包含 `subagent` 时注入 agent catalog；
+    - 工作区根 `AGENTS.md` 不在这里读取，而由 `Session.systemText()` 每次请求时追加（32 KiB 上限，symlink / 非法编码跳过）。
 12. 决定上下文窗口：`config.contextWindowTokens ?? model.contextWindow`；
 13. 决定 todo 策略；
 14. 计算 revision 哈希：
@@ -548,7 +553,7 @@ profile: search-only
 | profile 不存在 | 解析时抛错 |
 | skill 缺失 | warning + 空项，不授权 |
 | 模式引用未知 agent / 工具 | 模式无效；保存时拒绝 |
-| 模型不支持图片但历史含图片 | provider 请求前失败，不静默丢图 |
+| 模型不支持图片但历史含图片 | 请求期把图片替换为文本占位，不失败、不丢历史 |
 | 没有可用默认模式 | `resolveDefault()` 抛错 |
 | 没有任何 provider | demo 模式，调用方注入 FakeModel |
 

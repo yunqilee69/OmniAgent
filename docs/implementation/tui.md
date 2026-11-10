@@ -19,27 +19,29 @@ TUI 是 OmniAgent 的终端前端。它只消费 core 的 `AgentEvent`，不直�
 
 `main()`（`main.ts:218-249`）：
 
-1. `ConfigStore.open(~/.omniagent/config.json)`；
-2. `AgentCatalog`；
-3. `RuntimeResolver`；
-4. `SessionStore(~/.omniagent/sessions)`；
-5. `AuditLog(<cwd>/.omniagent/audit.jsonl)`；
-6. `McpService`（启动时 sync 一次）；
-7. `SubagentManager`；
-8. `Approval` 回调、`reviewPlan` 回调、`onBackgroundEvent`；
-9. 进入 REPL。
+1. `prepareLinuxSandbox()`（Linux 上探测 / 安装 bubblewrap；非 Linux 直接跳过）；
+2. 创建 readline 接口（放在沙盒准备之后，保证安装询问独占终端）；
+3. `ConfigStore.open(~/.omniagent/config.json)`；
+4. `AgentCatalog`；
+5. `RuntimeResolver`；
+6. `SessionStore(~/.omniagent/sessions)`；
+7. `AuditLog(<cwd>/.omniagent/audit.jsonl)`；
+8. `McpService`（启动时 sync 一次）；
+9. `SubagentManager`；
+10. `Approval` 回调、`reviewPlan` 回调、`onBackgroundEvent`；
+11. 进入 REPL。
 
 TUI 的全局对象：
 
 ```ts
 const cwd = process.cwd();
-const rl = readline.createInterface(...);
+let rl: ReturnType<typeof createInterface>;
 const theme = createTheme();
 const roles = createRoles(theme);
 const renderer = new TuiRenderer({ theme });
 ```
 
-`renderer` 在模块级创建，因此启动错误也能用它打印。
+`renderer` 在模块级创建，因此启动错误也能用它打印。沙盒准备如果失败，只打印诊断；后续受限 shell 仍会 fail closed，不会自动降级。
 
 ## 2. 主循环
 
@@ -83,11 +85,14 @@ for (;;) {
 | `/todos` | 打印当前 todo 列表 |
 | `/plan [on\|off]` | 切换 plan 模式；运行中禁止 |
 | `/new` | 新建会话，继承当前 agent |
+| `/init [notes]` | 作为普通消息发送，让智能体检查工作区并创建 / 更新根 `AGENTS.md` |
 | `/permission <preset>` | 切换 DSH 预设 |
 | `/agent [id]` | 列出 / 切换主智能体 |
 | `/model [n\|agent\|provider model]` | 列出 / 切换模型 |
 | `/resume <id>` | 打开已有会话 |
 | 未知 `/x` | 警告并指向 `/help` |
+
+`/init ...` 不进入命令分支：`isInitCommand()` 在「未知命令」判断之前放行，然后作为普通输入交给 Session（日志保存原文，请求期展开）。
 
 ### 3.1 实现备注
 

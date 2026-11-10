@@ -7,44 +7,48 @@ Web 由一个本地 Node HTTP Host（`packages/web/src`）和一个 React 工作
 | 路径 | 职责 |
 | --- | --- |
 | `packages/web/src/main.ts` | 进程装配、服务初始化、Session 组装 |
-| `packages/web/src/server.ts` | 路由、HTTP 安全、SSE、会话缓存 |
+| `packages/web/src/server.ts` | 路由、HTTP 安全、认证、SSE / follow、会话缓存 |
 | `packages/web/src/approval.ts` | 审批 / 计划审阅代理 |
+| `packages/web/src/attachments.ts` | 附件解析、大小限制与工作区外存储 |
 | `packages/web/src/permissions.ts` | 默认权限设置 |
+| `packages/web/src/config-file.ts` | 配置文件的原子读-改-写公共层 |
 | `packages/web/src/model-settings.ts` | 模型来源与角色编辑 |
 | `packages/web/src/catalog-settings.ts` | 角色设置 |
 | `packages/web/src/mcp-settings.ts` | MCP 设置 |
 | `packages/web/src/agent-settings...`（`server.ts` + core authoring） | 智能体定义编辑 |
-| `packages/web/src/workspaces.ts` | 工作区注册表 |
+| `packages/web/src/workspaces.ts` | 工作区注册表（含默认工作区） |
 | `packages/web/src/live-sessions.ts` | 跨请求共享 Session |
 | `packages/web/src/schedule-host.ts` | 计划任务投递宿主 |
 | `packages/web/src/trajectory.ts` | 轨迹投影 |
 | `packages/web/src/trace-projection.ts` | trace 投影 |
+| `packages/web/src/session-metrics.ts` | 会话指标投影 |
 | `packages/web/src/session-export.ts` | 会话导出 |
 | `packages/web/src/audit.ts` | Web 审计 |
-| `packages/web/src/workspace-files.ts` | 工作区文件搜索 |
-| `packages/web/ui/src` | React 工作台 |
+| `packages/web/src/workspace-files.ts` | 工作区文件搜索、目录浏览与预览 |
+| `packages/web/ui/src` | React 工作台（含认证、Context Meter、工作区文件树） |
 
 ## 1. 启动流程
 
 `packages/web/src/main.ts`：
 
-1. 打开 `ConfigStore`（`~/.omniagent/config.json`）；
-2. `PermissionSettings`（与 config 共用文件，独立编辑默认权限）；
-3. `RoleSettings`、`ModelSettings`；
-4. `McpService` + `McpSettings`；
-5. `AgentCatalog`；
-6. `ModeStore`（`~/.omniagent/modes.json`）；
-7. `AgentAuthoringService`；
-8. `RuntimeResolver`；
-9. `SessionStore`；
-10. `WorkspaceRegistry`；
-11. `ApprovalBroker`；
-12. `FakeModel` 兜底（没有 provider 时）；
-13. `SubagentManager`；
-14. `LiveSessionRegistry`；
-15. `ScheduleService` + `SessionScheduleHost`；
-16. 注册当前工作目录；
-17. `startWebHost(...)`，默认端口 4317，可用 `OMNIAGENT_PORT` 覆盖。
+1. `prepareLinuxSandbox()`（Linux 上探测 / 安装 bubblewrap，失败只报告，不阻断启动）；
+2. 打开 `ConfigStore`（`~/.omniagent/config.json`），读取 `web.host` / `web.port` / `web.auth`；
+3. `PermissionSettings`（与 config 共用文件，独立编辑默认权限）；
+4. `RoleSettings`、`ModelSettings`；
+5. `McpService` + `McpSettings`；
+6. `AgentCatalog`；
+7. `ModeStore`（`~/.omniagent/modes.json`）；
+8. `AgentAuthoringService`；
+9. `RuntimeResolver`；
+10. `SessionStore`；
+11. `WorkspaceRegistry`；
+12. `ApprovalBroker`；
+13. `FakeModel` 兜底（没有 provider 时）；
+14. `SubagentManager`；
+15. `LiveSessionRegistry`；
+16. `ScheduleService` + `SessionScheduleHost`；
+17. `ensureDefault(~/.omniagent/default-workspace)`，再注册当前工作目录（canonical path 相同时复用记录）；
+18. `startWebHost(...)`，使用配置的 host / port / auth；`OMNIAGENT_PORT` 覆盖端口。
 
 `composeSession()` 是唯一的 Session 组装点：
 
@@ -64,6 +68,9 @@ Web 由一个本地 Node HTTP Host（`packages/web/src`）和一个 React 工作
 | --- | --- | --- |
 | `GET` | `/health` | `{ ok: true }` |
 | `GET/HEAD` | 非 `/api/*` | 静态资源与 SPA fallback |
+| `GET` | `/api/auth/status` | 认证是否启用、当前 cookie 是否已登录 |
+| `POST` | `/api/auth/login` | 校验账号密码，设置 12 小时 HttpOnly cookie |
+| `POST` | `/api/auth/logout` | 撤销当前登录 cookie |
 
 ### 2.2 目录
 
@@ -100,12 +107,15 @@ Web 由一个本地 Node HTTP Host（`packages/web/src`）和一个 React 工作
 | --- | --- | --- |
 | `GET/POST` | `/api/workspaces` | 列出 / 注册工作区 |
 | `DELETE` | `/api/workspaces/:id` | 取消注册 |
-| `GET` | `/api/workspaces/:id/files` | 工作区文件搜索 |
+| `GET` | `/api/workspaces/:id/files` | 工作区文件搜索（`@` 菜单） |
+| `GET` | `/api/workspaces/:id/files/tree?path=` | 目录浏览（文件树） |
+| `GET` | `/api/workspaces/:id/files/content?path=` | 文本文件预览 |
 | `GET/POST` | `/api/workspaces/:id/sessions` | 列出 / 创建会话 |
 | `GET/PATCH/DELETE` | `/api/workspaces/:id/sessions/:sid` | 详情 / 改名 / 删除 |
 | `POST` | `.../pin` | pin / unpin |
 | `POST` | `.../fork` | fork |
-| `POST` | `.../messages` | 发送消息（SSE 或 steer） |
+| `GET` | `.../messages` | 重新读取公开消息 |
+| `POST` | `.../messages` | 发送消息（SSE / steer / respond-async） |
 | `POST` | `.../permission` | 切换预设 |
 | `POST` | `.../agent` | 切换智能体 |
 | `POST` | `.../model` | 切换模型 |
@@ -114,6 +124,8 @@ Web 由一个本地 Node HTTP Host（`packages/web/src`）和一个 React 工作
 | `POST` | `.../approvals` | 审批工具调用 |
 | `POST` | `.../compact` | 安排手动压缩 |
 | `POST` | `.../interrupt` | 中断当前回合 |
+| `GET` | `.../context` | Context Meter 估算 |
+| `GET` | `.../follow` | 以 `run.snapshot` 加入正在运行的回合 |
 | `GET` | `.../events` | trace 投影 |
 | `GET` | `.../audit` | 审计投影 |
 | `GET` | `.../export` | Markdown / JSON 导出 |
@@ -131,13 +143,23 @@ Web 由一个本地 Node HTTP Host（`packages/web/src`）和一个 React 工作
 
 ## 3. HTTP 安全与限制
 
-### 3.1 监听与 Origin
+### 3.1 监听、Host 与认证
 
-- 只监听 `127.0.0.1`；
-- `Host` 必须匹配监听地址和端口；
-- 如果存在 `Origin`，必须与规范化后的 Host 同源；
-- `localhost` 和 `127.0.0.1` 不互换；
+- 默认监听 `127.0.0.1:4317`；`web.host` / `web.port` 可配置，`OMNIAGENT_PORT` 覆盖端口；
+- `Host` 必须解析为实际监听端口，并且 hostname 等于配置的监听地址；loopback 配置允许 `127.0.0.1` / `localhost` / `[::1]` 互换；通配监听只接受实际本地地址；
+- 如果存在 `Origin`，必须与规范化后的 Host 同源；`localhost` 和 `127.0.0.1` 不互换；
+- `sec-fetch-site: cross-site` 一律拒绝；
 - Host / Origin 检查是浏览器侧保护，不是本地用户认证。
+
+认证：
+
+- 默认关闭；`web.auth.enabled` 为 true 时必须提供非空 `username` / `password`，否则启动失败；
+- 登录使用 `POST /api/auth/login`，账号密码用 SHA-256 + `timingSafeEqual` 比较；同一客户端 60 秒内最多 5 次失败，超限返回 `429` 和 `retry-after`；
+- 成功登录设置 `omniagent_session` cookie：`HttpOnly`、`SameSite=Strict`、12 小时过期；令牌是 32 字节随机 hex；
+- 认证开启后，所有 `/api/*` 业务路由（包括 SSE / follow）都要求有效 cookie，只有 `status` / `login` / `logout` 例外；
+- 认证开启时，非 GET / HEAD / OPTIONS 请求必须带 `Origin`；
+- 登录状态会按会话记录并主动销毁该会话的所有活动响应；服务端最多保存 10,000 个登录会话；
+- 账号密码明文保存在 `config.json`，HTTP 不加密传输；认证不能隔离同 OS 用户的其他进程。
 
 ### 3.2 请求体
 
@@ -147,7 +169,10 @@ Web 由一个本地 Node HTTP Host（`packages/web/src`）和一个 React 工作
 - 附件最多 8 个；
 - 图片 MIME 只允许 png / jpeg / webp / gif，单张 base64 数据最大 8 MiB；
 - 文本附件最大 256 KiB；
+- 附件总大小最大 24 MiB；
 - 超限返回 413，并排空请求体。
+
+`parseSendAttachments()` 只接受 `kind: 'image' | 'file' | 'text'`，校验名称、MIME 和 base64 往返一致性。附件随后由 `storeAttachments()` 写入工作区外的私有批次目录（见 [persistence-and-observation.md](../design/persistence-and-observation.md) 的「附件存储」）。文本 / 文件附件生成一条带 `attachment` 元数据的文本 part，图片再附加 image part；元数据明确标记为不可信输入。用户消息持久化失败时批次会被清理。
 
 ### 3.3 响应头
 
@@ -185,7 +210,7 @@ server 维护：
 - fork；
 - 删除工作区。
 
-这是为了防止运行中的沙盒命令通过未认证控制面改变后续回合的授权。它不是身份认证。
+这是为了防止运行中的沙盒命令通过 Web 控制面改变后续回合的授权。它是竞态保护，不替代认证；即使启用了 Web 认证，这些 409 仍然生效。
 
 ## 4. SSE 回合流
 
@@ -227,7 +252,30 @@ server 维护：
     - headers 已发送 → 写 `error` + `turn.end(error)`；
     - finally 中关闭 approval、删除 running、结束响应。
 
-### 4.1 事件交错
+### 4.1 同步、异步与 follow
+
+默认 `POST .../messages` 返回 SSE，连接断开时：
+
+- 当前 turn 已绑定 Session → `interrupt()`；
+- 尚未绑定 → 删除 running；
+- 关闭 approval。
+
+客户端可以发送 `Prefer: respond-async`：
+
+- 服务端照常建立 `RunningTurn`，但在第一个模型事件到达后返回 `202 { accepted: true }`，而不是保持 SSE；
+- 如果启动在第一个事件前失败，返回 `500 { error, code: 'turn_start_failed_message_may_be_saved' }`，提示消息可能已经持久化；
+- 异步回合由服务端继续执行，客户端断开不影响它。
+
+`GET .../follow` 用于加入正在运行的回合：
+
+- 没有活动回合 → `204`；
+- 等待 baseline 就绪后返回 SSE，第一帧是 `run.snapshot`：`{ baseline: { messages, metrics }, events, truncated? }`；
+- baseline 在权限 / 运行时校验之后、写入用户消息之前捕获，因此 follower 可以从同一基线重放；
+- snapshot 里的 `events` 是已经发生的 live 事件（过滤掉 live-only 的审批请求，再补上当前未决的审批 / 计划请求）；超过 replay 上限时 `truncated: true`，回合继续；
+- 之后 follower 收到与主 SSE 相同的实时事件；所有 follower 在 `turn.end` 后关闭；
+- 多个标签页可以同时 follow 同一个回合，steering 消息也会广播为 `run.user.message`。
+
+### 4.2 事件交错
 
 `ApprovalBroker` 的 `stream()` 用 `Promise.race(source.next(), wake)`：
 
@@ -300,7 +348,7 @@ tool.result
 - 切换 plan；
 - 删除会话。
 
-`LiveSessionRegistry` 默认上限 128，用于让计划任务和 Web 标签页共享同一个 Session，避免两个实例写同一日志。
+`LiveSessionRegistry` 默认上限 128，用于让计划任务和 Web 标签页共享同一个 Session，避免两个实例写同一日志。运行中的 `RunningTurn` 独立于 Session 缓存：它保存 baseline、事件 replay buffer 和 follower 集合，在 POST 连接断开后仍继续执行，直到回合结束或显式 interrupt。
 
 ## 7. 设置服务
 
@@ -360,44 +408,53 @@ tool.result
 ## 8. 投影与导出
 
 - `projectMessages()` + `safePublicMessages()`：会话详情和 SSE 的 assistant 消息；
+- `projectPublicHistory()`：在消息上追加稳定的 `messageId`（身份 + 事件哈希）和 `timestamp`，供复制和显示时间；
 - `projectTraceEvents()`：只保留元数据；
 - `projectTrajectory()`：轨迹图数据；
+- `projectSessionMetrics()`：runs / steps / requests / usage / cache / throughput 聚合；
 - `exportSession()`：Markdown / JSON；
 - `recordWorkspaceAudit()` / `readWorkspaceAudit()`：Web 审计；
-- `searchWorkspaceFiles()`：`@` 菜单文件搜索，最多 50,000 条，跳过 `.git` / `node_modules` / `dist` 等。
+- `searchWorkspaceFiles()`：`@` 菜单文件搜索，最多 50,000 条，跳过 `.git` / `node_modules` / `dist` 等；
+- `browseWorkspaceDirectory()` / `readWorkspaceFile()`：工作区文件树和预览，逐段拒绝 symlink、校验物理路径，单文件预览上限 1 MiB，拒绝 binary / 非 UTF-8。
 
 ## 9. Web UI 架构
 
 ### 9.1 组件树
 
 ```text
-App
-├─ Sidebar
-│   ├─ WorkspaceDialog
-│   ├─ RemoveWorkspaceDialog
-│   ├─ RenameSessionDialog
-│   ├─ DeleteSessionDialog
-│   └─ Toast
-├─ Header
-│   ├─ 导出菜单
-│   └─ Conversation / Observe tabs
-├─ main
-│   ├─ AutomationPage
-│   ├─ SettingsPage
-│   │   ├─ SettingsGeneral
-│   │   ├─ SettingsModels
-│   │   ├─ SettingsMcp
-│   │   ├─ SettingsModes
-│   │   └─ SettingsAgents
-│   ├─ ConversationView
-│   │   ├─ TurnView → ToolView / ReasoningView / MarkdownText / CompactionView / NoticeView
-│   │   ├─ ApprovalView
-│   │   └─ Composer
-│   └─ TrajectoryView
-├─ RightPanel（guide / files / terminal）
-├─ PlanReviewDialog
-└─ NewSessionDialog
+AuthGate
+├─ 登录 / 检查 / 重试界面（认证启用时）
+└─ App
+   ├─ Sidebar（或 WorkspaceFileTree 文件浏览）
+   │   ├─ WorkspaceDialog
+   │   ├─ RemoveWorkspaceDialog
+   │   ├─ RenameSessionDialog
+   │   ├─ DeleteSessionDialog
+   │   └─ Toast
+   ├─ Header
+   │   ├─ 导出 / 退出登录菜单
+   │   └─ 面板切换
+   ├─ main
+   │   ├─ AutomationPage
+   │   ├─ SettingsPage
+   │   │   ├─ SettingsGeneral
+   │   │   ├─ SettingsModels
+   │   │   ├─ SettingsMcp
+   │   │   ├─ SettingsModes
+   │   │   └─ SettingsAgents
+   │   ├─ ConversationView
+   │   │   ├─ TurnView → ToolView / ReasoningView / MarkdownText / CompactionView / NoticeView
+   │   │   ├─ ApprovalView
+   │   │   └─ Composer
+   │   │       ├─ ContextMeter（5 秒轮询 .../context）
+   │   │       └─ SessionStats（runs / steps / tok/s / usage / cache）
+   │   └─ TrajectoryView
+   ├─ RightPanel（guide / files / preview / terminal）
+   ├─ PlanReviewDialog
+   └─ NewSessionDialog
 ```
+
+认证启用时 `AuthGate` 先检查 `/api/auth/status`；登录成功后才渲染 `App`。`authFetch()` 统一携带 cookie，遇到 401 会把状态切回登录界面并清空当前 store。工作区行菜单的「查看文件列表」把左栏切成 `WorkspaceFileTree`，选中文件后在右栏 `WorkspaceFilePreview` 预览。
 
 响应式：
 
@@ -410,10 +467,12 @@ App
 `packages/web/ui/src/lib/store.ts`：
 
 - 单一 `AppStore` + `AppState`；
-- 每个会话一个 `SessionEntry`；
+- 每个会话一个 `SessionEntry`，含 `metrics`、`running`、queue 和 live `run`；
+- 工作区按 `sessionsByWorkspace` 分开保存会话列表，侧栏可以展开多个工作区；
 - `useSyncExternalStore(store.subscribe, store.getSnapshot)`；
 - `emit()` 用 `requestAnimationFrame` + 32ms 超时批量通知；
 - 请求用自增序号防止竞态；
+- 同一会话的发送 / 队列 / steer 用 `navigator.locks` 串行化；
 - 持久化键：
   - `omniagent.theme`
   - `omniagent.locale`
@@ -428,11 +487,12 @@ App
 关键行为：
 
 - `bootstrap()`：加载工作区、会话、catalog、权限；
-- `loadDetail()`：一次 patch 全部字段，重建 transcript / turns；
+- `loadDetail()`：一次 patch 全部字段（含 metrics），重建 transcript / turns；
 - `startDraftSession()`：UI-only draft，不落库；
 - `persistDraftSession()`：第一条消息时创建真实会话，再补权限 / plan；
-- `startTurn()`：乐观把用户消息插入 transcript，失败回滚；
-- `consumeStream()`：逐事件 `applyAgentEvent`，用不可变快照触发 React；
+- `startTurn()`：乐观把用户消息插入 transcript，发送 `Prefer: respond-async`，然后进入 follow 或直接消费 SSE；失败时回滚；
+- `followRun()`：消费 `run.snapshot` 的 baseline（消息 + metrics）和后续事件；断线后重连会重新 follow；
+- `consumeStream()`：逐事件 `applyAgentEvent`，同时用 `applyMetricsEvent` 增量维护 metrics；
 - `stopTurn()`：先置 stopping，再 `POST interrupt`；
 - `resolveApproval()` / `resolvePlanReview()`：HTTP 回填；
 - `compactSession()`、`queueMessage()`、`steerMessage()`、`renameSession()`、`setSessionPinned()`、`forkSession()`、`deleteSession()`、`exportSession()`。
@@ -563,9 +623,13 @@ App
 ## 11. 已知偏差与限制
 
 - `packages/web/src` 没有独立的 `ui-store.ts`；`ui-store.test.ts` 直接测试 `packages/web/ui/src/lib/store.ts`。
-- Web 不认证本地用户；`409` 只是防运行中权限竞态，不是鉴权。
+- Web 认证默认关闭；启用后也只保护 HTTP 访问，不能隔离同 OS 用户的其他进程。`409` 是防运行中权限竞态，认证开启后仍然生效。
+- 认证账号密码明文保存在 `config.json`，HTTP 不提供传输加密。
 - 子代理的完成通知不会进入父回合的原始 SSE；需要重新加载父会话。
 - Web 子代理没有 live approval handler；一次性沙盒升级会被拒绝，plan review 不可用。
 - `RoleSettings` / `ModelSettings` 走 `ConfigFile` 的进程内锁，但没有 `PermissionSettings` 那样的 `lastText` 外部修改检测；多进程同时编辑时最后写入者获胜。
 - 模式保存不接受 MCP 工具名（见 [configuration-agents-modes.md](../design/configuration-agents-modes.md) 的实现备注）。
-- 实时 SSE 不是脱敏导出格式；assistant 文本、工具参数和结果都可能含敏感内容。
+- 工作区文件预览只支持不超过 1 MiB 的 UTF-8 文本；binary、非 UTF-8 和更大文件返回 413 / 415，不提供图片或富文本预览。
+- Context Meter 的 `projectedTokens` 是基于字节数 / 4 和图片固定成本的近似值；切换模型或历史后可能先显示估算，直到出现新的真实 usage。
+- 实时 SSE、`follow` 的 `run.snapshot` 和原始会话记录不是脱敏导出格式；assistant 文本、工具参数和结果都可能含敏感内容。
+- `run.snapshot` 的 replay 有上限；溢出时 `truncated: true`，UI 会提示实时历史不完整，并在回合结束后通过会话详情对账。
