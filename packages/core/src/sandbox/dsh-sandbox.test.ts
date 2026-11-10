@@ -5,6 +5,10 @@ import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 import { confineDshArgv, probeDshSandbox } from './dsh-sandbox';
 import type { DshSandboxPolicy } from './dsh-policy';
 
+// The /tmp shadowing check compares physical roots against the literal mount point. On hosts
+// where /tmp is a symlink (macOS: /private/tmp) no physical root can lie beneath it.
+const tmpIsPhysical = await realpath('/tmp').then((path) => path === '/tmp', () => false);
+
 let fixture: string;
 let workspace: string;
 let policy: DshSandboxPolicy;
@@ -103,7 +107,7 @@ describe('DSH sandbox capability and argv', () => {
       .rejects.toThrow(/namespace access denied.*refusing unconfined execution/);
   });
 
-  it('keeps the original tmp visible when a writable root lies beneath it', async () => {
+  it.runIf(tmpIsPhysical)('keeps the original tmp visible when a writable root lies beneath it', async () => {
     const tmpWorkspace = await realpath(await mkdtemp('/tmp/omni-dsh-bind-'));
     const nested = join(tmpWorkspace, 'parent', 'workspace');
     await mkdir(nested, { recursive: true });
