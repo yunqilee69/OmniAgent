@@ -110,6 +110,10 @@ Web 由一个本地 Node HTTP Host（`packages/web/src`）和一个 React 工作
 | `GET` | `/api/workspaces/:id/files` | 工作区文件搜索（`@` 菜单） |
 | `GET` | `/api/workspaces/:id/files/tree?path=` | 目录浏览（文件树） |
 | `GET` | `/api/workspaces/:id/files/content?path=` | 文本文件预览 |
+| `GET/HEAD` | `/api/workspaces/:id/files/raw?path=&download=1` | 原始字节（Range、类型白名单、inline / attachment） |
+| `POST` | `/api/workspaces/:id/files/rename` | 重命名（`{ path, name }`） |
+| `POST` | `/api/workspaces/:id/files/move` | 移动到文件夹（`{ path, directory }`） |
+| `DELETE` | `/api/workspaces/:id/files?path=` | 删除文件或文件夹 |
 | `GET/POST` | `/api/workspaces/:id/sessions` | 列出 / 创建会话 |
 | `GET/PATCH/DELETE` | `/api/workspaces/:id/sessions/:sid` | 详情 / 改名 / 删除 |
 | `POST` | `.../pin` | pin / unpin |
@@ -203,14 +207,15 @@ server 维护：
 - `permissionDefaultUpdates`：正在更新默认权限；
 - `compactRequests`：待执行的手动压缩。
 
-以下操作在任意 turn 运行或创建会话时返回 409：
+以下操作在任意 turn 运行时返回 409：
 
-- 新建会话；
 - 修改默认权限、agent、model、plan；
 - fork；
 - 删除工作区。
 
-这是为了防止运行中的沙盒命令通过 Web 控制面改变后续回合的授权。它是竞态保护，不替代认证；即使启用了 Web 认证，这些 409 仍然生效。
+新建会话不受运行中 turn 的限制：新会话只快照当前全局默认权限，而该默认值在 turn 运行期间不可变，不同会话的回合可以并行执行。只有默认权限更新进行中时，新建会话才返回 409，避免快照到未完成的默认值。
+
+上述限制是为了防止运行中的沙盒命令通过 Web 控制面改变后续回合的授权。它是竞态保护，不替代认证；即使启用了 Web 认证，这些 409 仍然生效。
 
 ## 4. SSE 回合流
 
@@ -454,7 +459,7 @@ AuthGate
    └─ NewSessionDialog
 ```
 
-认证启用时 `AuthGate` 先检查 `/api/auth/status`；登录成功后才渲染 `App`。`authFetch()` 统一携带 cookie，遇到 401 会把状态切回登录界面并清空当前 store。工作区行菜单的「查看文件列表」把左栏切成 `WorkspaceFileTree`，选中文件后在右栏 `WorkspaceFilePreview` 预览。
+认证启用时 `AuthGate` 先检查 `/api/auth/status`；登录成功后才渲染 `App`。`authFetch()` 统一携带 cookie，遇到 401 会把状态切回登录界面并清空当前 store。工作区行菜单的「查看文件列表」把左栏切成 `WorkspaceFileTree`，选中文件后在右栏预览；右栏 tab 显示「文件预览｜<文件名>」，预览由 `WorkspaceFilePreview`（薄壳）委托给 `preview/PreviewSurface`，后者按扩展名分派到具体 viewer。
 
 等待计划审阅时不再弹出遮挡式对话框：会话末尾显示计划卡片，点击卡片或输入区里的「查看计划」把完整计划以 Markdown 形式放到右栏 `plan` 视图；输入区同时切换为计划审阅模式，可直接批准，或输入反馈后继续规划。右栏保留最后一次审阅的计划，审阅结束后仍可查看。
 
@@ -568,7 +573,8 @@ AuthGate
 - 最多 8 个；
 - 图片 8 MB，文本 256 KB；
 - 图片 base64 预览；
-- 文本 `file.text()`。
+- 文本 `file.text()`；
+- 支持直接粘贴剪贴板中的截图和文件，无文件名时按 MIME 生成名称。
 
 ### 9.6 设置页
 
@@ -590,6 +596,44 @@ AuthGate
 - Vite 配置 `localsConvention: 'camelCaseOnly'`；
 - 主题通过 `body[data-ds-dark-theme]` 和 `html[data-theme]` 双属性切换；
 - Markdown 使用 vendor 的 `MarkdownText`：流式时只重解析尾部 2 个不稳定块，其余缓存；shiki 高亮按需加载；支持 KaTeX 和代码复制。
+
+### 9.8 文件预览
+
+`WorkspaceFilePreview` 已退化成薄壳，实际实现在 `ui/src/components/preview/`：
+
+| 文件 | 职责 |
+| --- | --- |
+| `path.ts` | 纯函数：扩展名 → `PreviewKind`、`sourceForPath()`（text / bytes / url / none）、`formatBytes()`、`resolveRelativePath()`。分派顺序在这里固定，`svg` 先于 code、`csv` 先于 code、`ipynb` 归 JSON |
+| `resource.ts` | `usePreviewResource()`：文本走 `files/content`，二进制走 `files/raw`，图片/音视频/PDF 直接用 `files/raw` URL；`AbortController` 取消 + 8 项 / 32 MiB LRU |
+| `registry.ts` | kind → viewer 的一张表；禁用某类型只需删一行，未知 kind 落到 `UnsupportedViewer` |
+| `PreviewChrome.tsx` | 预览内没有标题栏：dock 的 tab 已经写着「文件预览｜文件名」，工作区由会话决定。这里只提供 viewer 工具条、骨架 / 失败 / 不支持三种状态 |
+| `PreviewSurface.tsx` | 判定 → 取字节 → 组装外壳与 viewer |
+| `viewers/*` | 每种类型一个组件 |
+| `office/*` | 零依赖 OOXML 解析：`zip.ts`（中央目录 + `DecompressionStream('deflate-raw')`）、`docx.ts`（段落/标题/列表/表格）、`xlsx.ts`（sharedStrings + sheetData + A1 定位）、`csv.ts`（RFC 4180 引号、分隔符探测） |
+| `html/sanitize.ts` | HTML 白名单净化：丢 script/style/iframe/form/object，剥事件属性与危险 URL |
+
+类型与渲染方式：
+
+| 类型 | 数据来源 | 渲染 |
+| --- | --- | --- |
+| `md` | content | vendor `MarkdownText`（与转录同一渲染器），标题打 id 生成目录，相对图片与 `path:line` 链接接上预览 |
+| 代码 / 文本 | content | shiki 懒加载高亮 + 行号 + soft wrap；超过 3,000 行关闭高亮 |
+| `json` | content | vendor `JsonTree`，解析失败退回原文 |
+| `png/jpg/...`、`svg` | raw URL | `<img>` + `ImageLightbox`，fit / 1:1 |
+| `mp4/...`、`mp3/...` | raw URL | 原生 `<video>` / `<audio>`，靠 Range 拖动 |
+| `pdf` | raw URL | 同源 `<iframe>`，交给浏览器自带 PDF 阅读器；需要 CSP `frame-src 'self'` |
+| `docx` | raw bytes | `office/docx.ts` 解析成块模型，用应用排版渲染 |
+| `csv/tsv`、`xlsx` | content / raw bytes | 同一个表格组件，吸顶表头 + 行号 + 工作表标签 |
+| `html` | content | 默认源码；「渲染」走 `html/sanitize.ts` 的净化视图 |
+| 其它 | 无 | 下载卡片 + 新窗口打开 |
+
+文件树与右栏文件列表都支持右键菜单：重命名、移动到文件夹、复制相对路径、复制绝对路径、删除。菜单与三个确认对话框在 `components/FileTreeMenu.tsx`，请求封装在 `lib/file-ops.ts`；操作完成后由 `App` 递增 `refreshToken` 让所有已展开目录重新拉取，并按 `from → to` 跟随正在预览的文件（删除则关闭预览）。服务端拒绝 `.git` 与 `.omniagent` 段，避免误删仓库元数据或宿主状态。
+
+刻意不做的事：
+
+- **不引第三方预览库**：PDF 交给浏览器，Office 用平台 `DecompressionStream` 自行解包。代价是 Word 只保留结构、不还原版式（页边距、浮动图形、主题），收益是主包不增加、没有供应链面。
+- **不用 sandbox iframe 渲染 HTML**：`srcdoc` 与 `blob:` 文档都继承本文档 CSP，在 `default-src 'none'` 下渲染不出任何样式，除非整体放宽策略；净化后内联渲染既保留主题，也保持惰性。
+- **不内联 SVG**：一律走 `<img>`，避免文件里的脚本进入文档上下文。
 
 ## 10. 如何扩展
 
@@ -631,7 +675,7 @@ AuthGate
 - Web 子代理没有 live approval handler；一次性沙盒升级会被拒绝，plan review 不可用。
 - `RoleSettings` / `ModelSettings` 走 `ConfigFile` 的进程内锁，但没有 `PermissionSettings` 那样的 `lastText` 外部修改检测；多进程同时编辑时最后写入者获胜。
 - 模式保存不接受 MCP 工具名（见 [configuration-agents-modes.md](../design/configuration-agents-modes.md) 的实现备注）。
-- 工作区文件预览只支持不超过 1 MiB 的 UTF-8 文本；binary、非 UTF-8 和更大文件返回 413 / 415，不提供图片或富文本预览。
+- 文本预览仍限制在 1 MiB UTF-8（`files/content`）；二进制、图片、PDF、Office、音视频走 `files/raw`，单文件上限 256 MiB。PDF 由浏览器渲染，样式随浏览器而定；Word 只还原结构与表格，不还原版式；Excel 只读单元格原值，不做数字格式与公式计算；HTML 渲染视图是白名单净化后的近似效果。
 - Context Meter 的 `projectedTokens` 是基于字节数 / 4 和图片固定成本的近似值；切换模型或历史后可能先显示估算，直到出现新的真实 usage。
 - 实时 SSE、`follow` 的 `run.snapshot` 和原始会话记录不是脱敏导出格式；assistant 文本、工具参数和结果都可能含敏感内容。
 - `run.snapshot` 的 replay 有上限；溢出时 `truncated: true`，UI 会提示实时历史不完整，并在回合结束后通过会话详情对账。

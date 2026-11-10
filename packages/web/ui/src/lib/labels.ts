@@ -1,5 +1,6 @@
 import type {
   DiffBlockLabels,
+  JsonTreeLabels,
   MarkdownLabels,
   ReadBlockLabels,
   SearchBlockLabels,
@@ -96,5 +97,20 @@ export function webLabels(t: Translate): WebBlockLabels {
     http: t('HTTP'),
     contentTruncated: t('Content truncated'),
     markdown: markdownLabels(t),
+  };
+}
+
+export function jsonTreeLabels(t: Translate): JsonTreeLabels {
+  return {
+    copyValue: t('Copy value'),
+    copyJson: t('Copy as JSON'),
+    copyPath: t('Copy path'),
+    copyPrettyJson: t('Copy pretty JSON'),
+    copyCompactJson: t('Copy compact JSON'),
+    copied: t('Copied'),
+    copyFailed: t('Could not copy'),
+    collapseNode: t('Collapse'),
+    expandNode: t('Expand'),
+    copyButtonTitle: (action) => t('Copy {action}', { action }),
   };
 }

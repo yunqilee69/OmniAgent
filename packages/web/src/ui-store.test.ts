@@ -1458,6 +1458,45 @@ describe('workbench store', () => {
     await waitFor(() => store.currentEntry()?.run === undefined);
   });
 
+  it('skips the draft permission write when creation applied the same default', async () => {
+    const urls: string[] = [];
+    let controller!: ReadableStreamDefaultController<Uint8Array>;
+    const encoder = new TextEncoder();
+    const stream = new ReadableStream<Uint8Array>({ start(value) { controller = value; } });
+    const store = await boot(sessionFetcher(async (url, init) => {
+      if (url === '/api/modes') return json({ modes: [standardMode], defaultMode: 'standard' });
+      if (url === '/api/workspaces/a/sessions' && init?.method === 'POST') {
+        urls.push(url);
+        return json({
+          session: { id: 'fresh', workspace: '/a', createdAt: 2, updatedAt: 2, blank: true, mode: 'standard' },
+          permission: { preset: 'workspace-write' },
+        }, 201);
+      }
+      if (url === '/api/workspaces/a/sessions/fresh/permission' && init?.method === 'POST') {
+        urls.push(url);
+        return json({ permission: { preset: 'workspace-write' } });
+      }
+      if (url === '/api/workspaces/a/sessions/fresh/messages' && init?.method === 'POST') {
+        urls.push(url);
+        return new Response(stream, { status: 200, headers: { 'content-type': 'text/event-stream' } });
+      }
+      if (url === '/api/workspaces/a/sessions/shared') return json(detail());
+      if (url === '/api/workspaces/a/sessions/fresh') return json(detail({ text: 'Hello' }));
+      return undefined;
+    }));
+
+    await expect(store.startDraftSession('standard')).resolves.toBeNull();
+    await expect(store.sendMessage('Hello')).resolves.toBe(true);
+    expect(urls).toEqual([
+      '/api/workspaces/a/sessions',
+      '/api/workspaces/a/sessions/fresh/messages',
+    ]);
+
+    controller.enqueue(encoder.encode('data: {"type":"turn.end","reason":"end_turn"}\n\n'));
+    controller.close();
+    await waitFor(() => store.currentEntry()?.run === undefined);
+  });
+
   it('falls back from draft agent and role bindings to the model default effort', async () => {
     const roleMode = { ...standardMode, id: 'role-mode', model: { version: 2, kind: 'role', role: 'writer' } };
     const store = await boot(sessionFetcher((url) => {

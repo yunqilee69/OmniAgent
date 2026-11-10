@@ -19,6 +19,7 @@ import { groupTurns, userMessageCopyText, type DisplayTurn, type TranscriptItem,
 import { useApp } from '../lib/store.ts';
 import type { SessionEntry } from '../lib/store.ts';
 import { markdownLabels } from '../lib/labels.ts';
+import { MarkdownDelegateProvider } from '../../vendor/primitives/index.ts';
 import { translator, type Locale, type Translate } from '../lib/i18n.ts';
 import { ToolView } from './ToolView.tsx';
 import { PlanReviewCard } from './PlanReview.tsx';
@@ -245,10 +246,12 @@ function TurnView({ turn, processDisplay, locale, t }: { turn: DisplayTurn; proc
   );
 }
 
-export function ConversationView({ entry, processDisplay, onOpenPlan }: {
+export function ConversationView({ entry, processDisplay, onOpenPlan, onOpenFile }: {
   entry: SessionEntry;
   processDisplay: 'collapsed' | 'expanded';
   onOpenPlan?: () => void;
+  /** Open a workspace file named by a Markdown link (`src/a.ts:12`) in the preview panel. */
+  onOpenFile?: ((path: string, options?: { line?: number }) => void) | undefined;
 }): ReactNode {
   const app = useApp();
   const t = translator(app.locale);
@@ -282,6 +285,7 @@ export function ConversationView({ entry, processDisplay, onOpenPlan }: {
   }, []);
 
   return (
+    <MarkdownDelegateProvider openFile={onOpenFile}>
     <div className={chatCss.root} data-chat-following-tail={awayFromBottom ? undefined : ''}>
       <div className={chatCss.scroll} ref={scroll}>
         <div className={chatCss.column}>
@@ -338,5 +342,6 @@ export function ConversationView({ entry, processDisplay, onOpenPlan }: {
         </div>
       )}
     </div>
+    </MarkdownDelegateProvider>
   );
 }

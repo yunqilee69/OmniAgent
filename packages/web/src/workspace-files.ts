@@ -1,6 +1,6 @@
-import { lstat, open, readdir, realpath } from 'node:fs/promises';
+import { lstat, open, readdir, realpath, rename, rm } from 'node:fs/promises';
 import { constants } from 'node:fs';
-import { isAbsolute, relative, resolve, sep } from 'node:path';
+import { basename, isAbsolute, join, relative, resolve, sep } from 'node:path';
 
 /**
  * Workspace-scoped file references for the composer `@` menu. The scan is
@@ -13,7 +13,56 @@ const EXCLUDED_DIRS = new Set([
 ]);
 const MAX_ENTRIES = 50_000;
 export const MAX_PREVIEW_BYTES = 1024 * 1024;
+/** Raw byte route ceiling: large enough for video and print-ready PDF, streamed rather than buffered. */
+export const MAX_RAW_FILE_BYTES = 256 * 1024 * 1024;
 const MAX_DIRECTORY_ENTRIES = 5000;
+/** Trees a file operation must never touch: repository metadata and this host's own state. */
+const PROTECTED_SEGMENTS = new Set(['.git', '.omniagent']);
+
+/**
+ * Extensions the raw byte route may serve inline. The value is the exact
+ * `content-type` sent; anything absent is download-only `application/octet-stream`.
+ * `text/html` is deliberately absent: the route must never become an XSS origin.
+ */
+export const RAW_CONTENT_TYPES: Readonly<Record<string, string>> = {
+  png: 'image/png',
+  jpg: 'image/jpeg',
+  jpeg: 'image/jpeg',
+  gif: 'image/gif',
+  webp: 'image/webp',
+  avif: 'image/avif',
+  bmp: 'image/bmp',
+  ico: 'image/x-icon',
+  svg: 'image/svg+xml',
+  pdf: 'application/pdf',
+  mp3: 'audio/mpeg',
+  wav: 'audio/wav',
+  ogg: 'audio/ogg',
+  m4a: 'audio/mp4',
+  flac: 'audio/flac',
+  aac: 'audio/aac',
+  mp4: 'video/mp4',
+  webm: 'video/webm',
+  mov: 'video/quicktime',
+  m4v: 'video/x-m4v',
+};
+
+/** One file resolved for the raw byte route. */
+export interface WorkspaceRawFile {
+  /** Absolute path already verified to sit inside the workspace root. */
+  absolute: string;
+  size: number;
+  /** Whitelisted type, or `application/octet-stream` when the extension is not inline-safe. */
+  contentType: string;
+  /** Whether the response may be displayed by the browser rather than downloaded. */
+  inline: boolean;
+}
+
+function lowercaseExtension(path: string): string {
+  const slash = path.lastIndexOf('/');
+  const dot = path.lastIndexOf('.');
+  return dot > slash ? path.slice(dot + 1).toLowerCase() : '';
+}
 
 export class WorkspaceFileError extends Error {
   constructor(public readonly status: number, message: string) { super(message); }
@@ -95,10 +144,136 @@ export async function readWorkspaceFile(root: string, path: string): Promise<str
   } finally { await file.close(); }
 }
 
+function assertEditablePath(path: string): void {
+  if (path.split('/').some((segment) => PROTECTED_SEGMENTS.has(segment))) {
+    throw new WorkspaceFileError(403, 'This path is protected');
+  }
+}
+
+function assertEntryName(name: string): string {
+  const trimmed = name.trim();
+  if (trimmed === '' || trimmed === '.' || trimmed === '..' || trimmed.length > 255
+    || trimmed.includes('/') || trimmed.includes('\\') || /[\u0000-\u001f\u007f]/.test(trimmed)) {
+    throw new WorkspaceFileError(400, 'Invalid file name');
+  }
+  return trimmed;
+}
+
+function parentOf(path: string): string {
+  const slash = path.lastIndexOf('/');
+  return slash < 0 ? '' : path.slice(0, slash);
+}
+
+async function describeEntry(root: string, path: string): Promise<WorkspaceFileEntry> {
+  const target = await safeWorkspacePath(root, path);
+  let info;
+  try { info = await lstat(target); } catch { throw new WorkspaceFileError(404, 'File or directory not found'); }
+  return { path, name: basename(path), kind: info.isDirectory() ? 'directory' : 'file' };
+}
+
+/**
+ * Move or rename one entry, keeping both ends inside the workspace fence.
+ * @param root - workspace root.
+ * @param from - existing workspace-relative path.
+ * @param to - destination workspace-relative path.
+ * @returns the entry at its new path.
+ */
+async function relocate(root: string, from: string, to: string): Promise<WorkspaceFileEntry> {
+  if (to === from) return describeEntry(root, from);
+  const source = await safeWorkspacePath(root, from);
+  const directory = parentOf(to);
+  const parent = await safeWorkspacePath(root, directory, true);
+  let parentInfo;
+  try { parentInfo = await lstat(parent); } catch { throw new WorkspaceFileError(404, 'Target folder not found'); }
+  if (!parentInfo.isDirectory()) throw new WorkspaceFileError(400, 'Target is not a folder');
+  const destination = join(parent, basename(to));
+  let exists = true;
+  try { await lstat(destination); } catch { exists = false; }
+  if (exists) throw new WorkspaceFileError(409, 'A file or folder with that name already exists');
+  try {
+    await rename(source, destination);
+  } catch {
+    throw new WorkspaceFileError(409, 'The file could not be moved');
+  }
+  return describeEntry(root, to);
+}
+
+/**
+ * Rename one file or folder in place.
+ * @param root - workspace root.
+ * @param path - existing workspace-relative path.
+ * @param name - new name; path separators and control characters are rejected.
+ * @returns the renamed entry.
+ */
+export async function renameWorkspaceEntry(root: string, path: string, name: string): Promise<WorkspaceFileEntry> {
+  assertEditablePath(path);
+  await safeWorkspacePath(root, path);
+  const directory = parentOf(path);
+  const nextName = assertEntryName(name);
+  const target = directory === '' ? nextName : `${directory}/${nextName}`;
+  assertEditablePath(target);
+  return relocate(root, path, target);
+}
+
+/**
+ * Move one file or folder into another folder of the workspace.
+ * @param root - workspace root.
+ * @param path - existing workspace-relative path.
+ * @param directory - destination folder; '' moves to the workspace root.
+ * @returns the entry at its new path.
+ */
+export async function moveWorkspaceEntry(root: string, path: string, directory: string): Promise<WorkspaceFileEntry> {
+  assertEditablePath(path);
+  await safeWorkspacePath(root, path);
+  if (directory === path || directory.startsWith(`${path}/`)) {
+    throw new WorkspaceFileError(400, 'A folder cannot be moved inside itself');
+  }
+  if (directory !== '') await safeWorkspacePath(root, directory);
+  const target = directory === '' ? basename(path) : `${directory}/${basename(path)}`;
+  assertEditablePath(target);
+  return relocate(root, path, target);
+}
+
+/**
+ * Delete one file or folder, recursively for folders.
+ * @param root - workspace root.
+ * @param path - existing workspace-relative path.
+ */
+export async function removeWorkspaceEntry(root: string, path: string): Promise<void> {
+  assertEditablePath(path);
+  const target = await safeWorkspacePath(root, path);
+  try {
+    await rm(target, { recursive: true, force: false });
+  } catch {
+    throw new WorkspaceFileError(409, 'The file could not be deleted');
+  }
+}
+
 export interface WorkspaceFileEntry {
   path: string;
   name: string;
   kind: 'file' | 'directory';
+}
+
+/**
+ * Resolve one file for the raw byte route: the same path fence as
+ * {@link readWorkspaceFile}, plus the content type the browser may display.
+ * Bytes are streamed by the caller, so this never reads the file.
+ */
+export async function statWorkspaceRawFile(root: string, path: string): Promise<WorkspaceRawFile> {
+  const target = await safeWorkspacePath(root, path);
+  let info;
+  try { info = await lstat(target); } catch { throw new WorkspaceFileError(404, 'File not found'); }
+  if (info.isSymbolicLink()) throw new WorkspaceFileError(403, 'Symlinks are not supported');
+  if (!info.isFile()) throw new WorkspaceFileError(400, 'Not a regular file');
+  if (info.size > MAX_RAW_FILE_BYTES) throw new WorkspaceFileError(413, 'File is too large to preview');
+  const contentType = RAW_CONTENT_TYPES[lowercaseExtension(path)];
+  return {
+    absolute: target,
+    size: info.size,
+    contentType: contentType ?? 'application/octet-stream',
+    inline: contentType !== undefined,
+  };
 }
 
 interface Candidate extends WorkspaceFileEntry {

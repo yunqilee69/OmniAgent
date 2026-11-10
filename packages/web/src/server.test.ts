@@ -1213,7 +1213,7 @@ describe('workspace web host', () => {
     }
   });
 
-  it('blocks session creation and every permission mutation while any turn is active', async () => {
+  it('allows a concurrent session and turn while another turn is active', async () => {
     const root = await mkdtemp(join(tmpdir(), 'omniagent-web-control-plane-'));
     const settings = await PermissionSettings.open(join(root, 'config.json'));
     const active = signal();
@@ -1232,9 +1232,22 @@ describe('workspace web host', () => {
     await other.append(createInitialDshPermissionEvent('workspace-write'));
     const response = await fetch(`${url}/${session.id}/messages`, jsonRequest({ text: 'start' }));
     const reader = response.body!.getReader();
+    let secondReader: ReadableStreamDefaultReader<Uint8Array> | undefined;
     try {
       await reader.read();
-      expect((await fetch(url, jsonRequest({}))).status).toBe(409);
+      const created = await fetch(url, jsonRequest({}));
+      expect(created.status).toBe(201);
+      const body = await created.json() as {
+        session: { id: string };
+        permission: { preset: string | null };
+      };
+      expect(body.permission.preset).toBe('workspace-write');
+
+      const second = await fetch(`${url}/${body.session.id}/messages`, jsonRequest({ text: 'parallel' }));
+      secondReader = second.body!.getReader();
+      expect(new TextDecoder().decode((await secondReader.read()).value)).toContain('turn.start');
+
+      // Authorization mutations on other sessions remain blocked.
       expect((await fetch(`${url}/${other.id}/permission`, jsonRequest({ preset: 'danger-full-access' }))).status).toBe(409);
       expect((await fetch(`${base}/api/settings/permissions`, {
         method: 'PUT', headers: { 'content-type': 'application/json' },
@@ -1243,6 +1256,7 @@ describe('workspace web host', () => {
     } finally {
       active.resolve();
       await reader.cancel();
+      await secondReader?.cancel();
     }
   });
 
@@ -1751,6 +1765,97 @@ describe('workspace web host', () => {
     expect((await fetch(`${prefix}/content?path=${encodeURIComponent('../only-second.txt')}`)).status).toBe(400);
     expect((await fetch(`${prefix}/content?path=binary`)).status).toBe(415);
     expect((await fetch(`${base}/api/workspaces/not-found/files/tree`)).status).toBe(404);
+  });
+
+  it('serves raw bytes with displayable types, ranges, and download dispositions', async () => {
+    const { base, first, second } = await setup();
+    const png = Buffer.from([0x89, 0x50, 0x4e, 0x47, 0x0d, 0x0a, 0x1a, 0x0a, 1, 2, 3, 4]);
+    await writeFile(join(first.path, 'cover.png'), png);
+    await writeFile(join(second.path, 'secret.png'), png);
+    await writeFile(join(first.path, 'page.html'), '<h1>hi</h1>');
+    await writeFile(join(first.path, 'readme.txt'), 'hello');
+    const url = `${base}/api/workspaces/${first.id}/files/raw`;
+
+    const full = await fetch(`${url}?path=cover.png`);
+    expect(full.status).toBe(200);
+    expect(full.headers.get('content-type')).toBe('image/png');
+    expect(full.headers.get('content-disposition')).toBe("inline; filename*=UTF-8''cover.png");
+    expect(full.headers.get('accept-ranges')).toBe('bytes');
+    expect(full.headers.get('content-length')).toBe(String(png.length));
+    expect(full.headers.get('x-content-type-options')).toBe('nosniff');
+    expect(full.headers.get('x-frame-options')).toBeNull();
+    expect(Buffer.from(await full.arrayBuffer())).toEqual(png);
+
+    const head = await fetch(`${url}?path=cover.png`, { method: 'HEAD' });
+    expect(head.status).toBe(200);
+    expect(head.headers.get('content-length')).toBe(String(png.length));
+
+    const ranged = await fetch(`${url}?path=cover.png`, { headers: { range: 'bytes=1-3' } });
+    expect(ranged.status).toBe(206);
+    expect(ranged.headers.get('content-range')).toBe(`bytes 1-3/${png.length}`);
+    expect(ranged.headers.get('content-length')).toBe('3');
+    expect(Buffer.from(await ranged.arrayBuffer())).toEqual(png.subarray(1, 4));
+
+    const suffix = await fetch(`${url}?path=cover.png`, { headers: { range: 'bytes=-2' } });
+    expect(suffix.status).toBe(206);
+    expect(Buffer.from(await suffix.arrayBuffer())).toEqual(png.subarray(png.length - 2));
+
+    const unsatisfiable = await fetch(`${url}?path=cover.png`, { headers: { range: 'bytes=999-1200' } });
+    expect(unsatisfiable.status).toBe(416);
+    expect(unsatisfiable.headers.get('content-range')).toBe(`bytes */${png.length}`);
+
+    const download = await fetch(`${url}?path=cover.png&download=1`);
+    expect(download.headers.get('content-disposition')).toBe("attachment; filename*=UTF-8''cover.png");
+
+    // Non-whitelisted types are download-only, so the route never becomes an XSS origin.
+    const html = await fetch(`${url}?path=page.html`);
+    expect(html.headers.get('content-type')).toBe('application/octet-stream');
+    expect(html.headers.get('content-disposition')).toBe("attachment; filename*=UTF-8''page.html");
+    const text = await fetch(`${url}?path=readme.txt`);
+    expect(text.headers.get('content-type')).toBe('application/octet-stream');
+
+    expect((await fetch(`${url}?path=secret.png`)).status).toBe(404);
+    expect((await fetch(`${url}?path=${encodeURIComponent('../project-two/secret.png')}`)).status).toBe(400);
+    expect((await fetch(`${url}?path=`)).status).toBe(400);
+  });
+
+  it('renames, moves, and deletes workspace entries behind the path fence', async () => {
+    const { base, first } = await setup();
+    await mkdir(join(first.path, 'docs'), { recursive: true });
+    await writeFile(join(first.path, 'docs', 'guide.md'), '# Guide\n');
+    await writeFile(join(first.path, 'taken.md'), 'x');
+    const prefix = `${base}/api/workspaces/${first.id}/files`;
+    const post = (suffix: string, body: unknown): Promise<Response> => fetch(`${prefix}/${suffix}`, {
+      method: 'POST',
+      headers: { 'content-type': 'application/json' },
+      body: JSON.stringify(body),
+    });
+
+    const renamed = await post('rename', { path: 'docs/guide.md', name: 'manual.md' });
+    expect(renamed.status).toBe(200);
+    expect(await renamed.json()).toEqual({ entry: { path: 'docs/manual.md', name: 'manual.md', kind: 'file' } });
+    expect(await readFile(join(first.path, 'docs', 'manual.md'), 'utf8')).toBe('# Guide\n');
+
+    const moved = await post('move', { path: 'docs/manual.md', directory: '' });
+    expect(moved.status).toBe(200);
+    expect(await moved.json()).toEqual({ entry: { path: 'manual.md', name: 'manual.md', kind: 'file' } });
+
+    expect((await post('rename', { path: 'manual.md', name: 'taken.md' })).status).toBe(409);
+    expect((await post('rename', { path: 'manual.md', name: '../escape.md' })).status).toBe(400);
+    expect((await post('rename', { path: 'missing.md', name: 'next.md' })).status).toBe(404);
+    expect((await post('rename', { path: '.git/config', name: 'config' })).status).toBe(403);
+    await mkdir(join(first.path, 'docs', 'sub'), { recursive: true });
+    expect((await post('move', { path: 'docs', directory: 'docs/sub' })).status).toBe(400);
+    expect((await post('move', { path: 'manual.md', directory: 'nowhere' })).status).toBe(404);
+    expect((await post('move', { path: 'manual.md' })).status).toBe(400);
+    expect((await post('rename', { path: '../project-two/x.md', name: 'x.md' })).status).toBe(400);
+
+    const removed = await fetch(`${prefix}?path=${encodeURIComponent('manual.md')}`, { method: 'DELETE' });
+    expect(removed.status).toBe(200);
+    expect(await removed.json()).toEqual({ removed: true });
+    await expect(readFile(join(first.path, 'manual.md'))).rejects.toBeInstanceOf(Error);
+    expect((await fetch(`${prefix}?path=missing.md`, { method: 'DELETE' })).status).toBe(404);
+    expect((await fetch(`${prefix}?path=`, { method: 'DELETE' })).status).toBe(400);
   });
 
   it('accepts image and text attachments and persists the composed user content', async () => {

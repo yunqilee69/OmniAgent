@@ -99,6 +99,8 @@ describe('workspace API contract', () => {
     expect(policy).not.toContain("script-src 'unsafe-inline'");
     expect(policy).toContain("style-src 'self' 'unsafe-inline'");
     expect(policy).toContain("connect-src 'self'");
+    expect(policy).toContain("media-src 'self'");
+    expect(policy).toContain("frame-src 'self'");
     expect(policy).toContain("frame-ancestors 'none'");
     expect(response.headers.get('x-frame-options')).toBe('DENY');
     expect(response.headers.get('cache-control')).toBe('no-cache');

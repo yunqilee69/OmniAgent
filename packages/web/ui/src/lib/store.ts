@@ -1618,7 +1618,7 @@ export class AppStore {
       : undefined;
     this.patch({ creatingSession: true });
     try {
-      const body = await this.api<{ session?: SessionSummary }>(
+      const body = await this.api<{ session?: SessionSummary; permission?: { preset?: unknown } }>(
         sessionApiPath(workspaceId),
         jsonOptions('POST', {
           mode: mode.mode,
@@ -1630,7 +1630,9 @@ export class AppStore {
       }
       const session = body.session;
       let setupError: Error | null = null;
-      if (isPermissionPreset(entry.permission)) {
+      // Creation already persisted the global default. Writing the same preset
+      // again is a no-op the server rejects while another session's turn runs.
+      if (isPermissionPreset(entry.permission) && entry.permission !== body.permission?.preset) {
         try {
           await this.api(
             sessionApiPath(workspaceId, session.id, 'permission'),

@@ -5,6 +5,7 @@ import {
   useRef,
   useState,
   type ChangeEvent,
+  type ClipboardEvent,
   type KeyboardEvent,
   type ReactNode,
 } from 'react';
@@ -65,6 +66,7 @@ import {
   replaceRange,
   skillReference,
 } from '../lib/composer-trigger.ts';
+import { attachmentFileName, clipboardFiles } from '../lib/clipboard.ts';
 import { rankLike } from '../lib/matcher.ts';
 import { relativeDate } from '../lib/trajectory.ts';
 import { translator, type Translate } from '../lib/i18n.ts';
@@ -717,7 +719,7 @@ export function Composer({ hero = false, onOpenPlanPreview }: { hero?: boolean; 
     const errors: string[] = [];
     let total = attachments.reduce((sum, item) => sum + item.size, 0);
     try {
-      for (const file of picked) {
+      for (const [index, file] of picked.entries()) {
         const limit = attachmentLimitError(file.size, total, attachments.length + next.length);
         if (limit === 'count') {
           errors.push(t('Attachments are limited to {count} files.', { count: MAX_ATTACHMENTS }));
@@ -739,7 +741,7 @@ export function Composer({ hero = false, onOpenPlanPreview }: { hero?: boolean; 
           }
           const mimeType = imageType ?? (file.type || 'application/octet-stream');
           const data = await readBase64(file);
-          next.push({ id: `${Date.now()}-${next.length}`, kind: imageType === undefined ? 'file' : 'image', name: file.name, mimeType, data,
+          next.push({ id: `${Date.now()}-${next.length}`, kind: imageType === undefined ? 'file' : 'image', name: attachmentFileName(file, index), mimeType, data,
             ...(imageType === undefined ? {} : { preview: `data:${mimeType};base64,${data}` }), size: file.size });
           total += file.size;
         } catch (error) {
@@ -754,6 +756,14 @@ export function Composer({ hero = false, onOpenPlanPreview }: { hero?: boolean; 
       readingFilesRef.current = false;
       setReadingFiles(false);
     }
+  };
+
+  const onPaste = (event: ClipboardEvent<HTMLTextAreaElement>): void => {
+    const files = clipboardFiles(event.clipboardData);
+    if (files.length === 0) return;
+    // Only file pastes are intercepted; text pastes keep the textarea default.
+    event.preventDefault();
+    if (!attachLocked) void addFiles(files);
   };
 
   const agentValue = entry?.agent?.id ?? (creating ? app.creationAgent : '');
@@ -922,6 +932,7 @@ export function Composer({ hero = false, onOpenPlanPreview }: { hero?: boolean; 
             onClick={(event) => { setCaret(event.currentTarget.selectionStart ?? draft.length); }}
             onSelect={(event) => { setCaret(event.currentTarget.selectionStart ?? draft.length); }}
             onKeyDown={onKeyDown}
+            onPaste={onPaste}
           />
         </div>
         <div className={css.row}>

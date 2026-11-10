@@ -4,11 +4,12 @@ import { authFetch } from '../lib/auth.ts';
 import { translator, type Translate } from '../lib/i18n.ts';
 import { useApp } from '../lib/store.ts';
 import { workspaceApiPath, type WorkspaceFileEntry } from '../lib/wire.ts';
+import { FileTreeMenu, type FileMenuChange, type FileMenuTarget } from './FileTreeMenu.tsx';
 import css from '../styles/workspace-files.module.css';
 
-function Directory({ workspaceId, path, depth, selected, onSelect, t }: {
-  workspaceId: string; path: string; depth: number; selected: string | null;
-  onSelect: (path: string) => void; t: Translate;
+function Directory({ workspaceId, path, depth, selected, refreshToken, onSelect, onContextMenu, t }: {
+  workspaceId: string; path: string; depth: number; selected: string | null; refreshToken: number;
+  onSelect: (path: string) => void; onContextMenu: (target: FileMenuTarget) => void; t: Translate;
 }): ReactNode {
   const [entries, setEntries] = useState<WorkspaceFileEntry[]>([]);
   const [expanded, setExpanded] = useState<Set<string>>(() => new Set());
@@ -30,7 +31,7 @@ function Directory({ workspaceId, path, depth, selected, onSelect, t }: {
       })
       .catch(() => { if (!controller.signal.aborted) setStatus('error'); });
     return () => { controller.abort(); };
-  }, [workspaceId, path, attempt]);
+  }, [workspaceId, path, attempt, refreshToken]);
   return (
     <div>
       {status === 'loading' && <div className={css.status}>{t('Loading files…')}</div>}
@@ -45,12 +46,33 @@ function Directory({ workspaceId, path, depth, selected, onSelect, t }: {
             title={entry.path} onClick={() => {
               if (entry.kind === 'file') onSelect(entry.path);
               else setExpanded((previous) => { const next = new Set(previous); if (next.has(entry.path)) next.delete(entry.path); else next.add(entry.path); return next; });
+            }}
+            onContextMenu={(event) => {
+              event.preventDefault();
+              onContextMenu({ path: entry.path, kind: entry.kind, x: event.clientX, y: event.clientY });
+            }}
+            onKeyDown={(event) => {
+              if (event.key !== 'ContextMenu' && !(event.shiftKey && event.key === 'F10')) return;
+              event.preventDefault();
+              const rect = event.currentTarget.getBoundingClientRect();
+              onContextMenu({ path: entry.path, kind: entry.kind, x: rect.left + 12, y: rect.bottom - 4 });
             }}>
             {entry.kind === 'directory' ? (isOpen ? <IconChevronDownOutlineRegular size={14} /> : <IconChevronRightOutlineRegular size={14} />) : <span className={css.spacer} />}
             {entry.kind === 'directory' ? <IconFolderCloseRegular size={15} /> : <IconPaperclipOutlineRegular size={15} />}
             <span className={css.name}>{entry.name}</span>
           </button>
-          {entry.kind === 'directory' && isOpen && <Directory workspaceId={workspaceId} path={entry.path} depth={depth + 1} selected={selected} onSelect={onSelect} t={t} />}
+          {entry.kind === 'directory' && isOpen && (
+            <Directory
+              workspaceId={workspaceId}
+              path={entry.path}
+              depth={depth + 1}
+              selected={selected}
+              refreshToken={refreshToken}
+              onSelect={onSelect}
+              onContextMenu={onContextMenu}
+              t={t}
+            />
+          )}
         </div>;
       })}
       {status === 'ready' && truncated && <div className={css.status}>{t('Directory listing truncated.')}</div>}
@@ -58,15 +80,44 @@ function Directory({ workspaceId, path, depth, selected, onSelect, t }: {
   );
 }
 
-export function WorkspaceFileTree({ workspaceId, name, selected, onBack, onSelect }: {
-  workspaceId: string; name: string; selected: string | null; onBack: () => void; onSelect: (path: string) => void;
+export function WorkspaceFileTree({ workspaceId, workspacePath, name, selected, refreshToken, onBack, onSelect, onChanged }: {
+  workspaceId: string;
+  /** Absolute root of the browsed workspace, for the absolute-path copy action. */
+  workspacePath: string;
+  name: string;
+  selected: string | null;
+  /** Bumped by the owner after a file operation so every open folder refetches. */
+  refreshToken: number;
+  onBack: () => void;
+  onSelect: (path: string) => void;
+  onChanged: (change: FileMenuChange) => void;
 }): ReactNode {
   const t = translator(useApp().locale);
+  const [menu, setMenu] = useState<FileMenuTarget | null>(null);
   return <aside className={css.tree} aria-label={t('Workspace files')}>
     <div className={css.treeHeader}>
       <button type="button" className={css.iconButton} onClick={onBack} aria-label={t('Back to workspaces')} title={t('Back to workspaces')}><IconChevronLeftOutlineRegular size={16} /></button>
       <strong className={css.name} title={name}>{name}</strong>
     </div>
-    <div className={css.treeBody}><Directory key={workspaceId} workspaceId={workspaceId} path="" depth={0} selected={selected} onSelect={onSelect} t={t} /></div>
+    <div className={css.treeBody}>
+      <Directory
+        key={workspaceId}
+        workspaceId={workspaceId}
+        path=""
+        depth={0}
+        selected={selected}
+        refreshToken={refreshToken}
+        onSelect={onSelect}
+        onContextMenu={setMenu}
+        t={t}
+      />
+    </div>
+    <FileTreeMenu
+      workspaceId={workspaceId}
+      workspacePath={workspacePath}
+      target={menu}
+      onClose={() => { setMenu(null); }}
+      onChanged={(change) => { onChanged(change); }}
+    />
   </aside>;
 }

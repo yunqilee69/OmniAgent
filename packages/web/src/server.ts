@@ -1,6 +1,7 @@
 import { createServer, type IncomingMessage, type Server, type ServerResponse } from 'node:http';
 import { createHash, randomBytes, timingSafeEqual } from 'node:crypto';
 import { isIP } from 'node:net';
+import { createReadStream } from 'node:fs';
 import { readFile, stat } from 'node:fs/promises';
 import { extname, isAbsolute, normalize, resolve, sep } from 'node:path';
 import { fileURLToPath } from 'node:url';
@@ -85,7 +86,11 @@ import { exportSession } from './session-export';
 import { projectSessionMetrics } from './session-metrics';
 import { projectTraceEvents } from './trace-projection';
 import { projectTrajectory } from './trajectory';
-import { browseWorkspaceDirectory, readWorkspaceFile, searchWorkspaceFiles, WorkspaceFileError } from './workspace-files';
+import {
+  browseWorkspaceDirectory, moveWorkspaceEntry, readWorkspaceFile, removeWorkspaceEntry, renameWorkspaceEntry,
+  searchWorkspaceFiles, statWorkspaceRawFile, WorkspaceFileError,
+} from './workspace-files';
+import type { WorkspaceRawFile } from './workspace-files';
 import { DefaultWorkspaceRemovalError } from './workspaces';
 import type { LiveSessionRegistry } from './live-sessions';
 import type { Workspace, WorkspaceRegistry } from './workspaces';
@@ -206,6 +211,10 @@ const DOCUMENT_CSP = [
   "script-src 'self'",
   "style-src 'self' 'unsafe-inline'",
   "img-src 'self' data: blob:",
+  // Preview players stream audio and video straight from the raw file route.
+  "media-src 'self'",
+  // The PDF viewer frames a same-origin raw response and lets the browser render it.
+  "frame-src 'self'",
   "font-src 'self' data:",
   "connect-src 'self'",
   "base-uri 'none'",
@@ -471,6 +480,80 @@ async function serveStatic(
     'cache-control': 'no-cache',
   });
   response.end(request.method === 'HEAD' ? undefined : document);
+}
+
+/**
+ * Parse one `Range` header into a closed byte interval.
+ * @param header - the raw `range` header, absent for a full read.
+ * @param size - total file size in bytes.
+ * @returns the interval, `'unsatisfiable'` when it names no byte, or undefined to serve the whole file
+ *          (absent header, syntactically invalid, or a multi-range request this route does not answer).
+ */
+export function parseByteRange(header: string | undefined, size: number): { start: number; end: number } | 'unsatisfiable' | undefined {
+  if (header === undefined) return undefined;
+  const match = /^bytes=(\d*)-(\d*)$/.exec(header.trim());
+  if (match === null) return undefined;
+  const rawStart = match[1] ?? '';
+  const rawEnd = match[2] ?? '';
+  if (rawStart === '' && rawEnd === '') return undefined;
+  if (rawStart === '') {
+    // `bytes=-N`: the final N bytes.
+    const suffix = Number(rawEnd);
+    if (!Number.isSafeInteger(suffix) || suffix <= 0) return 'unsatisfiable';
+    if (size === 0) return 'unsatisfiable';
+    return { start: Math.max(0, size - suffix), end: size - 1 };
+  }
+  const start = Number(rawStart);
+  if (!Number.isSafeInteger(start) || start >= size) return 'unsatisfiable';
+  const rawEndNumber = rawEnd === '' ? size - 1 : Number(rawEnd);
+  if (!Number.isSafeInteger(rawEndNumber) || rawEndNumber < start) return 'unsatisfiable';
+  return { start, end: Math.min(rawEndNumber, size - 1) };
+}
+
+/** RFC 5987 filename for `content-disposition`, with quotes and parentheses escaped. */
+function contentDisposition(type: 'inline' | 'attachment', filename: string): string {
+  const encoded = encodeURIComponent(filename).replace(/['()*]/g, (character) =>
+    `%${character.charCodeAt(0).toString(16).toUpperCase()}`);
+  return `${type}; filename*=UTF-8''${encoded}`;
+}
+
+/**
+ * Answer the raw byte route: an unmodified file body with its whitelisted
+ * content type, streamed so a 200 MiB video costs no heap, and ranged so
+ * audio and video seeking works.
+ */
+function sendRawFile(request: IncomingMessage, response: ServerResponse, file: WorkspaceRawFile, download: boolean): void {
+  const filename = file.absolute.split(/[\\/]/).pop() ?? 'file';
+  const headers = {
+    'content-type': file.contentType,
+    'content-disposition': contentDisposition(file.inline && !download ? 'inline' : 'attachment', filename),
+    'cache-control': 'private, max-age=60',
+    'x-content-type-options': 'nosniff',
+    'accept-ranges': 'bytes',
+  };
+  const range = parseByteRange(request.headers.range, file.size);
+  if (range === 'unsatisfiable') {
+    response.writeHead(416, { ...headers, 'content-range': `bytes */${file.size}` });
+    response.end();
+    return;
+  }
+  if (range !== undefined) {
+    response.writeHead(206, {
+      ...headers,
+      'content-range': `bytes ${range.start}-${range.end}/${file.size}`,
+      'content-length': String(range.end - range.start + 1),
+    });
+    if (request.method === 'HEAD') { response.end(); return; }
+    const stream = createReadStream(file.absolute, { start: range.start, end: range.end });
+    stream.on('error', () => { response.destroy(); });
+    stream.pipe(response);
+    return;
+  }
+  response.writeHead(200, { ...headers, 'content-length': String(file.size) });
+  if (request.method === 'HEAD') { response.end(); return; }
+  const stream = createReadStream(file.absolute);
+  stream.on('error', () => { response.destroy(); });
+  stream.pipe(response);
 }
 
 async function route(
@@ -793,11 +876,47 @@ async function route(
   const workspace = await options.workspaces.get(parts[2]);
   if (!workspace) throw new HttpError(404, 'Workspace not found');
   const workspacePrefix = `${workspace.path}\0`;
+  if ((request.method === 'GET' || request.method === 'HEAD')
+    && parts.length === 5 && parts[3] === 'files' && parts[4] === 'raw') {
+    const path = url.searchParams.get('path') ?? '';
+    const download = url.searchParams.get('download') === '1';
+    try {
+      return sendRawFile(request, response, await statWorkspaceRawFile(workspace.path, path), download);
+    } catch (error) {
+      if (error instanceof WorkspaceFileError) throw new HttpError(error.status, error.message);
+      throw error;
+    }
+  }
   if (request.method === 'GET' && parts.length === 5 && parts[3] === 'files' && (parts[4] === 'tree' || parts[4] === 'content')) {
     const path = url.searchParams.get('path') ?? '';
     try {
       if (parts[4] === 'tree') return json(response, 200, await browseWorkspaceDirectory(workspace.path, path));
       return json(response, 200, { path, content: await readWorkspaceFile(workspace.path, path) });
+    } catch (error) {
+      if (error instanceof WorkspaceFileError) throw new HttpError(error.status, error.message);
+      throw error;
+    }
+  }
+  if (request.method === 'POST' && parts.length === 5 && parts[3] === 'files'
+    && (parts[4] === 'rename' || parts[4] === 'move')) {
+    const body = await readJson(request);
+    if (typeof body.path !== 'string' || body.path === '') throw new HttpError(400, 'A workspace path is required');
+    try {
+      if (parts[4] === 'rename') {
+        if (typeof body.name !== 'string') throw new HttpError(400, 'A new name is required');
+        return json(response, 200, { entry: await renameWorkspaceEntry(workspace.path, body.path, body.name) });
+      }
+      if (typeof body.directory !== 'string') throw new HttpError(400, 'A target folder is required');
+      return json(response, 200, { entry: await moveWorkspaceEntry(workspace.path, body.path, body.directory) });
+    } catch (error) {
+      if (error instanceof WorkspaceFileError) throw new HttpError(error.status, error.message);
+      throw error;
+    }
+  }
+  if (request.method === 'DELETE' && parts.length === 4 && parts[3] === 'files') {
+    try {
+      await removeWorkspaceEntry(workspace.path, url.searchParams.get('path') ?? '');
+      return json(response, 200, { removed: true });
     } catch (error) {
       if (error instanceof WorkspaceFileError) throw new HttpError(error.status, error.message);
       throw error;
@@ -853,7 +972,12 @@ async function route(
   }
   if (request.method === 'POST' && parts.length === 4) {
     const body = await readJson(request);
-    if (running.size > 0 || creating.size > 0 || getPermissionDefaultUpdates() > 0) throw new HttpError(409, 'Cannot create a session while a turn or session creation is active');
+    // A new session only snapshots the current global default preset, so a turn
+    // running in another session is unrelated. An in-flight default update is
+    // different: the new session must not persist a half-applied default.
+    if (getPermissionDefaultUpdates() > 0) {
+      throw new HttpError(409, 'Cannot create a session while the default permission is being updated');
+    }
     if (removing.has(workspace.id)) throw new HttpError(409, 'Workspace is being unregistered');
     creating.set(workspace.id, (creating.get(workspace.id) ?? 0) + 1);
     try {
@@ -950,7 +1074,12 @@ async function route(
         }
       });
       await options.workspaces.touch(workspace.id);
-      return json(response, 201, { session: summarize(handle) });
+      // Report the preset applied at creation so the client can skip a
+      // redundant permission write, which is still blocked during any turn.
+      return json(response, 201, {
+        session: summarize(handle),
+        permission: { preset: permissionProjection(handle, key, failedPermissions).preset },
+      });
     } finally {
       const remaining = creating.get(workspace.id)! - 1;
       if (remaining) creating.set(workspace.id, remaining);

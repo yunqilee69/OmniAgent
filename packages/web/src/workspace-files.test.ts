@@ -1,8 +1,10 @@
-import { mkdir, mkdtemp, symlink, writeFile } from 'node:fs/promises';
+import { mkdir, mkdtemp, symlink, truncate, writeFile } from 'node:fs/promises';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { describe, expect, it } from 'vitest';
-import { browseWorkspaceDirectory, MAX_PREVIEW_BYTES, readWorkspaceFile, searchWorkspaceFiles } from './workspace-files';
+import {
+  browseWorkspaceDirectory, MAX_PREVIEW_BYTES, MAX_RAW_FILE_BYTES, readWorkspaceFile, searchWorkspaceFiles, statWorkspaceRawFile,
+} from './workspace-files';
 
 async function workspace(): Promise<string> {
   const root = await mkdtemp(join(tmpdir(), 'omniagent-files-'));
@@ -93,5 +95,43 @@ describe('workspace file browser', () => {
     await expect(readWorkspaceFile(root, 'invalid')).rejects.toMatchObject({ status: 415 });
     await expect(readWorkspaceFile(root, 'large')).rejects.toMatchObject({ status: 413 });
     await expect(readWorkspaceFile(root, 'src')).rejects.toMatchObject({ status: 400 });
+  });
+});
+
+describe('raw workspace file descriptors', () => {
+  it('whitelists displayable types and falls back to download-only octet-stream', async () => {
+    const root = await workspace();
+    await writeFile(join(root, 'cover.PNG'), Buffer.from([1, 2, 3]));
+    await writeFile(join(root, 'manual.pdf'), Buffer.from([1, 2, 3]));
+    await writeFile(join(root, 'clip.mp4'), Buffer.from([1, 2, 3]));
+    await writeFile(join(root, 'page.html'), '<h1>hi</h1>');
+    await writeFile(join(root, 'notes.md'), '# hi\n');
+    const png = await statWorkspaceRawFile(root, 'cover.PNG');
+    expect([png.contentType, png.inline, png.size]).toEqual(['image/png', true, 3]);
+    expect((await statWorkspaceRawFile(root, 'manual.pdf')).contentType).toBe('application/pdf');
+    expect((await statWorkspaceRawFile(root, 'clip.mp4')).contentType).toBe('video/mp4');
+    // HTML must never be served inline: the byte route would become an XSS origin.
+    expect(await statWorkspaceRawFile(root, 'page.html')).toMatchObject({
+      contentType: 'application/octet-stream', inline: false,
+    });
+    expect((await statWorkspaceRawFile(root, 'notes.md')).inline).toBe(false);
+  });
+
+  it('keeps the same path fence as the text reader', async () => {
+    const root = await workspace();
+    const outside = await mkdtemp(join(tmpdir(), 'omniagent-outside-'));
+    await writeFile(join(outside, 'secret.png'), 'secret');
+    await symlink(join(outside, 'secret.png'), join(root, 'escape.png'));
+    await expect(statWorkspaceRawFile(root, 'missing.png')).rejects.toMatchObject({ status: 404 });
+    await expect(statWorkspaceRawFile(root, 'src')).rejects.toMatchObject({ status: 400 });
+    await expect(statWorkspaceRawFile(root, 'escape.png')).rejects.toMatchObject({ status: 403 });
+    await expect(statWorkspaceRawFile(root, '../secret.png')).rejects.toMatchObject({ status: 400 });
+  });
+
+  it('refuses files past the raw ceiling', async () => {
+    const root = await workspace();
+    await writeFile(join(root, 'huge.mp4'), '');
+    await truncate(join(root, 'huge.mp4'), MAX_RAW_FILE_BYTES + 1);
+    await expect(statWorkspaceRawFile(root, 'huge.mp4')).rejects.toMatchObject({ status: 413 });
   });
 });

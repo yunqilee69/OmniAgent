@@ -1105,6 +1105,13 @@
   font-size: 13px;
 }
 
+.formHint {
+  margin: 0;
+  color: var(--dsw-alias-label-tertiary);
+  font-size: 12px;
+  line-height: 18px;
+}
+
 .formError {
   margin: 0;
   color: var(--dsw-alias-state-error-primary);

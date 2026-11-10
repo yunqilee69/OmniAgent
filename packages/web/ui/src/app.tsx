@@ -14,6 +14,7 @@ import { NewSessionDialog } from './components/NewSessionDialog.tsx';
 import { RightPanel, type RightView } from './components/RightPanel.tsx';
 import type { PlanDocument } from './components/PlanReview.tsx';
 import { WorkspaceFileTree } from './components/WorkspaceFileTree.tsx';
+import type { FileMenuChange } from './components/FileTreeMenu.tsx';
 import type { FileSelection } from './components/WorkspaceFilePreview.tsx';
 import css from './styles/app.module.css';
 import heroCss from './styles/dsh/hero-shell.module.css';
@@ -75,6 +76,8 @@ export function App(): ReactNode {
   const [rightView, setRightView] = useState<RightView>('guide');
   const [browseWorkspaceId, setBrowseWorkspaceId] = useState<string | null>(null);
   const [preview, setPreview] = useState<FileSelection | null>(null);
+  /** Bumped after a file operation so open folder listings and the file page refetch. */
+  const [fileRefreshToken, setFileRefreshToken] = useState(0);
   const [planDoc, setPlanDoc] = useState<string | null>(null);
   const booted = useRef(false);
 
@@ -119,6 +122,43 @@ export function App(): ReactNode {
   }, [mobile, sidebarOpen]);
 
   const browseWorkspace = app.workspaces.find((workspace) => workspace.id === browseWorkspaceId);
+  const activeWorkspace = app.workspaces.find((workspace) => workspace.id === app.workspaceId);
+  const activeWorkspaceName = activeWorkspace?.name || activeWorkspace?.path || '';
+
+  /** Follow a previewed file through a rename or move, and close it when it is deleted. */
+  const followFileChange = (change: FileMenuChange): void => {
+    setFileRefreshToken((value) => value + 1);
+    setPreview((current) => {
+      if (current === null) return current;
+      const inside = current.path === change.from || current.path.startsWith(`${change.from}/`);
+      if (!inside) return current;
+      if (change.to === undefined) return null;
+      return { ...current, path: `${change.to}${current.path.slice(change.from.length)}` };
+    });
+  };
+
+  /** Open one file in the preview page; absolute links are mapped onto the workspace root. */
+  const openFile = (path: string, options?: { line?: number }): void => {
+    if (app.workspaceId === null || app.workspaceId === undefined || path === '') return;
+    const root = activeWorkspace?.path ?? '';
+    let relative = path;
+    if (root !== '' && (path === root || path.startsWith(`${root}/`))) {
+      relative = path === root ? '' : path.slice(root.length + 1);
+    } else if (path.startsWith('/')) {
+      // An absolute path outside this workspace is not previewable from here.
+      return;
+    }
+    if (relative === '') return;
+    setPreview({
+      workspaceId: app.workspaceId,
+      workspaceName: activeWorkspaceName,
+      path: relative,
+      ...(options?.line === undefined ? {} : { line: options.line }),
+    });
+    setRightView('preview');
+    setRightOpen(true);
+    store.setTab('conversation');
+  };
   const run = entry?.run;
   const planReview = run?.planReview;
   useEffect(() => {
@@ -187,8 +227,11 @@ export function App(): ReactNode {
           <WorkspaceFileTree
             key={browseWorkspace.id}
             workspaceId={browseWorkspace.id}
+            workspacePath={browseWorkspace.path}
             name={browseWorkspace.name || browseWorkspace.path}
             selected={preview?.workspaceId === browseWorkspace.id ? preview.path : null}
+            refreshToken={fileRefreshToken}
+            onChanged={followFileChange}
             onBack={() => { setBrowseWorkspaceId(null); }}
             onSelect={(path) => {
               setPreview({ workspaceId: browseWorkspace.id, workspaceName: browseWorkspace.name || browseWorkspace.path, path });
@@ -273,7 +316,12 @@ export function App(): ReactNode {
               </SessionPlaceholder>
             ) : (
               <div className={css.chatArea}>
-                <ConversationView entry={entry} processDisplay={app.processDisplay} onOpenPlan={openPlanPreview} />
+                <ConversationView
+                  entry={entry}
+                  processDisplay={app.processDisplay}
+                  onOpenPlan={openPlanPreview}
+                  onOpenFile={openFile}
+                />
                 {run?.approval !== undefined && run.stopping !== true && run.finishing !== true && (
                   <ApprovalView
                     approval={run.approval}
@@ -312,6 +360,9 @@ export function App(): ReactNode {
             onViewChange={setRightView}
             onClose={() => { setRightOpen(false); setRightFullscreen(false); }}
             onToggleFullscreen={() => { setRightFullscreen((value) => !value); }}
+            onOpenFile={(path) => { openFile(path); }}
+            refreshToken={fileRefreshToken}
+            onFilesChanged={followFileChange}
           />
         </div>
       )}
