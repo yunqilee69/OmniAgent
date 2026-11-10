@@ -7,11 +7,12 @@ import { Header } from './components/Header.tsx';
 import { Sidebar } from './components/Sidebar.tsx';
 import { ConversationView } from './components/ConversationView.tsx';
 import { Composer } from './components/Composer.tsx';
-import { ApprovalView, PlanReviewDialog } from './components/ApprovalView.tsx';
+import { ApprovalView } from './components/ApprovalView.tsx';
 import { AutomationPage } from './components/AutomationPage.tsx';
 import { SettingsPage } from './components/SettingsPage.tsx';
 import { NewSessionDialog } from './components/NewSessionDialog.tsx';
 import { RightPanel, type RightView } from './components/RightPanel.tsx';
+import type { PlanDocument } from './components/PlanReview.tsx';
 import { WorkspaceFileTree } from './components/WorkspaceFileTree.tsx';
 import type { FileSelection } from './components/WorkspaceFilePreview.tsx';
 import css from './styles/app.module.css';
@@ -74,6 +75,7 @@ export function App(): ReactNode {
   const [rightView, setRightView] = useState<RightView>('guide');
   const [browseWorkspaceId, setBrowseWorkspaceId] = useState<string | null>(null);
   const [preview, setPreview] = useState<FileSelection | null>(null);
+  const [planDoc, setPlanDoc] = useState<string | null>(null);
   const booted = useRef(false);
 
   useEffect(() => {
@@ -88,7 +90,8 @@ export function App(): ReactNode {
 
   useEffect(() => {
     setPreview(null);
-    setRightView((view) => view === 'preview' ? 'guide' : view);
+    setPlanDoc(null);
+    setRightView((view) => view === 'preview' || view === 'plan' ? 'guide' : view);
   }, [app.workspaceId, app.sessionId]);
 
   useEffect(() => {
@@ -117,6 +120,23 @@ export function App(): ReactNode {
 
   const browseWorkspace = app.workspaces.find((workspace) => workspace.id === browseWorkspaceId);
   const run = entry?.run;
+  const planReview = run?.planReview;
+  useEffect(() => {
+    if (planReview !== undefined) setPlanDoc(planReview.plan);
+  }, [planReview]);
+  const openPlanPreview = (): void => {
+    setRightView('plan');
+    setRightOpen(true);
+  };
+  // Keep the last reviewed plan readable after the review settles: the live
+  // request supplies status, the snapshot supplies the document.
+  const planDocument: PlanDocument | null = planReview === undefined && planDoc === null ? null : {
+    plan: planReview?.plan ?? planDoc ?? '',
+    ...(planReview === undefined ? {} : {
+      pending: planReview.pending === true,
+      ...(planReview.error !== undefined && planReview.error !== '' ? { error: planReview.error } : {}),
+    }),
+  };
   const drawer = mobile && sidebarOpen;
   const hasSession = app.sessionId !== null;
   const draft = entry?.draft === true;
@@ -253,7 +273,7 @@ export function App(): ReactNode {
               </SessionPlaceholder>
             ) : (
               <div className={css.chatArea}>
-                <ConversationView entry={entry} processDisplay={app.processDisplay} />
+                <ConversationView entry={entry} processDisplay={app.processDisplay} onOpenPlan={openPlanPreview} />
                 {run?.approval !== undefined && run.stopping !== true && run.finishing !== true && (
                   <ApprovalView
                     approval={run.approval}
@@ -262,7 +282,7 @@ export function App(): ReactNode {
                   />
                 )}
                 <div className={css.composerArea}>
-                  <Composer />
+                  <Composer onOpenPlanPreview={openPlanPreview} />
                 </div>
               </div>
             )}
@@ -288,6 +308,7 @@ export function App(): ReactNode {
             fullscreen={rightFullscreen}
             view={rightView}
             preview={preview}
+            plan={planDocument}
             onViewChange={setRightView}
             onClose={() => { setRightOpen(false); setRightFullscreen(false); }}
             onToggleFullscreen={() => { setRightFullscreen((value) => !value); }}
@@ -295,11 +316,6 @@ export function App(): ReactNode {
         </div>
       )}
 
-      <PlanReviewDialog
-        review={run?.planReview}
-        stopping={run?.stopping === true || run?.finishing === true}
-        onResolve={(approved, feedback) => { void store.resolvePlanReview(approved, feedback); }}
-      />
       <NewSessionDialog />
     </div>
   );

@@ -73,6 +73,7 @@ import { concreteModelBinding, ModelPicker } from './ModelPicker.tsx';
 import { ContextMeter } from './ContextMeter.tsx';
 import { SessionStats } from './SessionStats.tsx';
 import { permissionIcon } from './permission-icon.tsx';
+import { PlanReviewComposer } from './PlanReview.tsx';
 import css from '../styles/dsh/input-bar.module.css';
 import menuCss from '../styles/dsh/composer-menu.module.css';
 import attachmentCss from '../styles/dsh/composer-attachments.module.css';
@@ -181,7 +182,7 @@ export function TodoDock({ entry, t }: { entry: Pick<SessionEntry, 'todos' | 'ru
   );
 }
 
-export function Composer({ hero = false }: { hero?: boolean }): ReactNode {
+export function Composer({ hero = false, onOpenPlanPreview }: { hero?: boolean; onOpenPlanPreview?: () => void }): ReactNode {
   const app = useApp();
   const entry = useSessionEntry();
   const t = useMemo(() => translator(app.locale), [app.locale]);
@@ -772,6 +773,20 @@ export function Composer({ hero = false }: { hero?: boolean }): ReactNode {
       : mode === 'permission' ? t('Choose permission') : mode === 'agent' ? t('Choose agent')
         : mode === 'model' ? t('Choose model') : mode === 'export' ? t('Export session')
           : mode === 'plus' ? t('Add files or run commands') : t('Command menu');
+
+  // A waiting plan review replaces the draft controls but keeps this component
+  // mounted, so a draft typed before the review survives the detour.
+  if (run?.planReview !== undefined) {
+    return (
+      <div className={clsx(css.root, hero && css.hero)}>
+        <PlanReviewComposer
+          review={run.planReview}
+          stopping={run.stopping === true || run.finishing === true}
+          onOpenPreview={onOpenPlanPreview ?? (() => {})}
+        />
+      </div>
+    );
+  }
 
   return (
     <div className={clsx(css.root, hero && css.hero)}>

@@ -444,17 +444,19 @@ AuthGate
    │   │   └─ SettingsAgents
    │   ├─ ConversationView
    │   │   ├─ TurnView → ToolView / ReasoningView / MarkdownText / CompactionView / NoticeView
+   │   │   ├─ PlanReviewCard（等待审阅时作为 AI 回复卡片，点击在右栏打开计划）
    │   │   ├─ ApprovalView
-   │   │   └─ Composer
+   │   │   └─ Composer → PlanReviewComposer（等待计划审阅时替换输入区）
    │   │       ├─ ContextMeter（5 秒轮询 .../context）
    │   │       └─ SessionStats（runs / steps / tok/s / usage / cache）
    │   └─ TrajectoryView
-   ├─ RightPanel（guide / files / preview / terminal）
-   ├─ PlanReviewDialog
+   ├─ RightPanel（guide / plan / files / preview / terminal）
    └─ NewSessionDialog
 ```
 
 认证启用时 `AuthGate` 先检查 `/api/auth/status`；登录成功后才渲染 `App`。`authFetch()` 统一携带 cookie，遇到 401 会把状态切回登录界面并清空当前 store。工作区行菜单的「查看文件列表」把左栏切成 `WorkspaceFileTree`，选中文件后在右栏 `WorkspaceFilePreview` 预览。
+
+等待计划审阅时不再弹出遮挡式对话框：会话末尾显示计划卡片，点击卡片或输入区里的「查看计划」把完整计划以 Markdown 形式放到右栏 `plan` 视图；输入区同时切换为计划审阅模式，可直接批准，或输入反馈后继续规划。右栏保留最后一次审阅的计划，审阅结束后仍可查看。
 
 响应式：
 

@@ -12,6 +12,7 @@ import {
   IconLightOutlineRegular,
   IconPaperclipOutlineRegular,
   IconPanelLeftOutlineRegular,
+  IconPlanOutlineRegular,
   IconSearchOutlineRegular,
   IconSettingsOutlineRegular,
   Menu,
@@ -25,9 +26,10 @@ import { translator, type Translate } from '../lib/i18n.ts';
 import { workspaceApiPath, type WorkspaceFileEntry } from '../lib/wire.ts';
 import { TrajectoryView } from './TrajectoryView.tsx';
 import { WorkspaceFilePreview, type FileSelection } from './WorkspaceFilePreview.tsx';
+import { PlanPreview, type PlanDocument } from './PlanReview.tsx';
 import css from '../styles/dsh/right-panel.module.css';
 
-export type RightView = 'guide' | 'files' | 'terminal' | 'observe' | 'preview';
+export type RightView = 'guide' | 'files' | 'terminal' | 'observe' | 'preview' | 'plan';
 
 function CompassGlyph({ size = 16, className }: { size?: number; className?: string }): ReactNode {
   return (
@@ -52,6 +54,7 @@ function MoreToolsGlyph(): ReactNode {
 
 function viewTitle(view: RightView, t: Translate): string {
   if (view === 'preview') return t('File preview');
+  if (view === 'plan') return t('Plan preview');
   if (view === 'files') return t('Workspace files');
   if (view === 'terminal') return t('Terminal');
   if (view === 'observe') return t('Observe');
@@ -79,8 +82,9 @@ function EntryCard({ icon, title, description, onClick }: EntryCardProps): React
   );
 }
 
-export function RightPanel({ fullscreen, view, onViewChange: setView, onClose, onToggleFullscreen, preview }: {
+export function RightPanel({ fullscreen, view, onViewChange: setView, onClose, onToggleFullscreen, preview, plan }: {
   preview?: FileSelection | null;
+  plan?: PlanDocument | null;
   fullscreen: boolean;
   view: RightView;
   onViewChange: (view: RightView) => void;
@@ -166,7 +170,9 @@ export function RightPanel({ fullscreen, view, onViewChange: setView, onClose, o
       <div className={css.tabStrip}>
         <div className={css.stripTabs}>
           <button type="button" className={css.tab} onClick={() => { setView('guide'); }}>
-            <CompassGlyph size={14} className={css.tabIcon} />
+            {view === 'plan'
+              ? <IconPlanOutlineRegular size={14} className={css.tabIcon} />
+              : <CompassGlyph size={14} className={css.tabIcon} />}
             <span className={css.tabLabel}>{viewTitle(view, t)}</span>
           </button>
         </div>
@@ -192,6 +198,14 @@ export function RightPanel({ fullscreen, view, onViewChange: setView, onClose, o
       {view === 'guide' && (
         <div className={css.guide}>
           <span className={css.guideHero} aria-hidden="true"><CompassGlyph size={56} /></span>
+          {plan !== null && plan !== undefined && (
+            <EntryCard
+              icon={<IconPlanOutlineRegular size={26} />}
+              title={t('Plan review')}
+              description={t('Open the last submitted plan.')}
+              onClick={() => { setView('plan'); }}
+            />
+          )}
           <EntryCard
             icon={<IconClockOutlineRegular size={26} />}
             title={t('Observe')}
@@ -243,6 +257,7 @@ export function RightPanel({ fullscreen, view, onViewChange: setView, onClose, o
       )}
 
       {view === 'preview' && preview && <WorkspaceFilePreview file={preview} />}
+      {view === 'plan' && <PlanPreview plan={plan ?? null} />}
       {view === 'observe' && <TrajectoryView />}
 
       {view === 'files' && (

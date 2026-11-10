@@ -21,6 +21,7 @@ import type { SessionEntry } from '../lib/store.ts';
 import { markdownLabels } from '../lib/labels.ts';
 import { translator, type Locale, type Translate } from '../lib/i18n.ts';
 import { ToolView } from './ToolView.tsx';
+import { PlanReviewCard } from './PlanReview.tsx';
 import css from '../styles/app.module.css';
 import chatCss from '../styles/dsh/chat-view.module.css';
 import messageCss from '../styles/dsh/message-item.module.css';
@@ -244,9 +245,10 @@ function TurnView({ turn, processDisplay, locale, t }: { turn: DisplayTurn; proc
   );
 }
 
-export function ConversationView({ entry, processDisplay }: {
+export function ConversationView({ entry, processDisplay, onOpenPlan }: {
   entry: SessionEntry;
   processDisplay: 'collapsed' | 'expanded';
+  onOpenPlan?: () => void;
 }): ReactNode {
   const app = useApp();
   const t = translator(app.locale);
@@ -297,7 +299,10 @@ export function ConversationView({ entry, processDisplay }: {
           {turns.map((turn) => (
             <TurnView key={turn.index} turn={turn} processDisplay={processDisplay} locale={app.locale} t={t} />
           ))}
-          {entry.run !== undefined && (
+          {live?.planReview !== undefined && (
+            <PlanReviewCard review={live.planReview} onOpen={() => { onOpenPlan?.(); }} />
+          )}
+          {entry.run !== undefined && entry.run.planReview === undefined && (
             <div className={chatCss.running} data-holding={entry.run.finishing ? '' : undefined}>
               <span className={chatCss.runningDivider} aria-hidden />
               <div className={chatCss.runningContent} role="status">
@@ -308,9 +313,8 @@ export function ConversationView({ entry, processDisplay }: {
                   <TextShimmer>
                     {entry.run.stopping === true ? t('Stopping…')
                       : entry.run.finishing === true ? t('Saving session…')
-                        : entry.run.planReview !== undefined ? t('Waiting for plan review')
-                          : entry.run.approval !== undefined ? t('Waiting for approval')
-                            : t('Agent is working')}
+                        : entry.run.approval !== undefined ? t('Waiting for approval')
+                          : t('Agent is working')}
                   </TextShimmer>
                 </span>
               </div>
