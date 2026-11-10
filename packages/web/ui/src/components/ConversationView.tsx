@@ -3,15 +3,19 @@ import clsx from 'clsx';
 import {
   DisclosureRow,
   IconChevronDownOutlineRegular,
+  IconCheckOutlineRegular,
   IconContextInjectionOutlineRegular,
+  IconCopyOutlineRegular,
   IconLoadingOutlineRegular,
   IconThinkOutlineRegular,
   MarkdownText,
   StateDot,
   TextShimmer,
+  Tooltip,
   UserMessageBubble,
+  useClipboardCopy,
 } from '../../vendor/primitives/index.ts';
-import { groupTurns, type DisplayTurn, type TranscriptItem, type UserItem } from '../lib/events.ts';
+import { groupTurns, userMessageCopyText, type DisplayTurn, type TranscriptItem, type UserItem } from '../lib/events.ts';
 import { useApp } from '../lib/store.ts';
 import type { SessionEntry } from '../lib/store.ts';
 import { markdownLabels } from '../lib/labels.ts';
@@ -42,6 +46,24 @@ function durationText(t: Translate, turn: DisplayTurn, locale: Locale): string {
     ? `${minutes > 0 ? `${minutes} 分 ` : ''}${rest} 秒`
     : `${minutes > 0 ? `${minutes}m ` : ''}${rest}s`;
   return t('Worked for {duration}', { duration: duration });
+}
+
+export function MessageActions({ text, timestamp, t }: { text: string; timestamp?: number; t: Translate }): ReactNode {
+  const { copied, failed, onCopy } = useClipboardCopy(text);
+  const date = timestamp === undefined ? null : new Date(timestamp);
+  const validDate = date !== null && Number.isFinite(date.getTime()) ? date : null;
+  const label = copied ? t('Copied') : failed ? t('Could not copy message') : t('Copy message');
+  return (
+    <div className={messageCss.actions}>
+      {validDate !== null && <time dateTime={validDate.toISOString()}>{validDate.toLocaleString()}</time>}
+      {text !== '' && <Tooltip label={label} side="top" delayMs={400}>
+        <button type="button" className={messageCss.action} aria-label={label} onClick={onCopy}>
+          {copied ? <IconCheckOutlineRegular /> : <IconCopyOutlineRegular />}
+        </button>
+      </Tooltip>}
+      {failed && <span role="status">{t('Could not copy message')}</span>}
+    </div>
+  );
 }
 
 function UserContent({ user }: { user: UserItem }): ReactNode {
@@ -136,10 +158,11 @@ function ProcessItem({ item, live, t }: { item: TranscriptItem; live: boolean; t
       return <ReasoningView text={item.text} running={live && item.streaming} t={t} />;
     case 'assistant':
       return (
-        <div className={assistantCss.root}>
+        <div className={clsx(assistantCss.root, messageCss.message)}>
           <div className={assistantCss.body}>
             <MarkdownText text={item.text} labels={markdownLabels(t)} />
           </div>
+          <MessageActions text={item.text} timestamp={item.timestamp} t={t} />
         </div>
       );
     case 'compaction':
@@ -172,9 +195,10 @@ function TurnView({ turn, processDisplay, locale, t }: { turn: DisplayTurn; proc
   return (
     <div className={css.turn} data-live={turn.live || undefined}>
       {turn.user !== undefined && (
-        <div className={messageCss.userRow}>
+        <div className={clsx(messageCss.userRow, messageCss.message)}>
           <div className={messageCss.userStack}>
             <UserContent user={turn.user} />
+            <MessageActions text={userMessageCopyText(turn.user.text, turn.user.attachments)} timestamp={turn.user.timestamp} t={t} />
           </div>
         </div>
       )}
@@ -203,7 +227,7 @@ function TurnView({ turn, processDisplay, locale, t }: { turn: DisplayTurn; proc
         </div>
       )}
       {turn.final !== undefined && (
-        <div className={clsx(assistantCss.root, css.response)}>
+        <div className={clsx(assistantCss.root, css.response, messageCss.message)}>
           <div className={assistantCss.body}>
             <MarkdownText
               text={turn.final.text}
@@ -213,6 +237,7 @@ function TurnView({ turn, processDisplay, locale, t }: { turn: DisplayTurn; proc
             />
             {turn.reason === 'interrupted' && !turn.live && <span className={assistantCss.stopped}>{t('Stopped')}</span>}
           </div>
+          <MessageActions text={turn.final.text} timestamp={turn.final.timestamp} t={t} />
         </div>
       )}
       {turn.extras.map((item) => item.kind === 'notice' ? <NoticeView key={item.id} item={item} t={t} /> : null)}

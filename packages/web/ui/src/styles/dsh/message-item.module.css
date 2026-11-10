@@ -1,5 +1,40 @@
 /* User messages align their bubble and action row to the right. */
 
+.actions {
+  display: flex;
+  align-items: center;
+  gap: 4px;
+  min-height: 28px;
+  color: var(--dsw-alias-label-tertiary);
+  font-size: var(--dsh-content-font-size-secondary, 13px);
+  opacity: 0;
+}
+
+.message:hover .actions,
+.message:focus-within .actions {
+  opacity: 1;
+}
+
+@media (hover: none) {
+  .actions { opacity: 1; }
+}
+
+.action {
+  display: inline-grid;
+  place-items: center;
+  width: 28px;
+  height: 28px;
+  border: 0;
+  border-radius: var(--dsw-radius-sm);
+  background: transparent;
+  color: inherit;
+  cursor: pointer;
+}
+
+.action:hover { background: var(--dsw-alias-interactive-bg-hover); }
+.action:focus-visible { outline: 1.5px solid var(--dsw-focus-ring-color, var(--dsw-alias-state-business-primary)); }
+.action svg { width: 16px; height: 16px; }
+
 .userRow {
   display: flex;
   flex-direction: column;

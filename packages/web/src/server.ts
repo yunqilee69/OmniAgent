@@ -68,7 +68,7 @@ import {
   projectDshPermissions, resolveDshDefaultPreset, snapshotDshPermissions,
 } from '../../core/src/permissions/dsh-permissions';
 import type { DshPermissionProjection, DshPermissionSnapshot } from '../../core/src/permissions/dsh-permissions';
-import { safePublicMessages } from '../../core/src/session/projection';
+import { projectPublicHistory, safePublicMessages } from '../../core/src/session/projection';
 import { projectTodos } from '../../core/src/session/todo';
 import { createPlanModeEvent, projectPlanMode } from '../../core/src/session/plan';
 import type { ApprovalBroker, ApprovalTurn } from './approval';
@@ -956,7 +956,7 @@ async function route(
       blank: !hasHumanMessage(handle.events),
       mode: mode.status === 'selected' ? mode.selection : null,
       running: running.has(key),
-      messages: safePublicMessages(projectMessages(handle.events)),
+      messages: projectPublicHistory(handle.header, handle.events),
       permission: { preset: permissionProjection(handle, key, failedPermissions).preset },
       ...selection,
       plan: projectPlanMode(handle.events),
@@ -1061,7 +1061,9 @@ async function route(
   }
   if (request.method === 'GET' && parts.length === 6 && parts[5] === 'messages') {
     const handle = await openSession(options.store, workspace, sessionId);
-    return json(response, 200, { messages: safePublicMessages(projectMessages(handle.events)) });
+    return json(response, 200, {
+      messages: projectPublicHistory(handle.header, handle.events),
+    });
   }
   if (request.method === 'POST' && parts.length === 6 && parts[5] === 'permission') {
     const body = await readJson(request);

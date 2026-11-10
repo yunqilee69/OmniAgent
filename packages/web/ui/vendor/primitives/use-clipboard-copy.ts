@@ -6,6 +6,8 @@ import { writeClipboard } from './clipboard.ts'
 export interface ClipboardCopyState {
   /** True for one second after an accepted clipboard write. */
   readonly copied: boolean
+  /** True briefly when the host rejected the clipboard write. */
+  readonly failed: boolean
   /** Write the current text unless a write or success indication is already active. */
   readonly onCopy: () => void
 }
@@ -17,6 +19,7 @@ export interface ClipboardCopyState {
  */
 export function useClipboardCopy(text: string): ClipboardCopyState {
   const [copied, setCopied] = useState(false)
+  const [failed, setFailed] = useState(false)
   const copyPending = useRef(false)
   const copyTimer = useRef<number | null>(null)
   const copyEpoch = useRef(0)
@@ -28,17 +31,21 @@ export function useClipboardCopy(text: string): ClipboardCopyState {
   const onCopy = useCallback(() => {
     if (copied || copyPending.current) return
     const epoch = copyEpoch.current
+    if (copyTimer.current !== null) clearTimeout(copyTimer.current)
+    copyTimer.current = null
+    setFailed(false)
     copyPending.current = true
     void writeClipboard(text).then((ok) => {
       if (epoch !== copyEpoch.current) return
       copyPending.current = false
-      if (!ok) return
-      setCopied(true)
+      if (ok) setCopied(true)
+      else setFailed(true)
       copyTimer.current = window.setTimeout(() => {
         copyTimer.current = null
         setCopied(false)
-      }, 1000)
+        setFailed(false)
+      }, ok ? 1000 : 3000)
     })
   }, [copied, text])
-  return { copied, onCopy }
+  return { copied, failed, onCopy }
 }

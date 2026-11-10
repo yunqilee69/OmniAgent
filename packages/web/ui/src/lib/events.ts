@@ -16,11 +16,24 @@ export interface UserAttachment {
   text?: string;
 }
 
+/** Match the model-facing text persisted by the server for a live message. */
+export function userMessageCopyText(text: string, attachments: readonly UserAttachment[] = []): string {
+  if (attachments.length === 0) return text;
+  const parts = text.trim() === '' ? [] : [text];
+  for (const attachment of attachments) {
+    if (attachment.kind === 'text') {
+      parts.push(`[Attached file: ${attachment.name} (${attachment.mediaType})]\n${attachment.text ?? ''}\n[End of attached file: ${attachment.name}]`);
+    }
+  }
+  return parts.join('');
+}
+
 export interface UserItem {
   kind: 'user';
   id: string;
   turn: number;
   text: string;
+  timestamp?: number;
   attachments?: UserAttachment[];
 }
 
@@ -29,6 +42,7 @@ export interface AssistantItem {
   id: string;
   turn: number;
   text: string;
+  timestamp?: number;
   streaming: boolean;
 }
 
@@ -225,6 +239,7 @@ export function applyAgentEvent(turn: LiveTurnState, event: AgentEvent | Record<
           id: itemId('assistant'),
           turn: meta.index,
           text,
+          timestamp: now,
           streaming: true,
         });
         turn.streamAssistantId = item.id;
@@ -251,6 +266,7 @@ export function applyAgentEvent(turn: LiveTurnState, event: AgentEvent | Record<
           id: itemId('assistant'),
           turn: meta.index,
           text,
+          timestamp: now,
           streaming: false,
         });
       }
@@ -414,6 +430,7 @@ export function hydrateTranscript(messages: readonly PublicMessage[], events: re
       if (text !== '' || attachments.length > 0) {
         transcript.push({
           kind: 'user', id: itemId('user'), turn: index, text,
+          ...(typeof message.timestamp === 'number' && Number.isFinite(message.timestamp) ? { timestamp: message.timestamp } : {}),
           ...(attachments.length === 0 ? {} : { attachments }),
         });
       }
@@ -423,7 +440,7 @@ export function hydrateTranscript(messages: readonly PublicMessage[], events: re
       if (!started) startTurn();
       const text = message.content === undefined ? '' : messageText(message);
       if (text !== '') {
-        transcript.push({ kind: 'assistant', id: itemId('assistant'), turn: turnIndex, text, streaming: false });
+        transcript.push({ kind: 'assistant', id: itemId('assistant'), turn: turnIndex, text, streaming: false, ...(typeof message.timestamp === 'number' && Number.isFinite(message.timestamp) ? { timestamp: message.timestamp } : {}) });
       }
       for (const call of message.toolCalls ?? []) {
         if (findToolIn(transcript, call.id) === undefined) {

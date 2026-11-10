@@ -98,6 +98,16 @@ function sessionsUrl(base: string, workspaceId: string): string {
 }
 
 describe('workspace web host', () => {
+  it('exposes persisted history metadata in both read endpoints', async () => {
+    const { base, first, store } = await setup();
+    const handle = await store.create({ id: 'history-metadata', workspace: first.path, cwd: first.path });
+    await handle.append({ type: 'message/user', ts: 1234, data: { text: 'original' } });
+    const url = `${sessionsUrl(base, first.id)}/history-metadata`;
+    const detail = await jsonResponse<{ messages: Array<{ messageId: string; timestamp: number }> }>(await fetch(url));
+    const list = await jsonResponse<typeof detail>(await fetch(`${url}/messages`));
+    expect(list).toEqual({ messages: detail.messages });
+    expect(detail.messages[0]).toMatchObject({ timestamp: 1234, messageId: expect.stringMatching(/^[a-f0-9]{64}$/) });
+  });
   it('reports replay and live message estimates without claiming a window', async () => {
     const { base, first, store } = await setup();
     const handle = await store.create({ id: 'context', workspace: first.path, cwd: first.path });

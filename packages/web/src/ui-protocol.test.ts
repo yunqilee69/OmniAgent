@@ -1,9 +1,14 @@
 import { describe, expect, it } from 'vitest';
+import { createElement } from 'react';
+import { renderToStaticMarkup } from 'react-dom/server';
+import { MessageActions } from '../ui/src/components/ConversationView.tsx';
+import { translator } from '../ui/src/lib/i18n.ts';
 import {
   applyAgentEvent,
   createLiveState,
   createSSEParser,
   hydrateTranscript,
+  userMessageCopyText,
 } from '../ui/src/lib/events.ts';
 import {
   eventMetadata,
@@ -13,6 +18,20 @@ import {
 import { sessionKey } from '../ui/src/lib/store.ts';
 
 describe('web client protocol', () => {
+  it('copies the same text before and after a text attachment is reloaded', () => {
+    const attachment = { kind: 'text' as const, name: 'note.txt', mediaType: 'text/plain', text: 'content' };
+    const persisted = userMessageCopyText('hello', [attachment]);
+    const { transcript } = hydrateTranscript([{ role: 'user', content: [
+      { type: 'text', text: 'hello' },
+      { type: 'text', text: '[Attached file: note.txt (text/plain)]\ncontent\n[End of attached file: note.txt]' },
+    ] }]);
+    const user = transcript[0];
+    expect(user?.kind).toBe('user');
+    if (user?.kind === 'user') expect(userMessageCopyText(user.text, user.attachments)).toBe(persisted);
+    expect(userMessageCopyText('', [attachment])).toContain('content');
+    expect(userMessageCopyText('  ', [{ kind: 'image', name: 'x', mediaType: 'image/png', data: 'a' }])).toBe('');
+  });
+
   it('clears a pending approval when a terminal error arrives', () => {
     const turn = createLiveState();
     turn.approval = { requestId: 'r1', call: { id: 'c1', name: 'bash', arguments: {} }, reason: '', pending: false, error: '' };
@@ -20,6 +39,16 @@ describe('web client protocol', () => {
     expect(turn.approval).toBeUndefined();
     expect(turn.error).toBe('Turn failed');
   });
+  it('renders accessible copy controls and valid message times', () => {
+    const t = translator('en');
+    const markup = renderToStaticMarkup(createElement(MessageActions, { text: 'Hello', timestamp: 1234, t }));
+    expect(markup).toContain('aria-label="Copy message"');
+    expect(markup).toContain('dateTime="1970-01-01T00:00:01.234Z"');
+    const absent = renderToStaticMarkup(createElement(MessageActions, { text: '', timestamp: NaN, t }));
+    expect(absent).not.toContain('<time');
+    expect(absent).not.toContain('<button');
+  });
+
 
   it('keeps live turn indices aligned with loaded history', () => {
     const turn = createLiveState();
@@ -84,6 +113,20 @@ describe('web client protocol', () => {
     ], []);
     expect(transcript.map((item) => item.kind)).toEqual(['user', 'assistant', 'tool', 'assistant']);
     expect(transcript[2]).toMatchObject({ call: { id: 'c1' }, result: { content: 'contents', ok: true } });
+  });
+
+  it('hydrates authoritative timestamps without inventing missing times', () => {
+    const { transcript } = hydrateTranscript([
+      { role: 'user', timestamp: 1234, content: [{ type: 'text', text: 'Hi' }] },
+      { role: 'assistant', timestamp: 2345, content: [{ type: 'text', text: 'Hello' }] },
+      { role: 'user', content: [{ type: 'text', text: 'old' }] },
+    ]);
+    expect(transcript[0]).toMatchObject({ timestamp: 1234 });
+    expect(transcript[1]).toMatchObject({ timestamp: 2345 });
+    expect(transcript[2]).not.toHaveProperty('timestamp');
+    const live = createLiveState();
+    applyAgentEvent(live, { type: 'assistant.delta', text: 'x' }, 4567);
+    expect(live.transcript[0]).toMatchObject({ timestamp: 4567 });
   });
 
   it('hydrates stored message events when projected messages are absent', () => {

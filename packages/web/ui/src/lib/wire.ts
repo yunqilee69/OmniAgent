@@ -482,6 +482,7 @@ export interface SendAttachment {
 
 export interface PublicMessage {
   role: 'system' | 'user' | 'assistant' | 'tool';
+  timestamp?: number;
   content?: Array<ContentPart | ImageContentPart>;
   toolCalls?: ToolCall[];
   results?: ToolResult[];

@@ -1618,6 +1618,7 @@ export class AppStore {
           kind: 'user',
           id: `user-${Date.now()}`,
           turn,
+          timestamp: Date.now(),
           text,
           ...(attachments.length === 0 ? {} : { attachments: attachments.map((item) => ({ ...item })) }),
         });
@@ -1685,6 +1686,7 @@ export class AppStore {
         kind: 'user',
         id: `user-${Date.now()}`,
         turn: baseTurn,
+        timestamp: Date.now(),
         text,
         ...(attachments.length === 0 ? {} : { attachments: attachments.map((item) => ({ ...item })) }),
       },

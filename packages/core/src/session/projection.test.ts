@@ -7,9 +7,24 @@ import { FakeModel, textResponse } from '../providers/fake';
 import { Session } from '../session';
 import { SessionStore } from './store';
 import type { SessionEvent } from './types';
-import { projectMessages } from './projection';
+import { projectMessages, projectPublicHistory } from './projection';
 
 describe('projectMessages', () => {
+  it('projects stable session-scoped identities and persisted timestamps without replay data', () => {
+    const events: SessionEvent[] = [
+      { seq: 0, ts: 100, type: 'message/user', data: { text: 'hello' } },
+      { seq: 1, ts: 110, type: 'message/assistant', data: { role: 'assistant', content: [], toolCalls: [], providerReplay: { secret: true } } },
+      { seq: 2, ts: 120, type: 'tool/result', data: { callId: 'a', name: 'tool', ok: true, content: 'one' } },
+      { seq: 3, ts: 130, type: 'tool/result', data: { callId: 'b', name: 'tool', ok: true, content: 'two' } },
+      { seq: 4, ts: 140, type: 'message/notice', data: { text: 'notice' } },
+    ];
+    const history = projectPublicHistory('session-a', events);
+    expect(history.map((message) => message.timestamp)).toEqual([100, 110, 120, 140]);
+    expect(history[2]).toMatchObject({ role: 'tool', results: [{ callId: 'a' }, { callId: 'b' }] });
+    expect(JSON.stringify(history)).not.toContain('providerReplay');
+    expect(projectPublicHistory('session-a', events)[0]?.messageId).toBe(history[0]?.messageId);
+    expect(projectPublicHistory('session-b', events)[0]?.messageId).not.toBe(history[0]?.messageId);
+  });
   it('restores stored user content arrays for current and legacy event names', () => {
     const events: SessionEvent[] = [
       {

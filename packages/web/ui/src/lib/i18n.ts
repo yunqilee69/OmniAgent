@@ -13,6 +13,8 @@ export const localeOptions: ReadonlyArray<{ value: Locale; label: string }> = [
 ];
 
 const zh: Record<string, string> = {
+  'Copy message': '复制消息',
+  'Could not copy message': '无法复制消息',
   'Message history estimate: unknown': '消息历史估算：未知',
   'Message history estimate: ~{count} tokens': '消息历史估算：约 {count} tokens',
   'Compaction budget: unknown': '压缩预算：未知',

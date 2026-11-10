@@ -1,8 +1,31 @@
+import { createHash } from 'node:crypto';
 import type { AssistantMessage, ContentPart, Message, ToolResult, UserMessage } from '../domain/message';
 import {
   AssistantMessageSchema, ContentPartSchema, DshReplaySchema, MessageSchema, ProviderReplaySchema, userMessage,
 } from '../domain/message';
 import type { SessionEvent } from './types';
+
+export type PublicHistoryMessage = Message & { messageId: string; timestamp: number };
+
+export function projectPublicHistory(identity: unknown, events: readonly SessionEvent[]): PublicHistoryMessage[] {
+  const result: PublicHistoryMessage[] = [];
+  for (const event of events) {
+    const message = projectMessages([event])[0];
+    if (message === undefined) continue;
+    const safe = safePublicMessages([message])[0]!;
+    const previous = result.at(-1);
+    if (safe.role === 'tool' && previous?.role === 'tool') {
+      previous.results.push(...safe.results);
+      continue;
+    }
+    result.push({
+      ...safe,
+      messageId: createHash('sha256').update(JSON.stringify([identity, event])).digest('hex'),
+      timestamp: event.ts,
+    });
+  }
+  return result;
+}
 
 export function projectMessages(events: readonly SessionEvent[]): Message[] {
   const messages: Message[] = [];
