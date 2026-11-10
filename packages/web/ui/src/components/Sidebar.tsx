@@ -27,12 +27,19 @@ import {
   Tooltip,
   type MenuEntry,
 } from '../../vendor/primitives/index.ts';
+import { DirectoryPicker } from './DirectoryPicker.tsx';
 import { store, sessionKey, useApp } from '../lib/store.ts';
 import { relativeDate } from '../lib/trajectory.ts';
 import { translator } from '../lib/i18n.ts';
+import pickerCss from '../styles/directory-picker.module.css';
 import sidebarCss from '../styles/dsh/sidebar.module.css';
 import browserCss from '../styles/dsh/sidebar-browser.module.css';
 import appCss from '../styles/app.module.css';
+
+function baseName(path: string): string {
+  const parts = path.split(/[\\/]/).filter((part) => part !== '');
+  return parts[parts.length - 1] ?? '';
+}
 
 function WorkspaceDialog({ open, onClose }: { open: boolean; onClose: () => void }): ReactNode {
   const t = translator(useApp().locale);
@@ -41,21 +48,25 @@ function WorkspaceDialog({ open, onClose }: { open: boolean; onClose: () => void
   const [error, setError] = useState('');
   const [saving, setSaving] = useState(false);
   if (!open) return null;
+  const suggested = baseName(path);
   return (
     <Modal
       open
       onClose={onClose}
       title={t('Add workspace')}
+      description={t('Pick a folder on this computer. Its sessions run inside that directory.')}
       closeLabel={t('Close')}
+      className={pickerCss.dialog}
+      contentClassName={pickerCss.scrollContent}
       footer={(
         <>
           <Button variant="outline" onClick={onClose}>{t('Cancel')}</Button>
           <Button
             variant="primary"
-            disabled={saving || path.trim() === ''}
+            disabled={saving || path === ''}
             onClick={() => {
               setSaving(true);
-              void store.addWorkspace(path.trim(), name.trim()).then((ok) => {
+              void store.addWorkspace(path, name.trim()).then((ok) => {
                 setSaving(false);
                 if (ok) {
                   setPath('');
@@ -68,19 +79,24 @@ function WorkspaceDialog({ open, onClose }: { open: boolean; onClose: () => void
               });
             }}
           >
-            {t('Add')}
+            {saving ? t('Adding…') : t('Add this folder')}
           </Button>
         </>
       )}
     >
       <div className={appCss.dialogForm}>
-        <label>
-          <span>{t('Directory path')}</span>
-          <Input value={path} placeholder="/Users/you/project" onChange={(event) => { setPath(event.target.value); setError(''); }} />
-        </label>
+        <div className={appCss.dialogField}>
+          <span>{t('Folder')}</span>
+          <DirectoryPicker onPathChange={(next) => { setPath(next); setError(''); }} disabled={saving} t={t} />
+        </div>
         <label>
           <span>{t('Display name')}</span>
-          <Input value={name} placeholder={t('Optional')} onChange={(event) => { setName(event.target.value); }} />
+          <Input
+            value={name}
+            placeholder={suggested === '' ? t('Optional') : suggested}
+            disabled={saving}
+            onChange={(event) => { setName(event.target.value); }}
+          />
         </label>
         {error !== '' && <p className={appCss.formError}>{error}</p>}
       </div>

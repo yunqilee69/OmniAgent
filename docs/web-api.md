@@ -34,6 +34,14 @@ Web startup creates and registers `~/.omniagent/default-workspace` and also regi
 
 Workspace IDs are opaque. All session endpoints resolve the workspace ID through the registry rather than accepting a filesystem path from the caller.
 
+## Directory picker
+
+The browser cannot read or resolve absolute host paths, so "add workspace" chooses a folder instead of accepting a typed path:
+
+- `GET /api/fs/directories?path=...` returns `{ path, parent, roots, entries, truncated }` for one level. `path` must be absolute (a leading `~` is expanded); omitting it lists the home directory. `path` is the canonical real path and `parent` is `null` at a filesystem root. Each entry is `{ name, path, hidden }` and folders only — symlinks count when they resolve to a folder. At most 1,000 entries are returned and `truncated` reports overflow. `roots` lists the shortcuts that exist on this machine (`home`, `desktop`, `documents`, `downloads`, `root`); the UI translates those ids. A relative path or a file returns `400`, an unreadable or missing folder `404` / `403`.
+
+The route is read-only and reveals directory names only — the same trust boundary as `POST /api/workspaces`, which already accepts any existing absolute directory from the same client.
+
 Workspace file routes:
 
 - `GET /api/workspaces/:workspaceId/files?query=...&limit=...` returns `{ entries }` for the composer `@` menu. Each entry is `{ path, name, kind: "file" | "directory" }`. `query` is at most 1,024 characters; `limit` is clamped to 1–50 (default 20). The scan is bounded to 50,000 entries and skips `.git`, `node_modules`, `dist`, `build`, `out`, `coverage`, `target`, `.next`, `.nuxt`, `.turbo`, `.venv`, `__pycache__`, and similar dependency / build trees. Paths are workspace-relative.

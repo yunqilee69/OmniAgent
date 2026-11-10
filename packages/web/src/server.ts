@@ -82,6 +82,7 @@ import type { ModelSettings } from './model-settings';
 import { InvalidMcpSettings } from './mcp-settings';
 import type { McpSettings } from './mcp-settings';
 import { AttachmentError, parseSendAttachments, storeAttachments } from './attachments';
+import { browseDirectories, DirectoryBrowseError } from './fs-browse';
 import { exportSession } from './session-export';
 import { projectSessionMetrics } from './session-metrics';
 import { projectTraceEvents } from './trace-projection';
@@ -848,6 +849,17 @@ async function route(
       } finally {
         setPermissionDefaultUpdates(getPermissionDefaultUpdates() - 1);
       }
+    }
+  }
+  if (request.method === 'GET' && url.pathname === '/api/fs/directories') {
+    // Backs the workspace directory picker: the browser cannot resolve a
+    // filesystem path on its own, so the host lists folders one level at a time.
+    const path = url.searchParams.get('path');
+    try {
+      return json(response, 200, await browseDirectories(path ?? undefined));
+    } catch (error) {
+      if (error instanceof DirectoryBrowseError) throw new HttpError(error.status, error.message);
+      throw error;
     }
   }
   if (request.method === 'GET' && url.pathname === '/api/workspaces') {

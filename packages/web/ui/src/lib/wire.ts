@@ -368,6 +368,30 @@ export interface WorkspaceFileEntry {
   kind: 'file' | 'directory';
 }
 
+/** One folder listed by the workspace directory picker. */
+export interface DirectoryEntry {
+  name: string;
+  /** Absolute path of the folder. */
+  path: string;
+  hidden: boolean;
+}
+
+/** Shortcut offered next to the picker's path bar; `id` is translated by the UI. */
+export interface DirectoryRoot {
+  id: 'home' | 'desktop' | 'documents' | 'downloads' | 'root';
+  path: string;
+}
+
+/** One directory level returned by `/api/fs/directories`. */
+export interface DirectoryListing {
+  /** Canonical absolute path that was listed. */
+  path: string;
+  parent: string | null;
+  roots: DirectoryRoot[];
+  entries: DirectoryEntry[];
+  truncated: boolean;
+}
+
 /** Browser-side projection of one durable automation task. */
 export type ScheduleStatus = 'active' | 'paused' | 'ended';
 
@@ -1202,6 +1226,18 @@ export function sessionApiPath(workspaceId: string, sessionId?: string, suffix?:
 
 export function workspaceApiPath(workspaceId: string, suffix: string): string {
   return `/api/workspaces/${encodeURIComponent(workspaceId)}/${suffix}`;
+}
+
+/**
+ * List one directory level for the workspace directory picker.
+ * @param path - absolute directory, a leading `~` is expanded; omitted lists the home directory.
+ * @param signal - aborts the request when the picker navigates again.
+ */
+export async function fetchDirectoryListing(path?: string | null, signal?: AbortSignal): Promise<DirectoryListing> {
+  const query = path === undefined || path === null || path.trim() === ''
+    ? ''
+    : `?${new URLSearchParams({ path }).toString()}`;
+  return await api<DirectoryListing>(`/api/fs/directories${query}`, signal === undefined ? undefined : { signal });
 }
 
 export type { AgentEvent, StopReason };

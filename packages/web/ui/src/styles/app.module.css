@@ -1105,6 +1105,15 @@
   font-size: 13px;
 }
 
+/* Same rhythm as a labelled field, but the control is a composite (a picker). */
+.dialogField {
+  display: flex;
+  flex-direction: column;
+  gap: 6px;
+  color: var(--dsw-alias-label-secondary);
+  font-size: 13px;
+}
+
 .formHint {
   margin: 0;
   color: var(--dsw-alias-label-tertiary);
