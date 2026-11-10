@@ -7,6 +7,7 @@
     "node": ">=22.19.0"
   },
   "scripts": {
+    "postinstall": "node scripts/prepare-linux-sandbox.ts",
     "dev": "tsx packages/tui/src/main.ts",
     "web": "pnpm web:build && tsx packages/web/src/main.ts",
     "web:build": "pnpm --filter @omniagent/web build",

@@ -42,6 +42,7 @@ import {
   projectDshPermissions, resolveDshDefaultPreset, snapshotDshPermissions,
 } from '../../core/src/permissions/dsh-permissions';
 import type { DshPermissionProjection, DshPermissionSettings, DshPermissionSnapshot } from '../../core/src/permissions/dsh-permissions';
+import { prepareLinuxSandbox } from '../../../scripts/prepare-linux-sandbox.ts';
 import { createTheme } from './ansi';
 import { GLYPH } from './blocks';
 import { createRoles } from './palette';
@@ -59,7 +60,7 @@ import type { ThinkingMode } from './render';
 import { describeToolCall, describeToolResult } from './tools';
 
 const cwd = process.cwd();
-const rl = createInterface({ input: process.stdin, output: process.stdout });
+let rl: ReturnType<typeof createInterface>;
 const theme = createTheme();
 const roles = createRoles(theme);
 const renderer = new TuiRenderer({ theme });
@@ -215,6 +216,8 @@ function resolvedModelLabel(runtime: ResolvedSessionRuntime): string {
 }
 
 async function main(): Promise<void> {
+  await prepareLinuxSandbox();
+  rl = createInterface({ input: process.stdin, output: process.stdout });
   const configDir = defaultConfigDir();
   const configStore = await ConfigStore.open(join(configDir, 'config.json'));
   const agents = new AgentCatalog(join(configDir, 'agents'));

@@ -18,6 +18,7 @@ import {
   textResponse,
 } from '@omniagent/core';
 import type { DshPermissionSnapshot, ResolvedSessionRuntime, SessionHandle } from '@omniagent/core';
+import { prepareLinuxSandbox } from '../../../scripts/prepare-linux-sandbox.ts';
 import type { AgentSummary, RoleSummary } from './server';
 import { readWorkspaceAudit, recordWorkspaceAudit } from './audit';
 import { ApprovalBroker } from './approval';
@@ -31,6 +32,7 @@ import { parseWebPort, startWebHost } from './server';
 import { WorkspaceRegistry } from './workspaces';
 
 async function main(): Promise<void> {
+  await prepareLinuxSandbox();
   const configDir = defaultConfigDir();
   const permissionSettings = await PermissionSettings.open(join(configDir, 'config.json'), { trustedHome: homedir() });
   const configStore = await ConfigStore.open(join(configDir, 'config.json'));

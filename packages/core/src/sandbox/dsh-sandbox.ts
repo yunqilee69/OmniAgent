@@ -1,7 +1,7 @@
 import { spawnSync } from 'node:child_process';
 import { isAbsolute, relative, sep } from 'node:path';
-import { assertDshMode, DshSandboxError, DshSandboxUnavailableError, dshWorkspaceWritableRoots, dshWritableRoots } from './dsh-policy';
-import type { DshSandboxPolicy } from './dsh-policy';
+import { assertDshMode, DshSandboxError, DshSandboxUnavailableError, dshWorkspaceWritableRoots, dshWritableRoots } from './dsh-policy.ts';
+import type { DshSandboxPolicy } from './dsh-policy.ts';
 
 export type DshSandboxBackend = 'seatbelt' | 'bwrap' | 'landlock';
 export interface DshSandboxCapability {
@@ -124,7 +124,7 @@ export async function confineDshArgv(
   const selected = capability.selected;
   if (!selected) {
     const detail = capability.attempts.map((attempt) => `${attempt.backend}: ${attempt.detail}`).join('; ');
-    throw new DshSandboxUnavailableError(`no usable backend for ${options.platform ?? process.platform}${detail ? ` (${detail})` : ''}`);
+    throw new DshSandboxUnavailableError(`no usable backend for ${options.platform ?? process.platform}${detail ? ` (${detail})` : ''}; see README DSH sandbox setup`);
   }
   let prefix: string[];
   let denialSignatures: string[];

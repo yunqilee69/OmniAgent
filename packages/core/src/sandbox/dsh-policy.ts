@@ -15,8 +15,11 @@ export interface DshSandboxPolicy {
 }
 
 export class DshSandboxError extends Error {
-  constructor(message: string, readonly code: string, options?: ErrorOptions) {
+  readonly code: string;
+
+  constructor(message: string, code: string, options?: ErrorOptions) {
     super(message, options);
+    this.code = code;
     this.name = 'DshSandboxError';
   }
 }

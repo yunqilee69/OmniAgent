@@ -18,6 +18,8 @@ pnpm eval       # run eval tasks
 pnpm typecheck
 ```
 
+Linux 上，`pnpm install` 后以及 TUI、Web 服务启动时会尝试准备受限 shell 沙盒；其他平台跳过 Linux 准备。准备可能需要可用的系统包管理器及交互授权，具体取决于本机环境，自动准备不保证成功。失败时终端会输出原因，安装或应用仍可继续；没有可用受限后端时，受限 shell 仍会拒绝执行，不会自动降级为无沙盒。使用 `--ignore-scripts` 跳过安装脚本时，应用启动仍会尝试准备。
+
 TUI 支持 `/help`、`/sessions`、`/resume <id>`、`/new`、`/plan [on|off]`、`/todos`、`/permission [preset]`、`/agent [id]`、`/model [序号|agent|role <id>|<provider> <model>]`、`/think [full|compact|off]`、`/verbose`、`/color [on|off]` 和 `/clear`。模型默认跟随当前智能体的角色，因此修改角色指向的模型后，所有引用该角色的智能体都会在下一回合切换。
 
 TUI 的排版只有一条规则：**四类内容各有自己的左缘**，所以长对话不用逐字读也能分出层次。
@@ -341,7 +343,9 @@ export type AgentEvent =
 
 文件围栏会解析符号链接并拒绝硬链接目标，但仍有检查与系统调用之间的 TOCTOU 限制。Seatbelt、bubblewrap 和 Landlock 主要限制文件写入；它们不提供网络隔离、完整读取隔离或虚拟机边界。`danger-full-access` 绕过 DSH 文件沙盒，但不表示模型请求的额外审批会被自动批准。
 
-Linux 优先使用 `/usr/bin/bwrap`；没有可用的 bubblewrap 时，可由管理员从可信源码构建并安装 Landlock 启动器到 `/usr/local/libexec/omniagent/landlock-run` 或 `/usr/libexec/omniagent/landlock-run`。安装目录及其祖先必须受保护，不能让沙盒内进程或不可信用户替换启动器；不要将它安装在工作区或共享临时目录。Landlock 需要 Linux 内核 ABI 5 或更新，以及支持 seccomp 和 `openat2` 的系统。以下命令需要 C 编译器和管理员权限：
+Linux 优先使用 `/usr/bin/bwrap`。安装及启动时会先实际探测沙盒；若尚未安装 bubblewrap，受信任的 apt、dnf 或 pacman 可用时，交互式终端会询问是否通过系统包管理器安装（通常需要 sudo）。非交互环境不会提权或等待输入，需由管理员事先安装 bubblewrap。已安装但内核或容器策略禁止运行时，应调整宿主环境或使用下述 Landlock 后备方案。安装完成后仍会实际探测，失败时不会绕过沙盒。
+
+没有可用的 bubblewrap 时，可由管理员从可信源码构建并安装 Landlock 启动器到 `/usr/local/libexec/omniagent/landlock-run` 或 `/usr/libexec/omniagent/landlock-run`。安装目录及其祖先必须受保护，不能让沙盒内进程或不可信用户替换启动器；不要将它安装在工作区或共享临时目录。Landlock 需要 Linux 内核 ABI 5 或更新，以及支持 seccomp 和 `openat2` 的系统。以下命令需要 C 编译器和管理员权限：
 
 ```bash
 cc -std=c11 -O2 -Wall -Wextra -Werror packages/core/native/linux/landlock-run.c -o ./landlock-run
