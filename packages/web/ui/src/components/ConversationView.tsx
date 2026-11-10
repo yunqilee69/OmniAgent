@@ -255,7 +255,15 @@ export function ConversationView({ entry, processDisplay, onOpenPlan, onOpenFile
 }): ReactNode {
   const app = useApp();
   const t = translator(app.locale);
+  const sessionId = app.sessionId;
   const scroll = useRef<HTMLDivElement | null>(null);
+  const column = useRef<HTMLDivElement | null>(null);
+  /**
+   * The reader is following the tail, so new content scrolls into view.
+   * Starts true: opening a conversation lands on its newest message instead of
+   * its first one, and only a reader who scrolls up actually stops following.
+   */
+  const following = useRef(true);
   const [awayFromBottom, setAwayFromBottom] = useState(false);
   const running = entry.run !== undefined || entry.running;
   const source = entry.run ?? entry;
@@ -270,16 +278,47 @@ export function ConversationView({ entry, processDisplay, onOpenPlan, onOpenFile
     return element.scrollHeight - element.scrollTop - element.clientHeight < 120;
   };
 
-  useLayoutEffect(() => {
+  const stickToBottom = (): void => {
     const element = scroll.current;
     if (element === null) return;
-    if (nearBottom()) element.scrollTop = element.scrollHeight;
+    element.scrollTop = element.scrollHeight;
+  };
+
+  // A conversation opens on its newest message; switching sessions re-pins even
+  // when the previous one was left scrolled up.
+  useLayoutEffect(() => {
+    following.current = true;
+    setAwayFromBottom(false);
+    stickToBottom();
+  }, [sessionId]);
+
+  useLayoutEffect(() => {
+    if (following.current) stickToBottom();
   }, [turns.length, tail, live?.approval, live?.planReview]);
+
+  // Content can also grow without a render here: decoded images, loaded fonts,
+  // highlighted code. While the reader follows the tail, those growths must not
+  // push the newest message out of view.
+  useEffect(() => {
+    const element = scroll.current;
+    const inner = column.current;
+    if (element === null || inner === null || typeof ResizeObserver === 'undefined') return;
+    const observer = new ResizeObserver(() => {
+      if (following.current) stickToBottom();
+    });
+    observer.observe(inner);
+    observer.observe(element);
+    return () => { observer.disconnect(); };
+  }, []);
 
   useEffect(() => {
     const element = scroll.current;
     if (element === null) return;
-    const onScroll = (): void => { setAwayFromBottom(!nearBottom()); };
+    const onScroll = (): void => {
+      const atBottom = nearBottom();
+      following.current = atBottom;
+      setAwayFromBottom(!atBottom);
+    };
     element.addEventListener('scroll', onScroll, { passive: true });
     return () => { element.removeEventListener('scroll', onScroll); };
   }, []);
@@ -288,7 +327,7 @@ export function ConversationView({ entry, processDisplay, onOpenPlan, onOpenFile
     <MarkdownDelegateProvider openFile={onOpenFile}>
     <div className={chatCss.root} data-chat-following-tail={awayFromBottom ? undefined : ''}>
       <div className={chatCss.scroll} ref={scroll}>
-        <div className={chatCss.column}>
+        <div className={chatCss.column} ref={column}>
           {turns.length === 0 && (
             <div className={css.conversationEmpty}>
               <span className={css.emptyMark} aria-hidden>◈</span>
@@ -333,8 +372,9 @@ export function ConversationView({ entry, processDisplay, onOpenPlan, onOpenFile
             className={chatCss.toBottom}
             aria-label={t('Scroll to latest')}
             onClick={() => {
-              const element = scroll.current;
-              if (element !== null) element.scrollTop = element.scrollHeight;
+              following.current = true;
+              setAwayFromBottom(false);
+              stickToBottom();
             }}
           >
             <IconChevronDownOutlineRegular />

@@ -317,6 +317,7 @@ export function App(): ReactNode {
             ) : (
               <div className={css.chatArea}>
                 <ConversationView
+                  key={app.sessionId ?? 'session'}
                   entry={entry}
                   processDisplay={app.processDisplay}
                   onOpenPlan={openPlanPreview}
