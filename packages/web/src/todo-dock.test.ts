@@ -1,9 +1,10 @@
 import { createElement } from 'react';
 import { renderToStaticMarkup } from 'react-dom/server';
-import { describe, expect, it } from 'vitest';
-import { TodoDock } from '../ui/src/components/Composer.tsx';
+import { describe, expect, it, vi } from 'vitest';
+import { Composer, TodoDock } from '../ui/src/components/Composer.tsx';
 import { createLiveState } from '../ui/src/lib/events.ts';
 import { translator } from '../ui/src/lib/i18n.ts';
+import { AppStore, sessionKey, store } from '../ui/src/lib/store.ts';
 import type { SessionEntry } from '../ui/src/lib/store.ts';
 
 const t = translator('en');
@@ -34,5 +35,55 @@ describe('task dock', () => {
     expect(render(null)).toBe('');
     expect(render({ todos: null, running: true })).toBe('');
     expect(render({ todos: [], running: true })).toBe('');
+  });
+
+  it('stacks the task list above the composer input', () => {
+    const workspaceId = 'workspace';
+    const sessionId = 'session';
+    const entry = {
+      draft: false,
+      plan: { active: false },
+      queued: [],
+      todos,
+      running: true,
+      loaded: false,
+      loading: false,
+      permission: null,
+      permissionSaving: false,
+      permissionError: '',
+      agent: null,
+      agentSaving: false,
+      agentError: '',
+      agentWarnings: [],
+      agentSkills: null,
+      binding: null,
+      resolvedModel: null,
+      modelSaving: false,
+      modelError: '',
+      planSaving: false,
+      planError: '',
+    } as unknown as SessionEntry;
+    const state = {
+      ...new AppStore().getSnapshot(),
+      locale: 'en' as const,
+      workspaceId,
+      sessionId,
+      entries: { [sessionKey(workspaceId, sessionId)]: entry },
+    };
+    const spy = vi.spyOn(store, 'getSnapshot').mockReturnValue(state);
+    const originalConsoleError = console.error;
+    const consoleError = vi.spyOn(console, 'error').mockImplementation((message, ...args) => {
+      if (typeof message !== 'string' || !message.includes('useLayoutEffect does nothing on the server')) {
+        originalConsoleError(message, ...args);
+      }
+    });
+    try {
+      const html = renderToStaticMarkup(createElement(Composer, {}));
+      expect(html).toContain('aria-label="Task list"');
+      expect(html.indexOf('aria-label="Task list"')).toBeLessThan(html.indexOf('<textarea'));
+    } finally {
+      consoleError.mockRestore();
+      spy.mockRestore();
+    }
   });
 });

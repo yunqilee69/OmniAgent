@@ -2,7 +2,9 @@
   box-sizing: border-box;
   flex: none;
   overflow: hidden;
-  margin: 0 auto;
+  /* Sits above the composer card, so the clearance it used to get from the
+     dock's padding now lives here as a bottom margin. */
+  margin: 0 auto 8px;
   width: calc(
     100% -
     var(--dsh-composer-side-clearance) -

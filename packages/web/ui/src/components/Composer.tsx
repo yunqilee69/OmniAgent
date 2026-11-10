@@ -844,6 +844,7 @@ export function Composer({ hero = false, onOpenPlanPreview }: { hero?: boolean; 
           )}
         </div>
       )}
+      <TodoDock entry={entry} t={t} />
       <div className={css.card} ref={card}>
         <div className={css.overlayAnchor} aria-hidden />
         {menuOpen && (
@@ -1110,7 +1111,6 @@ export function Composer({ hero = false, onOpenPlanPreview }: { hero?: boolean; 
           </div>
         )}
         <SessionStats entry={entry} />
-        <TodoDock entry={entry} t={t} />
       </div>
       <RiskConfirmation
         open={risk !== null}
