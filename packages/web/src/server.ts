@@ -85,6 +85,8 @@ import { AttachmentError, parseSendAttachments, storeAttachments } from './attac
 import { browseDirectories, DirectoryBrowseError } from './fs-browse';
 import { exportSession } from './session-export';
 import { projectSessionMetrics } from './session-metrics';
+import { projectLastTurn, sessionPendingKind } from './session-status';
+import type { SessionPendingKind } from './session-status';
 import { projectSubagentActivities } from './subagent-summaries';
 import { projectTraceEvents } from './trace-projection';
 import { projectTrajectory } from './trajectory';
@@ -262,6 +264,10 @@ interface RunningTurn {
   approval?: ApprovalTurn;
   cancelled: boolean;
   closing?: boolean;
+  /** Session-facing id, used as the address of published status frames. */
+  sessionId: string;
+  /** Publish this turn's session state to every idle client watching the workspace. */
+  publishStatus: (running: boolean) => void;
   /** Settles when this turn has bound a session or can no longer do so. */
   ready?: Promise<void>;
   baselineReady: Promise<void>;
@@ -280,6 +286,80 @@ interface CachedSession {
   pending: Promise<WebSession>;
 }
 
+/** One pushed session-state change for a workspace's idle clients. */
+interface SessionStatusFrame {
+  type: 'session.status';
+  sessionId: string;
+  running: boolean;
+  pending: SessionPendingKind | null;
+}
+
+/**
+ * Fan out session state to clients that are not following a turn.
+ *
+ * A sidebar shows the run state of every listed session, including ones this
+ * tab never opened, so that state cannot ride on a per-turn stream. Publishing
+ * on the turn's own lifecycle keeps one authoritative transition point.
+ */
+class SessionStatusHub {
+  private readonly streams = new Map<string, Set<ServerResponse>>();
+
+  subscribe(workspaceId: string, response: ServerResponse): void {
+    let streams = this.streams.get(workspaceId);
+    if (streams === undefined) {
+      streams = new Set<ServerResponse>();
+      this.streams.set(workspaceId, streams);
+    }
+    streams.add(response);
+    response.once('close', () => {
+      const current = this.streams.get(workspaceId);
+      if (current === undefined) return;
+      current.delete(response);
+      if (current.size === 0) this.streams.delete(workspaceId);
+    });
+    if (streams.size > MAX_STATUS_STREAMS) {
+      const oldest = streams.values().next().value;
+      if (oldest !== undefined) {
+        streams.delete(oldest);
+        oldest.destroy();
+      }
+    }
+  }
+
+  publish(workspaceId: string, frame: SessionStatusFrame): void {
+    const streams = this.streams.get(workspaceId);
+    if (streams === undefined || streams.size === 0) return;
+    const payload = `data: ${JSON.stringify(frame)}\n\n`;
+    const bytes = Buffer.byteLength(payload);
+    for (const stream of [...streams]) {
+      if (stream.destroyed || stream.writableEnded
+        || (stream.writableLength > 0 && stream.writableLength + bytes > MAX_FOLLOW_BUFFER_BYTES)) {
+        streams.delete(stream);
+        stream.destroy();
+        continue;
+      }
+      stream.write(payload);
+    }
+    if (streams.size === 0) this.streams.delete(workspaceId);
+  }
+
+  /** Drop a workspace's listeners once it is no longer addressable. */
+  closeWorkspace(workspaceId: string): void {
+    const streams = this.streams.get(workspaceId);
+    if (streams === undefined) return;
+    this.streams.delete(workspaceId);
+    for (const stream of streams) stream.destroy();
+  }
+
+  closeAll(): void {
+    for (const streams of this.streams.values()) for (const stream of streams) stream.destroy();
+    this.streams.clear();
+  }
+}
+
+/** Largest number of idle status listeners kept per workspace. */
+const MAX_STATUS_STREAMS = 64;
+
 export function createWebHost(options: WebHostOptions): WebHost {
   const bindHost = options.host ?? '127.0.0.1';
   const auth = options.auth ?? { enabled: false };
@@ -295,6 +375,7 @@ export function createWebHost(options: WebHostOptions): WebHost {
   const permissionLocks = new Map<string, Promise<void>>();
   const failedPermissions = new Set<string>();
   const compactRequests = new Set<string>();
+  const statusHub = new SessionStatusHub();
   let permissionDefaultUpdates = 0;
   const observedSockets = new WeakSet<object>();
   const server = createServer((request, response) => {
@@ -355,7 +436,7 @@ export function createWebHost(options: WebHostOptions): WebHost {
         response.once('close', () => clearTimeout(timeout));
       }
       await route(request, response, options, sessions, running, creating, removing, permissionLocks, failedPermissions,
-        compactRequests, () => permissionDefaultUpdates, (value) => { permissionDefaultUpdates = value; });
+        compactRequests, statusHub, () => permissionDefaultUpdates, (value) => { permissionDefaultUpdates = value; });
     })().catch((error: unknown) => {
       if (response.headersSent) {
         if (!response.destroyed && !response.writableEnded) response.end();
@@ -379,6 +460,7 @@ export function createWebHost(options: WebHostOptions): WebHost {
       return `http://${hostname.includes(':') ? `[${hostname}]` : hostname}:${address.port}`;
     },
     close: () => new Promise((resolve, reject) => {
+      statusHub.closeAll();
       for (const turn of running.values()) {
         cancelTurn(turn);
         turn.approval?.close();
@@ -569,6 +651,7 @@ async function route(
   permissionLocks: Map<string, Promise<void>>,
   failedPermissions: Set<string>,
   compactRequests: Set<string>,
+  statusHub: SessionStatusHub,
   getPermissionDefaultUpdates: () => number,
   setPermissionDefaultUpdates: (value: number) => void,
 ): Promise<void> {
@@ -889,6 +972,30 @@ async function route(
   const workspace = await options.workspaces.get(parts[2]);
   if (!workspace) throw new HttpError(404, 'Workspace not found');
   const workspacePrefix = `${workspace.path}\0`;
+  if (request.method === 'GET' && parts.length === 4 && parts[3] === 'events') {
+    response.on('error', () => undefined);
+    response.writeHead(200, {
+      'content-type': 'text/event-stream; charset=utf-8',
+      'cache-control': 'no-cache, no-transform',
+      'x-content-type-options': 'nosniff',
+      'connection': 'keep-alive',
+    });
+    statusHub.subscribe(workspace.id, response);
+    response.write(': connected\n\n');
+    // A turn that started before this listener attached would otherwise stay
+    // invisible until its next state change, so publish the live set once.
+    for (const [key, turn] of running) {
+      if (!key.startsWith(workspacePrefix)) continue;
+      const frame: SessionStatusFrame = {
+        type: 'session.status',
+        sessionId: turn.sessionId,
+        running: true,
+        pending: sessionPendingKind(turn.approval?.pendingPrompts() ?? []),
+      };
+      response.write(`data: ${JSON.stringify(frame)}\n\n`);
+    }
+    return;
+  }
   if ((request.method === 'GET' || request.method === 'HEAD')
     && parts.length === 5 && parts[3] === 'files' && parts[4] === 'raw') {
     const path = url.searchParams.get('path') ?? '';
@@ -959,6 +1066,7 @@ async function route(
         throw error;
       }
       for (const key of sessions.keys()) if (key.startsWith(workspacePrefix)) sessions.delete(key);
+      statusHub.closeWorkspace(workspace.id);
       return json(response, 200, { removed });
     } finally {
       removing.delete(workspace.id);
@@ -985,10 +1093,18 @@ async function route(
     const summaries = opened.map(({ item, events }) => {
       const agent = events === undefined ? undefined : projectAgentSelection(events);
       const activity = activities.get(item.id);
+      const turn = running.get(`${workspace.path}\0${item.id}`);
+      const pending = sessionPendingKind(turn?.approval?.pendingPrompts() ?? []);
+      const lastTurn = events === undefined ? null : projectLastTurn(events);
       return {
         ...item,
         ...(agent?.status === 'selected' ? { agent: agent.agent } : {}),
         ...(activity === undefined ? {} : activity),
+        // Run state, waiting interaction and the last outcome are host facts, so
+        // a row never has to depend on the tab that happens to follow the turn.
+        running: turn !== undefined,
+        ...(pending === null ? {} : { pending }),
+        ...(lastTurn === null ? {} : { lastTurn }),
       };
     });
     return json(response, 200, {
@@ -1534,8 +1650,20 @@ async function route(
     const ready = new Promise<void>((resolve) => { markReady = resolve; });
     let markBaselineReady!: () => void;
     const baselineReady = new Promise<void>((resolve) => { markBaselineReady = resolve; });
-    const turn: RunningTurn = { cancelled: false, ready, baselineReady, deliveries: new Set(), events: [], replayBytes: 0, replayOverflow: false, followers: new Set() };
+    const turn: RunningTurn = {
+      cancelled: false, ready, baselineReady, deliveries: new Set(), events: [], replayBytes: 0, replayOverflow: false,
+      followers: new Set(), sessionId,
+      publishStatus: (running: boolean) => {
+        statusHub.publish(workspace.id, {
+          type: 'session.status',
+          sessionId,
+          running,
+          pending: running ? sessionPendingKind(turn.approval?.pendingPrompts() ?? []) : null,
+        });
+      },
+    };
     running.set(key, turn);
+    turn.publishStatus(true);
     let accepted = false;
     const asyncResponse = [request.headers.prefer ?? ''].flat().join(',').split(',')
       .some((value) => value.trim().toLowerCase() === 'respond-async');
@@ -1675,7 +1803,10 @@ async function route(
           markReady();
           markStarted(false);
           turn.approval?.close();
-          if (running.get(key) === turn) running.delete(key);
+          if (running.get(key) === turn) {
+            running.delete(key);
+            turn.publishStatus(false);
+          }
           for (const follower of turn.followers) follower.end();
           turn.followers.clear();
         }
@@ -1690,8 +1821,10 @@ async function route(
         markBaselineReady();
         markReady();
         turn.approval?.close();
-        if (running.get(key) === turn) running.delete(key);
+        const registered = running.get(key) === turn;
+        if (registered) running.delete(key);
         publishTurnEvent(turn, { type: 'turn.end', reason: turn.cancelled ? 'interrupted' : 'error' });
+        if (registered) turn.publishStatus(false);
         for (const follower of turn.followers) follower.end();
       }
       response.off('close', disconnected);
@@ -1885,6 +2018,13 @@ function publishTurnEvent(turn: RunningTurn, event: unknown, excluded?: ServerRe
     } else {
       follower.write(frame);
     }
+  }
+  // Waiting interactions are part of the session's row state, so idle clients
+  // learn about a new or answered prompt without following the turn.
+  const type = typeof event === 'object' && event !== null ? (event as { type?: unknown }).type : undefined;
+  if (type === 'permission.requested' || type === 'permission.decided'
+    || type === 'plan.review.requested' || type === 'plan.review.decided') {
+    turn.publishStatus(true);
   }
 }
 

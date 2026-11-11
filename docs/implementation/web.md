@@ -107,6 +107,7 @@ Web 由一个本地 Node HTTP Host（`packages/web/src`）和一个 React 工作
 | --- | --- | --- |
 | `GET/POST` | `/api/workspaces` | 列出 / 注册工作区 |
 | `DELETE` | `/api/workspaces/:id` | 取消注册 |
+| `GET` | `/api/workspaces/:id/events` | 工作区会话状态流（`session.status` SSE，侧栏用） |
 | `GET` | `/api/workspaces/:id/files` | 工作区文件搜索（`@` 菜单） |
 | `GET` | `/api/workspaces/:id/files/tree?path=` | 目录浏览（文件树） |
 | `GET` | `/api/workspaces/:id/files/content?path=` | 文本文件预览 |
@@ -130,7 +131,7 @@ Web 由一个本地 Node HTTP Host（`packages/web/src`）和一个 React 工作
 | `POST` | `.../interrupt` | 中断当前回合 |
 | `GET` | `.../context` | Context Meter 估算 |
 | `GET` | `.../follow` | 以 `run.snapshot` 加入正在运行的回合 |
-| `GET` | `.../events` | trace 投影 |
+| `GET` | `.../events` | trace 投影（会话级；易与工作区状态流混淆） |
 | `GET` | `.../audit` | 审计投影 |
 | `GET` | `.../export` | Markdown / JSON 导出 |
 
@@ -280,7 +281,16 @@ server 维护：
 - 之后 follower 收到与主 SSE 相同的实时事件；所有 follower 在 `turn.end` 后关闭；
 - 多个标签页可以同时 follow 同一个回合，steering 消息也会广播为 `run.user.message`。
 
-### 4.2 事件交错
+### 4.2 工作区状态流
+
+`GET /api/workspaces/:id/events` 是一条与回合无关的长连接，只推送会话行状态：
+
+- 帧格式 `data: {"type":"session.status","sessionId":"…","running":bool,"pending":null|"approval"|"plan-review"}\n\n`；
+- 连接先收到 `: connected` 注释，再收到当前所有运行中会话的一帧，晚到的客户端不必等下一次状态变化；
+- 推送点在回合生命周期上：`RunningTurn` 建立时推 `running: true`，`permission.requested` / `permission.decided` / `plan.review.*` 发布时重算 `pending`，回合进入 `finally` 时推 `running: false`；
+- 监听者与 follower 互不影响：断开只移除自己，取消注册工作区时统一关闭；每个工作区最多保留 64 条空闲连接，超出时关闭最早的一条，缓冲区超限的连接也会被丢弃。
+
+### 4.3 事件交错
 
 `ApprovalBroker` 的 `stream()` 用 `Promise.race(source.next(), wake)`：
 
@@ -313,11 +323,11 @@ tool.result
   - 克隆参数，保证可序列化；
   - `approvalReason()` 只识别 DSH 升级原因，其他 reason 折叠为固定文案；
   - 剥离控制字符，截断 500 字符；
-  - 默认超时 120 秒；
+  - 默认不超时：用户没看到的提示会一直等，行状态也一直报 `pending`；构造时可传 `timeoutMs` 显式设上限，到点按 deny 结算；
   - abort 即 deny；
 - `requestPlanReview()`：
   - plan 非空且 ≤200,000 字符；
-  - 同样 120 秒超时；
+  - 超时策略同上，默认无限等待；
   - 取消返回 `{ approved: false, feedback: 'Plan review was cancelled.' }`；
 - `respond()` / `respondPlan()`：
   - requestId 必须匹配；
@@ -417,6 +427,7 @@ tool.result
 - `projectTraceEvents()`：只保留元数据；
 - `projectTrajectory()`：轨迹图数据；
 - `projectSessionMetrics()`：runs / steps / requests / usage / cache / throughput 聚合；
+- `projectLastTurn()` / `sessionPendingKind()`：会话列表的 `lastTurn` 与 `pending`，前者读最后一条 `trace/turn.end`，后者把待答请求归成 `approval` / `plan-review`；
 - `exportSession()`：Markdown / JSON；
 - `recordWorkspaceAudit()` / `readWorkspaceAudit()`：Web 审计；
 - `searchWorkspaceFiles()`：`@` 菜单文件搜索，最多 50,000 条，跳过 `.git` / `node_modules` / `dist` 等；
@@ -488,6 +499,7 @@ AuthGate
 - 单一 `AppStore` + `AppState`；
 - 每个会话一个 `SessionEntry`，含 `metrics`、`running`、queue 和 live `run`；
 - 工作区按 `sessionsByWorkspace` 分开保存会话列表，侧栏可以展开多个工作区；
+- `statusBySession`（键为 `sessionKey(ws, sid)`）保存宿主权威的实时状态 `{ running, pending, lastTurnFailed, completionUnread }`，侧栏行状态只读这里，不读单个被 follow 的回合；
 - `useSyncExternalStore(store.subscribe, store.getSnapshot)`；
 - `emit()` 用 `requestAnimationFrame` + 32ms 超时批量通知；
 - 请求用自增序号防止竞态；
@@ -514,7 +526,26 @@ AuthGate
 - `consumeStream()`：逐事件 `applyAgentEvent`，同时用 `applyMetricsEvent` 增量维护 metrics；
 - `stopTurn()`：先置 stopping，再 `POST interrupt`；
 - `resolveApproval()` / `resolvePlanReview()`：HTTP 回填；
-- `compactSession()`、`queueMessage()`、`steerMessage()`、`renameSession()`、`setSessionPinned()`、`forkSession()`、`deleteSession()`、`exportSession()`。
+- `compactSession()`、`queueMessage()`、`steerMessage()`、`renameSession()`、`setSessionPinned()`、`forkSession()`、`deleteSession()`、`exportSession()`；
+- `ensureStatusStream()` / `consumeStatusStream()`：订阅 `GET /api/workspaces/:id/events`，把宿主推送的 `session.status` 合并进 `statusBySession`；流不可用或断开时退回列表基线，只有曾经连通过才在 2 秒后重连；
+- `reconcileSessionStatuses()`：用列表基线补齐每个会话的现状（含 `lastTurn` 失败标记），与推送走同一套迁移规则；
+- `observeSessionStatus()`：处理单条推送；`running` 真→假时若该会话不是当前会话，置 `completionUnread`，并在 400 毫秒后调用 `refreshSessions()` 一次性刷新排序与结果；
+- `refreshSessions()`：静默重读列表（不改 `loading`），后台完成不会让侧栏闪空；
+- `clearCompletionReminder()`：用户打开会话时清掉完成提醒。
+
+#### 侧栏行状态
+
+`ui/src/lib/session-status.ts` 把宿主事实翻译成一行状态，优先级从高到低：
+
+1. `pending === 'approval'` → 琥珀点「等待审批」，行尾用短标签 `待审批` 顶掉相对时间；
+2. `pending === 'plan-review'` → 琥珀点「等待计划审阅」，行尾短标签 `计划审阅`；
+3. `running` → 灰色转圈「运行中」；
+4. 有运行中的子智能体 → 追加一行「N 个子智能体运行中」（父行承担子回合的忙碌状态，因为子回合不进入宿主的 turns 注册表）；
+5. `lastTurnFailed` → 红点「失败」；
+6. `completionUnread` → 绿点「已完成」；
+7. 其余 → 无点，行尾显示相对时间。
+
+只有第一项决定行的圆点与行尾文本，其余项进入 `title` 和无障碍隐藏文本；`pinned` 只在没有圆点时占用图标位。状态语义与 `StateDot` 的 `ongoing` / `warning` / `done` / `error` / `idle` 对齐。
 
 ### 9.3 事件 reducer
 

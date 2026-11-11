@@ -11,6 +11,7 @@ import {
   normalizeTodos,
   permissionPresets,
   sessionApiPath,
+  workspaceApiPath,
   validateAgent,
   validateAgentDefinition,
   validateAgentProfiles,
@@ -58,6 +59,7 @@ import {
   type ScheduleDeliveryHistoryPage,
   type SchedulePatch,
   type SendAttachment,
+  type SessionPendingKind,
   type SessionSummary,
   type TodoItem,
   type Workspace,
@@ -72,6 +74,7 @@ import {
   type TranscriptItem,
   type TurnMeta,
 } from './events.ts';
+import { IDLE_SESSION_STATE, type SessionLiveState } from './session-status.ts';
 
 export type Theme = 'light' | 'dark';
 export type ProcessDisplay = 'collapsed' | 'expanded';
@@ -139,6 +142,12 @@ export interface AppState {
   sessionId: string | null;
   selectedByWorkspace: Record<string, string>;
   entries: Record<string, SessionEntry>;
+  /**
+   * Host-authoritative live state per session, keyed by {@link sessionKey}.
+   * Row status reads this, never a single followed turn, so a session running in
+   * another tab still shows up here.
+   */
+  statusBySession: Record<string, SessionLiveState>;
   creatingSession: boolean;
   alert: string;
   tab: Tab;
@@ -206,6 +215,23 @@ function storageSet(key: string, value: string): void {
 
 export function sessionKey(workspaceId: string, sessionId: string): string {
   return JSON.stringify([workspaceId, sessionId]);
+}
+
+/** Workspace id encoded in a {@link sessionKey}, or null when the key is malformed. */
+function workspaceOfKey(key: string): string | null {
+  try {
+    const [workspaceId] = JSON.parse(key) as [unknown];
+    return typeof workspaceId === 'string' ? workspaceId : null;
+  } catch {
+    return null;
+  }
+}
+
+function sameLiveState(left: SessionLiveState, right: SessionLiveState): boolean {
+  return left.running === right.running
+    && left.pending === right.pending
+    && left.lastTurnFailed === right.lastTurnFailed
+    && left.completionUnread === right.completionUnread;
 }
 
 function queueStorageKey(workspaceId: string, sessionId: string): string {
@@ -401,6 +427,7 @@ export class AppStore {
     sessionId: null,
     selectedByWorkspace: initialSelection(),
     entries: {},
+    statusBySession: {},
     creatingSession: false,
     alert: '',
     tab: 'conversation',
@@ -462,6 +489,9 @@ export class AppStore {
   private readonly followEvents = new Map<string, unknown[]>();
   private readonly flushingQueues = new Set<string>();
   private readonly liveRuns = new Map<string, LiveTurnState>();
+  private readonly statusObservers = new Map<string, AbortController>();
+  private readonly statusReconnects = new Map<string, ReturnType<typeof setTimeout>>();
+  private readonly statusReloads = new Map<string, ReturnType<typeof setTimeout>>();
   private disposed = false;
 
   constructor(private readonly restoreQueued = true) {
@@ -513,6 +543,12 @@ export class AppStore {
     for (const timer of this.runningPolls.values()) clearTimeout(timer);
     this.runningPolls.clear();
     if (this.discoveryTimer !== undefined) clearTimeout(this.discoveryTimer);
+    for (const timer of this.statusReconnects.values()) clearTimeout(timer);
+    this.statusReconnects.clear();
+    for (const timer of this.statusReloads.values()) clearTimeout(timer);
+    this.statusReloads.clear();
+    for (const observer of this.statusObservers.values()) observer.abort();
+    this.statusObservers.clear();
     for (const observer of this.observers.values()) observer.abort();
     this.observers.clear();
     this.followBases.clear();
@@ -1184,6 +1220,7 @@ export class AppStore {
       permissionsError: '',
     });
     this.persistSelection();
+    this.ensureStatusStream(id);
     await this.loadSessions(id, true);
   }
 
@@ -1198,6 +1235,8 @@ export class AppStore {
       if (!Array.isArray(body.sessions)) throw new Error('The server did not return a session list.');
       const sessions = sortSessions(body.sessions);
       this.setWorkspaceSessions(workspaceId, { sessions, loading: false, loaded: true });
+      this.reconcileSessionStatuses(workspaceId, sessions);
+      this.ensureStatusStream(workspaceId);
       if (restore && this.state.workspaceId === workspaceId) {
         const current = this.state.sessionId;
         if (draftRequest !== this.draftRequest || current !== null) return;
@@ -1223,11 +1262,180 @@ export class AppStore {
     }
   }
 
+  /**
+   * Keep every listed session's run state in step with the host.
+   *
+   * The list baseline answers "what is true now"; a push answers "what changed".
+   * Both funnel through here so a run that ends while the user is elsewhere
+   * keeps an unread completion mark, exactly once.
+   * @param workspaceId - workspace that owns the listed sessions.
+   * @param sessions - the freshly listed summaries.
+   */
+  private reconcileSessionStatuses(workspaceId: string, sessions: readonly SessionSummary[]): void {
+    const next = { ...this.state.statusBySession };
+    let changed = false;
+    const present = new Set<string>();
+    for (const session of sessions) {
+      const key = sessionKey(workspaceId, session.id);
+      present.add(key);
+      const previous = next[key] ?? IDLE_SESSION_STATE;
+      const running = session.running === true;
+      const value = this.nextLiveState(workspaceId, session.id, previous, running,
+        running && (session.pending === 'approval' || session.pending === 'plan-review') ? session.pending : null);
+      // The baseline is the only source that knows how the last turn ended, so it
+      // owns that field; the push stream only ever reports liveness.
+      const settled = { ...value, lastTurnFailed: running ? false : session.lastTurn?.reason === 'error' };
+      if (!sameLiveState(previous, settled)) {
+        next[key] = settled;
+        changed = true;
+      }
+    }
+    for (const key of Object.keys(next)) {
+      if (present.has(key)) continue;
+      if (workspaceOfKey(key) !== workspaceId) continue;
+      delete next[key];
+      changed = true;
+    }
+    if (changed) this.patch({ statusBySession: next });
+  }
+
+  /** Merge one pushed state change and remember a finished run the user missed. */
+  private observeSessionStatus(workspaceId: string, sessionId: string, running: boolean, pending: SessionPendingKind | null): void {
+    const key = sessionKey(workspaceId, sessionId);
+    const previous = this.state.statusBySession[key] ?? IDLE_SESSION_STATE;
+    const next = this.nextLiveState(workspaceId, sessionId, previous, running, running ? pending : null);
+    if (sameLiveState(previous, next)) return;
+    this.patch({ statusBySession: { ...this.state.statusBySession, [key]: next } });
+    // A finished run changes ordering, the recorded outcome and the session
+    // title, so refresh the list once instead of on every event.
+    if (previous.running && !running) this.scheduleStatusReload(workspaceId);
+  }
+
+  private nextLiveState(
+    workspaceId: string,
+    sessionId: string,
+    previous: SessionLiveState,
+    running: boolean,
+    pending: SessionPendingKind | null,
+  ): SessionLiveState {
+    return {
+      running,
+      pending,
+      lastTurnFailed: running ? false : previous.lastTurnFailed,
+      completionUnread: running
+        ? false
+        : (previous.running && !this.isCurrent(workspaceId, sessionId) ? true : previous.completionUnread),
+    };
+  }
+
+  /** Drop the completion mark once the user is looking at the session. */
+  private clearCompletionReminder(workspaceId: string, sessionId: string): void {
+    const key = sessionKey(workspaceId, sessionId);
+    const previous = this.state.statusBySession[key];
+    if (previous === undefined || !previous.completionUnread) return;
+    this.patch({ statusBySession: { ...this.state.statusBySession, [key]: { ...previous, completionUnread: false } } });
+  }
+
+  /** Refresh the list once a finished run has settled, so order and outcome follow. */
+  private scheduleStatusReload(workspaceId: string): void {
+    if (this.disposed || this.statusReloads.has(workspaceId)) return;
+    const timer = setTimeout(() => {
+      this.statusReloads.delete(workspaceId);
+      if (this.disposed) return;
+      void this.refreshSessions(workspaceId);
+    }, 400);
+    (timer as { unref?: () => void }).unref?.();
+    this.statusReloads.set(workspaceId, timer);
+  }
+
+  /**
+   * Re-read a workspace's list without disturbing what is already on screen.
+   *
+   * A finished run changes ordering, the recorded outcome and the child
+   * statuses, none of which the push stream carries. This deliberately skips the
+   * loading state so a background completion never blanks the sidebar, and it
+   * defers to any list request already in flight.
+   */
+  private async refreshSessions(workspaceId: string): Promise<void> {
+    const cached = this.state.sessionsByWorkspace[workspaceId];
+    if (cached === undefined || !cached.loaded || cached.loading) return;
+    try {
+      const body = await this.api<{ sessions?: SessionSummary[] }>(sessionApiPath(workspaceId));
+      if (this.disposed || !Array.isArray(body.sessions)) return;
+      if (this.state.sessionsByWorkspace[workspaceId]?.loading === true) return;
+      const sessions = sortSessions(body.sessions);
+      this.setWorkspaceSessions(workspaceId, { sessions });
+      this.reconcileSessionStatuses(workspaceId, sessions);
+    } catch {
+      // The row state already moved; a quiet refresh failing changes nothing.
+    }
+  }
+
+  /**
+   * Follow the host's session-state stream for one workspace.
+   *
+   * The stream is an optimization, not a requirement: a server that does not
+   * offer it leaves the list baseline in charge, and a dropped stream reconnects
+   * only after it once worked.
+   */
+  private ensureStatusStream(workspaceId: string): void {
+    if (this.disposed || this.statusObservers.has(workspaceId)) return;
+    void this.observeStatusStream(workspaceId);
+  }
+
+  private async observeStatusStream(workspaceId: string): Promise<void> {
+    const controller = new AbortController();
+    this.statusObservers.set(workspaceId, controller);
+    let connected = false;
+    try {
+      const response = await this.fetch(workspaceApiPath(workspaceId, 'events'), { signal: controller.signal });
+      if (!response.ok || response.body === null) return;
+      connected = true;
+      await this.consumeStatusStream(workspaceId, response.body);
+    } catch {
+      // Keep the baseline; a missing stream is not a user-visible failure.
+    } finally {
+      if (this.statusObservers.get(workspaceId) === controller) this.statusObservers.delete(workspaceId);
+      if (connected && !this.disposed) {
+        const timer = setTimeout(() => {
+          this.statusReconnects.delete(workspaceId);
+          this.ensureStatusStream(workspaceId);
+        }, 2_000);
+        (timer as { unref?: () => void }).unref?.();
+        this.statusReconnects.set(workspaceId, timer);
+      }
+    }
+  }
+
+  private async consumeStatusStream(workspaceId: string, body: ReadableStream<Uint8Array>): Promise<void> {
+    const { createSSEParser } = await import('./events.ts');
+    const parser = createSSEParser((event) => {
+      const frame = event as { type?: unknown; sessionId?: unknown; running?: unknown; pending?: unknown } | null;
+      if (frame?.type !== 'session.status' || typeof frame.sessionId !== 'string') return;
+      const pending = frame.pending === 'approval' || frame.pending === 'plan-review' ? frame.pending : null;
+      this.observeSessionStatus(workspaceId, frame.sessionId, frame.running === true, pending);
+    });
+    const reader = body.getReader();
+    const decoder = new TextDecoder();
+    try {
+      while (true) {
+        const part = await reader.read();
+        if (part.done) break;
+        parser.push(decoder.decode(part.value, { stream: true }));
+      }
+      parser.push(decoder.decode());
+      parser.finish();
+    } finally {
+      reader.releaseLock();
+    }
+  }
+
   selectSession(id: string, workspaceId = this.state.workspaceId): void {
     if (workspaceId === null || !this.state.workspaces.some((workspace) => workspace.id === workspaceId)) return;
     if (this.state.entries[sessionKey(workspaceId, id)]?.draft === true) return;
     this.draftRequest += 1;
     this.discardDraft();
+    this.clearCompletionReminder(workspaceId, id);
     const key = sessionKey(workspaceId, id);
     const entry = this.getEntry(workspaceId, id);
     this.state = {
@@ -1349,6 +1557,8 @@ export class AppStore {
       const sessions = (this.state.sessionsByWorkspace[workspaceId]?.sessions ?? []).filter((session) => session.id !== id);
       const entries = { ...this.state.entries };
       delete entries[key];
+      const statusBySession = { ...this.state.statusBySession };
+      delete statusBySession[key];
       this.clearRunningPoll(key);
       this.liveRuns.delete(key);
       const selected = { ...this.state.selectedByWorkspace };
@@ -1361,6 +1571,7 @@ export class AppStore {
       this.state = {
         ...this.state,
         entries,
+        statusBySession,
         selectedByWorkspace: selected,
         ...(wasSelected ? { sessionId: nextId } : {}),
       };
@@ -2102,7 +2313,10 @@ export class AppStore {
     this.followEvents.delete(key);
     if (!this.observers.has(key)) void this.flushQueue(workspaceId, sessionId);
     if (this.state.workspaceId === workspaceId) {
-      void this.loadSessions(workspaceId, false);
+      // A quiet refresh keeps the finished conversation on screen; the full load
+      // path is only needed when this workspace has never listed its sessions.
+      if (this.state.sessionsByWorkspace[workspaceId]?.loaded === true) void this.refreshSessions(workspaceId);
+      else void this.loadSessions(workspaceId, false);
       void this.refreshSubagentSessions(workspaceId);
     }
     return true;
@@ -2635,7 +2849,18 @@ export class AppStore {
       const sessionsByWorkspace = { ...this.state.sessionsByWorkspace };
       delete sessionsByWorkspace[workspaceId];
       this.sessionRequests.set(workspaceId, (this.sessionRequests.get(workspaceId) ?? 0) + 1);
-      this.state = { ...this.state, selectedByWorkspace: selected, entries, sessionsByWorkspace };
+      this.statusObservers.get(workspaceId)?.abort();
+      this.statusObservers.delete(workspaceId);
+      for (const maps of [this.statusReconnects, this.statusReloads]) {
+        const timer = maps.get(workspaceId);
+        if (timer !== undefined) clearTimeout(timer);
+        maps.delete(workspaceId);
+      }
+      const statusBySession = { ...this.state.statusBySession };
+      for (const key of Object.keys(statusBySession)) {
+        if (workspaceOfKey(key) === workspaceId) delete statusBySession[key];
+      }
+      this.state = { ...this.state, selectedByWorkspace: selected, entries, sessionsByWorkspace, statusBySession };
       if (this.state.workspaceId === workspaceId) {
         this.state = { ...this.state, workspaceId: null, sessionId: null, sessions: [], sessionsLoading: false, sessionError: '' };
       }

@@ -165,6 +165,63 @@ describe('workspace sidebar', () => {
     expect(html).not.toContain('aria-selected="true"');
   });
 
+  it('names the run state of a session this tab never opened', () => {
+    const html = renderSidebar({
+      sessions: [{ id: 'ship', description: 'Ship the parser', updatedAt: 1 }],
+      statusBySession: {
+        [JSON.stringify(['a', 'ship'])]: {
+          running: true, pending: 'approval', lastTurnFailed: false, completionUnread: false,
+        },
+      },
+    });
+    // The wait outranks the run: the row asks for the user, not the model.
+    expect(html).toContain('data-state="warning"');
+    expect(html).not.toContain('data-state="ongoing"');
+    expect(html).toContain('Waiting for approval');
+    expect(html).toContain('>Approval</span>');
+    expect(html).not.toContain('New Session');
+  });
+
+  it('shows a finished or failed run without opening it, and idles silently', () => {
+    const finished = renderSidebar({
+      sessions: [{ id: 'done-one', description: 'Done one', updatedAt: 1 }],
+      statusBySession: {
+        [JSON.stringify(['a', 'done-one'])]: {
+          running: false, pending: null, lastTurnFailed: false, completionUnread: true,
+        },
+      },
+    });
+    expect(finished).toContain('data-state="done"');
+    expect(finished).toContain('Completed');
+
+    const failed = renderSidebar({
+      sessions: [{ id: 'bad-one', description: 'Bad one', updatedAt: 1, lastTurn: { endedAt: 1, reason: 'error' } }],
+      statusBySession: {
+        [JSON.stringify(['a', 'bad-one'])]: {
+          running: false, pending: null, lastTurnFailed: true, completionUnread: false,
+        },
+      },
+    });
+    expect(failed).toContain('data-state="error"');
+    expect(failed).toContain('Failed');
+
+    const idle = renderSidebar({ sessions: [{ id: 'quiet', description: 'Quiet', updatedAt: 1, pinned: true }] });
+    expect(idle).not.toContain('data-state=');
+    expect(idle).not.toContain('Idle');
+  });
+
+  it('reports running subagents on the parent row that is waiting on them', () => {
+    const html = renderSidebar({
+      sessions: [
+        { id: 'root', description: 'Parent work', updatedAt: 2 },
+        { id: 'child', parentSessionId: 'root', description: 'Child work', subagentStatus: 'running' },
+      ],
+    });
+    expect(html).not.toContain('Child work');
+    expect(html).toContain('data-state="ongoing"');
+    expect(html).toContain('1 subagents running');
+  });
+
   it('shows the newly active workspace sessions after a switch', () => {
     const html = renderSidebar({
       workspaceId: 'b',

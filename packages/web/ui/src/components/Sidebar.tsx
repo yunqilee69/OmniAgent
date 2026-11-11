@@ -30,6 +30,7 @@ import {
 import { DirectoryPicker } from './DirectoryPicker.tsx';
 import { store, sessionKey, useApp } from '../lib/store.ts';
 import { relativeDate } from '../lib/trajectory.ts';
+import { runningSubagentCounts, sessionRowStatuses, showsRowDot } from '../lib/session-status.ts';
 import { translator } from '../lib/i18n.ts';
 import pickerCss from '../styles/directory-picker.module.css';
 import sidebarCss from '../styles/dsh/sidebar.module.css';
@@ -434,6 +435,11 @@ export function Sidebar({ drawer, onClose, onBrowseWorkspace }: { drawer: boolea
                   // Child sessions are reached from the header team card, not
                   // from the task list: one row per conversation the user started.
                   const roots = list.sessions.filter((session) => String(session.parentSessionId ?? '') === '');
+                  // A subagent turn never reaches this tab's turn registry, so the
+                  // parent row carries the work its running children still owe.
+                  const subagentCounts = runningSubagentCounts(list.sessions, (child) =>
+                    app.statusBySession[sessionKey(item.id, child.id)]?.running === true
+                    || child.subagentStatus === 'running');
                   const sessions = needle === '' ? roots : roots.filter((session) =>
                     [session.id, session.title, session.agent, session.agentId, session.cwd, session.description]
                       .some((value) => String(value ?? '').toLowerCase().includes(needle)));
@@ -541,9 +547,23 @@ export function Sidebar({ drawer, onClose, onBrowseWorkspace }: { drawer: boolea
                           : session.blank === true ? t('New Session') : t('Untitled');
                       const selected = active && session.id === app.sessionId;
                       const pinned = session.pinned === true;
-                      const entry = app.entries[sessionKey(item.id, session.id)];
-                      const running = entry?.run !== undefined;
                       const menuKey = sessionKey(item.id, session.id);
+                      const entry = app.entries[menuKey];
+                      const live = app.statusBySession[menuKey];
+                      // The host stream is authoritative; this tab's followed turn
+                      // only refines the wait and run state while it is attached.
+                      const statuses = sessionRowStatuses({
+                        running: live?.running === true || entry?.run !== undefined,
+                        pending: entry?.run?.planReview !== undefined
+                          ? 'plan-review'
+                          : entry?.run?.approval !== undefined ? 'approval' : live?.pending ?? null,
+                        runningSubagents: subagentCounts.get(session.id) ?? 0,
+                        lastTurnFailed: live?.lastTurnFailed === true,
+                        completionUnread: live?.completionUnread === true,
+                      }, t);
+                      const primary = statuses[0]!;
+                      const showDot = showsRowDot(statuses);
+                      const statusLabel = statuses.map((status) => status.label).join(' · ');
                       const menuOpen = sessionMenu === menuKey;
                       return (
                         <div
@@ -565,15 +585,19 @@ export function Sidebar({ drawer, onClose, onBrowseWorkspace }: { drawer: boolea
                             select(item.id, session.id);
                           }}
                         >
-                          <span className={browserCss.sessionSlot} aria-hidden="true">
-                            {running
-                              ? <StateDot state="ongoing" />
+                          <span className={browserCss.sessionSlot} title={showDot ? statusLabel : undefined} aria-hidden="true">
+                            {showDot
+                              ? <StateDot state={primary.state} />
                               : pinned ? <IconPinFillRegular size={12} /> : null}
                           </span>
+                          {showDot && <span className={browserCss.visuallyHidden}>{statusLabel}</span>}
                           <span className={browserCss.sessionTitle}>{name}</span>
                           <span className={browserCss.rowResting}>
-                            <span className={browserCss.time}>
-                              {relativeDate(session.updatedAt ?? session.createdAt, app.locale)}
+                            <span
+                              className={clsx(browserCss.time, primary.trailingLabel === undefined && browserCss.timestamp)}
+                              aria-hidden={primary.trailingLabel === undefined ? undefined : true}
+                            >
+                              {primary.trailingLabel ?? relativeDate(session.updatedAt ?? session.createdAt, app.locale)}
                             </span>
                           </span>
                           <span className={browserCss.rowActions} onClick={(event) => { event.stopPropagation(); }}>

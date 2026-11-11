@@ -5,7 +5,6 @@ type Prompt = Extract<AgentEvent, { type: 'permission.requested' }>;
 type PlanPrompt = Extract<AgentEvent, { type: 'plan.review.requested' }>;
 type EventResult = IteratorResult<AgentEvent>;
 
-const DEFAULT_APPROVAL_TIMEOUT_MS = 120_000;
 const GENERIC_APPROVAL_REASON = 'Tool execution requires approval';
 const DSH_ESCALATION_REASON = /^Allow one call to use (read-only|workspace-write|danger-full-access): ([\s\S]+)$/;
 
@@ -36,9 +35,16 @@ export class ApprovalBroker {
   private readonly turns = new Map<string, ApprovalTurn>();
   private readonly timeoutMs: number;
 
+  /**
+   * A prompt waits for the user or for the turn to be aborted; it never expires
+   * on its own, because a row that silently drops "waiting for approval" hides
+   * work the user still has to unblock. Deployments that need a bound can pass
+   * `timeoutMs`, which settles the prompt with a deny.
+   * @param options.timeoutMs - positive lifetime in milliseconds, or 0/omitted to wait indefinitely.
+   */
   constructor(options: { timeoutMs?: number } = {}) {
-    this.timeoutMs = options.timeoutMs ?? DEFAULT_APPROVAL_TIMEOUT_MS;
-    if (!Number.isSafeInteger(this.timeoutMs) || this.timeoutMs <= 0 || this.timeoutMs > 2_147_483_647) {
+    this.timeoutMs = options.timeoutMs ?? 0;
+    if (!Number.isSafeInteger(this.timeoutMs) || this.timeoutMs < 0 || this.timeoutMs > 2_147_483_647) {
       throw new RangeError('Invalid approval timeout');
     }
   }
@@ -115,12 +121,12 @@ export class ApprovalTurn {
     }
     return new Promise((resolve) => {
       const onAbort = () => settle('deny');
-      const timer = setTimeout(() => settle('deny'), this.timeoutMs);
+      const timer = this.timeoutMs > 0 ? setTimeout(() => settle('deny'), this.timeoutMs) : undefined;
       const settle = (decision: ApprovalResponse) => {
         if (this.pending !== pending) return;
         this.pending = undefined;
         if (this.prompt === prompt) this.prompt = undefined;
-        clearTimeout(timer);
+        if (timer !== undefined) clearTimeout(timer);
         signal.removeEventListener('abort', onAbort);
         resolve(decision);
       };
@@ -143,12 +149,14 @@ export class ApprovalTurn {
     const prompt: PlanPrompt = { type: 'plan.review.requested', requestId: randomUUID(), plan };
     return new Promise((resolve) => {
       const onAbort = () => settle({ approved: false, feedback: 'Plan review was cancelled.' });
-      const timer = setTimeout(() => settle({ approved: false, feedback: 'Plan review timed out.' }), this.timeoutMs);
+      const timer = this.timeoutMs > 0
+        ? setTimeout(() => settle({ approved: false, feedback: 'Plan review timed out.' }), this.timeoutMs)
+        : undefined;
       const settle = (response: PlanReviewResponse) => {
         if (this.planPending !== pending) return;
         this.planPending = undefined;
         if (this.planPrompt === prompt) this.planPrompt = undefined;
-        clearTimeout(timer);
+        if (timer !== undefined) clearTimeout(timer);
         signal.removeEventListener('abort', onAbort);
         resolve(response);
       };

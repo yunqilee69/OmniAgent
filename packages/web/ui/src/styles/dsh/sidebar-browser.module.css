@@ -246,6 +246,21 @@
   white-space: nowrap;
 }
 
+/* Only the relative time reads as a timestamp; a waiting label takes its place. */
+.timestamp {
+  font-variant-numeric: tabular-nums;
+}
+
+/* Names the row's state for assistive technology: the dot is decorative. */
+.visuallyHidden {
+  position: absolute;
+  width: 1px;
+  height: 1px;
+  overflow: hidden;
+  clip: rect(0 0 0 0);
+  white-space: nowrap;
+}
+
 .rowActions {
   display: none;
   flex: none;

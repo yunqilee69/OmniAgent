@@ -81,7 +81,10 @@ TypeScript 配置是 strict + `noUncheckedIndexedAccess` + `verbatimModuleSyntax
 | `model-picker.test.ts` | 模型选择器 |
 | `workspaces.test.ts` / `workspace-files.test.ts` | 工作区注册、文件搜索、目录浏览与预览 |
 | `workspace-file-ui.test.ts` | 文件树 / 预览组件 |
-| `sidebar.test.ts` | 多工作区侧栏、默认工作区不可移除 |
+| `sidebar.test.ts` | 多工作区侧栏、默认工作区不可移除、行状态（等待 / 运行 / 完成 / 失败 / 子智能体） |
+| `session-status.test.ts` / `session-row-status.test.ts` | `lastTurn` 与 `pending` 投影、行状态优先级、子智能体计数 |
+| `session-status-stream.test.ts` | 工作区状态流：晚到快照、审批前后推送、取消注册关闭连接 |
+| `session-status-store.test.ts` | 状态流合并、列表基线补齐、未读完成与失败标记 |
 | `header-trajectory.test.ts` | Header 状态与轨迹入口 |
 | `context-meter.test.ts` | `/context` 估算路由 |
 | `todo-dock.test.ts` | 底部 todo 状态 |

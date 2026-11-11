@@ -29,10 +29,42 @@ export interface SessionSummary {
   titleSource?: unknown;
   pinned?: boolean;
   blank?: boolean;
+  /** Host-authoritative run state; present on every listed session. */
+  running?: boolean;
+  /** The interaction a running session currently blocks on. */
+  pending?: SessionPendingKind | null;
+  /** How the session's latest persisted turn ended. */
+  lastTurn?: SessionTurnEnd | null;
   /** Child sessions only: folded from the parent's subagent start/end events. */
   subagentStatus?: SubagentStatus;
   /** Child sessions only: token totals their own assistant messages reported. */
   usage?: SessionUsage;
+}
+
+/** A running turn's user-facing wait: a tool approval or a plan review. */
+export type SessionPendingKind = 'approval' | 'plan-review';
+
+/** Terminal reason recorded for a session's latest turn. */
+export type SessionTurnEndReason =
+  | 'end_turn'
+  | 'tool_use'
+  | 'max_tokens'
+  | 'max_steps'
+  | 'interrupted'
+  | 'error';
+
+export interface SessionTurnEnd {
+  /** Epoch milliseconds; 0 when the stored log carried no timestamp. */
+  endedAt: number;
+  reason: SessionTurnEndReason;
+}
+
+/** One pushed session-state change from the host status stream. */
+export interface SessionStatusEvent {
+  type: 'session.status';
+  sessionId: string;
+  running: boolean;
+  pending: SessionPendingKind | null;
 }
 
 export type SubagentStatus = 'running' | 'completed' | 'failed' | 'interrupted' | 'idle';

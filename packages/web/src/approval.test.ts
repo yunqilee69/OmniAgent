@@ -223,6 +223,36 @@ describe('web approval broker', () => {
     expect(vi.getTimerCount()).toBe(0);
   });
 
+  it('waits for the user instead of expiring on a timer', async () => {
+    vi.useFakeTimers();
+    try {
+      const broker = new ApprovalBroker();
+      const turn = broker.start('/a', 's');
+      const result = broker.handler('/a', 's')!(request, new AbortController().signal);
+      const source = (async function* (): AsyncGenerator<AgentEvent> { await result; })();
+      const stream = turn.stream(source);
+      const prompt = (await nextRequest(stream)).prompt;
+
+      // Well past any historical default: a prompt the user has not seen yet is
+      // still waiting, and the row keeps advertising it.
+      await vi.advanceTimersByTimeAsync(10 * 60_000);
+      expect(vi.getTimerCount()).toBe(0);
+      expect(turn.pendingPrompts()).toHaveLength(1);
+      expect(broker.respond('/a', 's', prompt.requestId, 'allow')).toBe(true);
+      expect(await result).toBe('allow');
+      expect(turn.pendingPrompts()).toHaveLength(0);
+      await remaining(stream);
+    } finally {
+      vi.useRealTimers();
+    }
+  });
+
+  it('rejects a negative timeout but keeps an explicit bound working', () => {
+    expect(() => new ApprovalBroker({ timeoutMs: -1 })).toThrow(RangeError);
+    expect(() => new ApprovalBroker({ timeoutMs: 1.5 })).toThrow(RangeError);
+    expect(() => new ApprovalBroker({ timeoutMs: 0 })).not.toThrow();
+  });
+
   it('settles pending approval on interrupt and prevents a stale allow in the next turn', async () => {
     const broker = new ApprovalBroker();
     const workspace = await temporaryRoot();

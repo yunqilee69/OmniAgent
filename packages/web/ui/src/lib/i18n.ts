@@ -468,6 +468,8 @@ const zh: Record<string, string> = {
   'Run subagent': '运行子智能体',
   'Subagent team': '子智能体团队',
   '{count} subagents': '{count} 个子智能体',
+  '{count} subagents running': '{count} 个子智能体运行中',
+  'Approval': '待审批',
   'Back to {name}': '返回 {name}',
   'Completed': '已完成',
   'Idle': '待继续',
