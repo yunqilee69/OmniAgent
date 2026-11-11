@@ -2818,6 +2818,27 @@ export class AppStore {
     }
   }
 
+  /**
+   * Copies a session id to the clipboard. Resolves false when the engine
+   * refuses the write (no clipboard API, or a rejected permission prompt), and
+   * reports that through the shared alert strip so every entry point — the
+   * sidebar row menu and the header export menu — fails the same way.
+   */
+  async copySessionId(sessionId: string): Promise<boolean> {
+    const clipboard = navigator.clipboard;
+    if (clipboard?.writeText === undefined) {
+      this.showAlert(translator(this.state.locale)('Clipboard access is unavailable.'));
+      return false;
+    }
+    try {
+      await clipboard.writeText(sessionId);
+      return true;
+    } catch {
+      this.showAlert(translator(this.state.locale)('Clipboard access is unavailable.'));
+      return false;
+    }
+  }
+
   async addWorkspace(path: string, name: string): Promise<boolean> {
     try {
       const body = await this.api<{ workspace?: Workspace }>('/api/workspaces', jsonOptions('POST', {

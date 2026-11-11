@@ -7,6 +7,7 @@ import {
   IconEllipsisOutlineRegular,
   IconPanelLeftOutlineRegular,
   Menu,
+  Toast,
   Tooltip,
 } from '../../vendor/primitives/index.ts';
 import { auth } from '../lib/auth.ts';
@@ -27,6 +28,7 @@ export function Header({ sidebarOpen, onToggleSidebar, rightOpen, onToggleRight 
   const entry = useSessionEntry();
   const t = translator(app.locale);
   const [menuOpen, setMenuOpen] = useState(false);
+  const [copied, setCopied] = useState<number | null>(null);
   const onAutomation = app.tab === 'automation';
   const onSettings = app.tab === 'settings';
   const header = entry?.header ?? null;
@@ -139,12 +141,19 @@ export function Header({ sidebarOpen, onToggleSidebar, rightOpen, onToggleRight 
             items={[
               { id: 'markdown', label: t('Copy as Markdown'), icon: <IconCopyOutlineRegular />, disabled: !hasSession },
               { id: 'json', label: t('Download JSON'), icon: <IconDownloadOutlineRegular />, disabled: !hasSession },
+              { id: 'copy-id', label: t('Copy session ID'), icon: <IconCopyOutlineRegular />, disabled: !hasSession },
               ...(authState.phase === 'ready' && authState.enabled ? [{ id: 'logout', label: t('Sign out') }] : []),
             ]}
             onSelect={(id) => {
               setMenuOpen(false);
               if (id === 'logout') void auth.logout();
-              else void store.exportSession(id === 'markdown' ? 'markdown' : 'json');
+              else if (id === 'copy-id') {
+                // The header names the session on screen, so the id copied here
+                // is the one the user is looking at, not a row picked elsewhere.
+                void store.copySessionId(app.sessionId ?? '').then((ok) => {
+                  if (ok) setCopied(Date.now());
+                });
+              } else void store.exportSession(id === 'markdown' ? 'markdown' : 'json');
             }}
             anchor={(
               <Tooltip label={t('Export session')} delayMs={400}>
@@ -173,6 +182,14 @@ export function Header({ sidebarOpen, onToggleSidebar, rightOpen, onToggleRight 
           </div>
         )}
       </div>
+      {copied !== null && (
+        <Toast
+          key={copied}
+          text={t('Session ID copied')}
+          tone="success"
+          onDone={() => { setCopied(null); }}
+        />
+      )}
     </header>
   );
 }

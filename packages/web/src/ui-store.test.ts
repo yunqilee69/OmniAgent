@@ -1842,4 +1842,26 @@ describe('workbench store', () => {
     expect(calls).toEqual(['compact']);
     expect(store.getSnapshot().alert).not.toBe('');
   });
+
+  it('copies a session id to the clipboard and reports a refused write', async () => {
+    const writeText = vi.fn(async () => {});
+    vi.stubGlobal('navigator', { clipboard: { writeText } });
+    const store = await boot(sessionFetcher((url) => url === '/api/workspaces/a/sessions/shared' ? json(detail()) : undefined));
+
+    await expect(store.copySessionId('shared')).resolves.toBe(true);
+    expect(writeText).toHaveBeenCalledWith('shared');
+    expect(store.getSnapshot().alert).toBe('');
+
+    writeText.mockRejectedValueOnce(new Error('denied'));
+    await expect(store.copySessionId('shared')).resolves.toBe(false);
+    expect(store.getSnapshot().alert).not.toBe('');
+  });
+
+  it('fails closed when the clipboard API is unavailable', async () => {
+    vi.stubGlobal('navigator', {});
+    const store = await boot(sessionFetcher((url) => url === '/api/workspaces/a/sessions/shared' ? json(detail()) : undefined));
+
+    await expect(store.copySessionId('shared')).resolves.toBe(false);
+    expect(store.getSnapshot().alert).not.toBe('');
+  });
 });

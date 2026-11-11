@@ -646,15 +646,9 @@ export function Sidebar({ drawer, onClose, onBrowseWorkspace }: { drawer: boolea
                                 } else if (action === 'fork') {
                                   void store.forkSession(session.id, item.id);
                                 } else if (action === 'copy-id') {
-                                  const clipboard = navigator.clipboard;
-                                  if (clipboard?.writeText === undefined) {
-                                    store.showAlert(t('Clipboard access is unavailable.'));
-                                    return;
-                                  }
-                                  void clipboard.writeText(session.id).then(
-                                    () => { setCopied(Date.now()); },
-                                    () => { store.showAlert(t('Clipboard access is unavailable.')); },
-                                  );
+                                  void store.copySessionId(session.id).then((ok) => {
+                                    if (ok) setCopied(Date.now());
+                                  });
                                 } else if (action === 'delete') {
                                   setDeleteTarget({ workspaceId: item.id, id: session.id, name });
                                 }
