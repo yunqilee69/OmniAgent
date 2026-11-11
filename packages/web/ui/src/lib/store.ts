@@ -1511,6 +1511,51 @@ export class AppStore {
     }
   }
 
+  /**
+   * Archive or restore one session.
+   *
+   * Archiving never deletes anything: it appends a `session/archived` event, so
+   * the transcript, its title and its subagents stay readable by id while the
+   * row leaves the sidebar and every session search. Restoring re-reads the list
+   * the sidebar renders instead of inventing a row locally.
+   * @param id - session to change.
+   * @param archived - `true` hides the session, `false` brings it back.
+   * @param workspaceId - workspace that owns the session.
+   * @returns whether the host accepted the change.
+   */
+  async setSessionArchived(id: string, archived: boolean, workspaceId = this.state.workspaceId): Promise<boolean> {
+    if (workspaceId === null) return false;
+    try {
+      const body = await this.api<{ archived?: unknown }>(
+        sessionApiPath(workspaceId, id, 'archive'),
+        jsonOptions('POST', { archived }),
+      );
+      if (body.archived !== archived) throw new Error(translator(this.state.locale)('The server returned a different archive state.'));
+      if (archived) this.updateWorkspaceSessions(workspaceId, (sessions) => sessions.filter((session) => session.id !== id));
+      else await this.refreshSessions(workspaceId);
+      return true;
+    } catch (error) {
+      this.showAlert(translator(this.state.locale)('Could not update session archive: {message}', { message: (error as Error).message }));
+      return false;
+    }
+  }
+
+  /**
+   * List the workspace's archived sessions for the archive dialog.
+   *
+   * This deliberately bypasses `sessionsByWorkspace`: archived rows must not
+   * re-enter the sidebar list, so the dialog keeps its own copy.
+   * @param workspaceId - workspace to read archived sessions from.
+   * @returns archived summaries, newest first.
+   * @throws when the host rejects the request.
+   */
+  async listArchivedSessions(workspaceId = this.state.workspaceId): Promise<SessionSummary[]> {
+    if (workspaceId === null) return [];
+    const body = await this.api<{ sessions?: SessionSummary[] }>(`${sessionApiPath(workspaceId)}?archived=1`);
+    if (!Array.isArray(body.sessions)) throw new Error(translator(this.state.locale)('The server did not return a session list.'));
+    return sortSessions(body.sessions.filter((session) => session.archived === true));
+  }
+
   async forkSession(id: string, workspaceId = this.state.workspaceId): Promise<string | null> {
     if (workspaceId === null) return null;
     const selection = { workspaceId: this.state.workspaceId, sessionId: this.state.sessionId };

@@ -17,8 +17,11 @@ export type StopReason =
   | 'error';
 
 export interface AgentError {
+  /** Display-safe text. Provider failures use a redacted, bounded summary. */
   message: string;
   code?: string;
+  /** HTTP status when the failure came from a provider response. */
+  status?: number;
   retryable?: boolean;
 }
 

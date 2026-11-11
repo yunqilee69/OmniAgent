@@ -11,6 +11,7 @@ import { foldSessionTitle, hasHumanMessage, lastActivityTime } from './title';
 import type { SessionTitleSource } from './title';
 import { projectModeSelection } from './mode-selection';
 import { foldSessionPinned } from './pin';
+import { foldSessionArchived } from './archive';
 
 const StoredHeaderSchema = z.object({
   type: z.literal('session'),
@@ -143,6 +144,8 @@ export interface SessionSummary {
   titleSource?: SessionTitleSource;
   /** Present when the latest pin event pins this session. */
   pinned?: boolean;
+  /** Present when the latest archive event hides this session from listings. */
+  archived?: boolean;
   /** A freshly created session with no human-visible message yet. */
   blank: boolean;
   workspace: string;
@@ -553,6 +556,7 @@ function toSummary(log: SessionLog): SessionSummary {
     ...(log.header.description === undefined ? {} : { description: log.header.description }),
     ...(title === undefined ? {} : { title: title.title, titleSource: title.source }),
     ...(foldSessionPinned(events) ? { pinned: true } : {}),
+    ...(foldSessionArchived(events) ? { archived: true } : {}),
     blank: !hasHumanMessage(events),
     workspace: log.header.workspace,
     cwd: log.header.cwd,

@@ -2,7 +2,7 @@ import { describe, expect, it } from 'vitest';
 import { projectTraceEvents } from './trace-projection';
 
 describe('projectTraceEvents', () => {
-  it('projects known trace fields and omits stored call IDs', () => {
+  it('projects known trace fields, keeps the error text, and omits stored call IDs', () => {
     const events = projectTraceEvents([
       { seq: 1, ts: 100, type: 'trace/turn.start', data: { step: 0, prompt: 'PRIVATE PROMPT' } },
       {
@@ -41,9 +41,41 @@ describe('projectTraceEvents', () => {
       },
       { seq: 5, ts: 104, type: 'trace/turn.end', data: { reason: 'interrupted' } },
       { seq: 6, ts: 105, type: 'trace/context.compacted', data: { beforeTokens: 120, afterTokens: 30 } },
-      { seq: 7, ts: 106, type: 'trace/error', data: {} },
+      { seq: 7, ts: 106, type: 'trace/error', data: { message: 'PRIVATE ERROR' } },
     ]);
-    expect(JSON.stringify(events)).not.toMatch(/PRIVATE|private-call-id/);
+    expect(JSON.stringify(events)).not.toContain('private-call-id');
+    expect(JSON.stringify(events)).not.toContain('PRIVATE CODE');
+  });
+
+  it('keeps validated provider error identifiers and drops invalid ones', () => {
+    const events = projectTraceEvents([
+      {
+        seq: 8, ts: 107, type: 'trace/error',
+        data: {
+          message: 'HTTP 503 · all_backends_unavailable: no available backends',
+          code: 'all_backends_unavailable',
+          status: 503,
+          retryable: true,
+        },
+      },
+      {
+        seq: 9, ts: 108, type: 'trace/error',
+        data: { message: 'failed', code: 'not a code', status: 42, retryable: 'yes' },
+      },
+    ]);
+
+    expect(events).toEqual([
+      {
+        seq: 8, ts: 107, type: 'trace/error',
+        data: {
+          message: 'HTTP 503 · all_backends_unavailable: no available backends',
+          code: 'all_backends_unavailable',
+          status: 503,
+          retryable: true,
+        },
+      },
+      { seq: 9, ts: 108, type: 'trace/error', data: { message: 'failed' } },
+    ]);
   });
 
   it('supports legacy nested call and result envelopes without retaining their payloads', () => {

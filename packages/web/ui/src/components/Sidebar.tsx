@@ -4,6 +4,8 @@ import {
   Button,
   FishLogo,
   IconAlarmClockOutlineRegular,
+  IconArchiveOffOutlineRegular,
+  IconArchiveOutlineRegular,
   IconBranchOutlineRegular,
   IconCloseOutlineRegular,
   IconCopyOutlineRegular,
@@ -29,6 +31,7 @@ import {
 } from '../../vendor/primitives/index.ts';
 import { DirectoryPicker } from './DirectoryPicker.tsx';
 import { store, sessionKey, useApp } from '../lib/store.ts';
+import type { SessionSummary } from '../lib/wire.ts';
 import { relativeDate } from '../lib/trajectory.ts';
 import { runningSubagentCounts, sessionRowStatuses, showsRowDot } from '../lib/session-status.ts';
 import { translator } from '../lib/i18n.ts';
@@ -36,6 +39,9 @@ import pickerCss from '../styles/directory-picker.module.css';
 import sidebarCss from '../styles/dsh/sidebar.module.css';
 import browserCss from '../styles/dsh/sidebar-browser.module.css';
 import appCss from '../styles/app.module.css';
+
+/** Session rows a workspace group renders before the "Show more" button does. */
+const SESSIONS_PER_PAGE = 5;
 
 function baseName(path: string): string {
   const parts = path.split(/[\\/]/).filter((part) => part !== '');
@@ -224,6 +230,92 @@ function DeleteSessionDialog({ workspaceId, id, name, onClose }: { workspaceId: 
   );
 }
 
+/**
+ * Archived sessions for one workspace, with a restore action per row.
+ *
+ * Archived sessions keep their transcript on disk but leave the sidebar and
+ * session search, so this dialog is the only place they can be found and
+ * brought back. The list is read on open and after every restore instead of
+ * being folded into the sidebar list.
+ */
+function ArchivedSessionsDialog({ workspaceId, workspaceName, onClose }: {
+  workspaceId: string;
+  workspaceName: string;
+  onClose: () => void;
+}): ReactNode {
+  const app = useApp();
+  const t = translator(app.locale);
+  const [sessions, setSessions] = useState<SessionSummary[] | null>(null);
+  const [error, setError] = useState('');
+  const [restoring, setRestoring] = useState<string | null>(null);
+  useEffect(() => {
+    let cancelled = false;
+    void store.listArchivedSessions(workspaceId).then((items) => {
+      if (cancelled) return;
+      setSessions(items);
+      setError('');
+    }).catch((cause: Error) => {
+      if (cancelled) return;
+      setSessions([]);
+      setError(t('Could not load archived sessions: {message}', { message: cause.message }));
+    });
+    return () => { cancelled = true; };
+  }, [workspaceId]);
+  const restore = (id: string): void => {
+    if (restoring !== null) return;
+    setRestoring(id);
+    void store.setSessionArchived(id, false, workspaceId).then((ok) => {
+      setRestoring(null);
+      if (!ok) return;
+      setSessions((current) => (current ?? []).filter((session) => session.id !== id));
+    });
+  };
+  return (
+    <Modal
+      open
+      onClose={onClose}
+      title={t('Archived sessions')}
+      description={t('Archived sessions are hidden from the sidebar and from session search. Their transcripts stay on disk.')}
+      closeLabel={t('Close')}
+      className={pickerCss.dialog}
+      contentClassName={pickerCss.scrollContent}
+      footer={<Button variant="outline" onClick={onClose}>{t('Close')}</Button>}
+    >
+      {workspaceName !== '' && <p className={browserCss.archivedContext}>{workspaceName}</p>}
+      <div className={browserCss.archivedList} role="list" aria-label={t('Archived sessions')}>
+        {sessions === null && <div className={browserCss.emptyRow}>{t('Loading archived sessions…')}</div>}
+        {error !== '' && <div className={browserCss.emptyRow}>{error}</div>}
+        {sessions !== null && error === '' && sessions.length === 0 && (
+          <div className={browserCss.emptyRow}>{t('No archived sessions.')}</div>
+        )}
+        {(sessions ?? []).map((session) => {
+          const title = typeof session.title === 'string' ? session.title.trim() : '';
+          const description = typeof session.description === 'string' ? session.description.trim() : '';
+          const label = description !== '' ? description : title !== '' ? title : t('Untitled');
+          return (
+            <div key={session.id} className={browserCss.archivedRow} role="listitem" title={session.id}>
+              <IconArchiveOutlineRegular size={14} />
+              <span className={browserCss.archivedTitle}>{label}</span>
+              <span className={browserCss.archivedTime}>{relativeDate(session.updatedAt ?? session.createdAt, app.locale)}</span>
+              <Tooltip label={t('Restore session')} delayMs={400}>
+                <button
+                  type="button"
+                  className={browserCss.restoreButton}
+                  aria-label={t('Restore session')}
+                  disabled={restoring !== null}
+                  onClick={() => { restore(session.id); }}
+                >
+                  <IconArchiveOffOutlineRegular size={14} />
+                </button>
+              </Tooltip>
+            </div>
+          );
+        })}
+      </div>
+    </Modal>
+  );
+}
+
 function NavRow({ icon, label, active, onClick }: { icon: ReactNode; label: string; active?: boolean; onClick: () => void }): ReactNode {
   return (
     <div className={clsx(sidebarCss.panelEntry, sidebarCss.panelEntryWide, active && sidebarCss.panelEntryActive)}>
@@ -249,6 +341,10 @@ export function Sidebar({ drawer, onClose, onBrowseWorkspace }: { drawer: boolea
   const [deleteTarget, setDeleteTarget] = useState<{ workspaceId: string; id: string; name: string } | null>(null);
   const [copied, setCopied] = useState<number | null>(null);
   const [expandedOverrides, setExpandedOverrides] = useState<Record<string, boolean>>({});
+  // One window per workspace group: the sidebar renders the newest few sessions
+  // and grows by a page per "Show more" click instead of dumping the whole list.
+  const [visibleCounts, setVisibleCounts] = useState<Record<string, number>>({});
+  const [archiveOpen, setArchiveOpen] = useState(false);
   useEffect(() => {
     if (app.workspaceId === null) return;
     const workspaceId = app.workspaceId;
@@ -366,6 +462,17 @@ export function Sidebar({ drawer, onClose, onBrowseWorkspace }: { drawer: boolea
                   <>
                     <span className={browserCss.sectionLabel}>{t('Workspace')}</span>
                     <div className={browserCss.headerActions}>
+                      <Tooltip label={t('Archived sessions')} delayMs={400}>
+                        <button
+                          type="button"
+                          className={browserCss.iconButton}
+                          aria-label={t('Archived sessions')}
+                          disabled={app.workspaceId === null}
+                          onClick={() => { setArchiveOpen(true); }}
+                        >
+                          <IconArchiveOutlineRegular size={14} />
+                        </button>
+                      </Tooltip>
                       <Tooltip label={t('Search sessions')} delayMs={400}>
                         <button type="button" className={browserCss.iconButton} aria-label={t('Search sessions')} onClick={() => { setSearchOpen(true); }}>
                           <IconSearchOutlineRegular size={14} />
@@ -434,7 +541,10 @@ export function Sidebar({ drawer, onClose, onBrowseWorkspace }: { drawer: boolea
                   const needle = query.trim().toLowerCase();
                   // Child sessions are reached from the header team card, not
                   // from the task list: one row per conversation the user started.
-                  const roots = list.sessions.filter((session) => String(session.parentSessionId ?? '') === '');
+                  // Archived rows never appear here; the archive dialog is their
+                  // only entry point.
+                  const roots = list.sessions.filter((session) =>
+                    String(session.parentSessionId ?? '') === '' && session.archived !== true);
                   // A subagent turn never reaches this tab's turn registry, so the
                   // parent row carries the work its running children still owe.
                   const subagentCounts = runningSubagentCounts(list.sessions, (child) =>
@@ -443,6 +553,15 @@ export function Sidebar({ drawer, onClose, onBrowseWorkspace }: { drawer: boolea
                   const sessions = needle === '' ? roots : roots.filter((session) =>
                     [session.id, session.title, session.agent, session.agentId, session.cwd, session.description]
                       .some((value) => String(value ?? '').toLowerCase().includes(needle)));
+                  // A search result set is shown whole: a hit the user cannot see
+                  // would read as "not found". The selected row always stays
+                  // visible even when it sits below the current window.
+                  const selectedIndex = needle === '' && active
+                    ? sessions.findIndex((session) => session.id === app.sessionId)
+                    : -1;
+                  const visibleCount = Math.max(visibleCounts[item.id] ?? SESSIONS_PER_PAGE, selectedIndex + 1);
+                  const visible = needle === '' ? sessions.slice(0, visibleCount) : sessions;
+                  const hidden = sessions.length - visible.length;
                   const menuOpen = workspaceMenuOpen === item.id;
                   const workspaceLabel = item.name || item.path || item.id;
                   const rowMenuItems: MenuEntry[] = [
@@ -537,7 +656,7 @@ export function Sidebar({ drawer, onClose, onBrowseWorkspace }: { drawer: boolea
                         {query.trim() === '' ? t('No sessions yet.') : t('No matching sessions.')}
                       </div>
                     )}
-                    {expanded && !list.loading && list.error === '' && sessions.map((session) => {
+                    {expanded && !list.loading && list.error === '' && visible.map((session) => {
                       const description = typeof session.description === 'string' ? session.description.trim() : '';
                       const title = typeof session.title === 'string' ? session.title.trim() : '';
                       const name = description !== ''
@@ -612,6 +731,7 @@ export function Sidebar({ drawer, onClose, onBrowseWorkspace }: { drawer: boolea
                                 },
                                 { id: 'rename', label: t('Rename session'), icon: <IconEditOutlineRegular size={14} /> },
                                 { id: 'fork', label: t('Fork session'), icon: <IconBranchOutlineRegular size={14} /> },
+                                { id: 'archive', label: t('Archive session'), icon: <IconArchiveOutlineRegular size={14} /> },
                                 { type: 'separator', id: 'session-actions' },
                                 { id: 'copy-id', label: t('Copy session ID'), icon: <IconCopyOutlineRegular size={14} /> },
                                 { type: 'separator', id: 'session-danger' },
@@ -645,6 +765,8 @@ export function Sidebar({ drawer, onClose, onBrowseWorkspace }: { drawer: boolea
                                   setRenameTarget({ workspaceId: item.id, id: session.id, name: title !== '' ? title : description });
                                 } else if (action === 'fork') {
                                   void store.forkSession(session.id, item.id);
+                                } else if (action === 'archive') {
+                                  void store.setSessionArchived(session.id, true, item.id);
                                 } else if (action === 'copy-id') {
                                   void store.copySessionId(session.id).then((ok) => {
                                     if (ok) setCopied(Date.now());
@@ -658,6 +780,20 @@ export function Sidebar({ drawer, onClose, onBrowseWorkspace }: { drawer: boolea
                         </div>
                       );
                     })}
+                    {expanded && !list.loading && list.error === '' && hidden > 0 && (
+                      <button
+                        type="button"
+                        className={browserCss.showMore}
+                        onClick={() => {
+                          setVisibleCounts((value) => ({
+                            ...value,
+                            [item.id]: (value[item.id] ?? SESSIONS_PER_PAGE) + SESSIONS_PER_PAGE,
+                          }));
+                        }}
+                      >
+                        {t('Show more ({count})', { count: Math.min(SESSIONS_PER_PAGE, hidden) })}
+                      </button>
+                    )}
                   </div>
                   );
                 })}
@@ -668,6 +804,14 @@ export function Sidebar({ drawer, onClose, onBrowseWorkspace }: { drawer: boolea
       </div>
 
       <WorkspaceDialog open={addOpen} onClose={() => { setAddOpen(false); }} />
+      {archiveOpen && app.workspaceId !== null && (
+        <ArchivedSessionsDialog
+          key={`archived:${app.workspaceId}`}
+          workspaceId={app.workspaceId}
+          workspaceName={workspace?.name || workspace?.path || ''}
+          onClose={() => { setArchiveOpen(false); }}
+        />
+      )}
       <RemoveWorkspaceDialog
         id={removeTarget?.id ?? null}
         name={removeTarget?.name ?? ''}

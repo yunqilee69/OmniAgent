@@ -113,9 +113,17 @@ export function eventMetadata(event: unknown): Metadata {
     add('Before tokens', data.beforeTokens);
     add('After tokens', data.afterTokens);
   } else if (eventType === 'error') {
-    const error = typeof data.error === 'object' && data.error !== null ? data.error as Record<string, unknown> : {};
-    add('Code', error.code);
-    add('Retryable', error.retryable);
+    // Persisted trace envelopes keep their fields at the top level; only live
+    // error events nest the AgentError. Never copy a nested payload from a
+    // stored envelope, because it is attacker-controlled history.
+    const persisted = type.startsWith('trace/');
+    const error = !persisted && typeof data.error === 'object' && data.error !== null
+      ? data.error as Record<string, unknown>
+      : {};
+    add('Message', persisted ? data.message : undefined);
+    add('Code', persisted ? data.code : error.code);
+    add('Status', persisted ? data.status : error.status);
+    add('Retryable', persisted ? data.retryable : error.retryable);
   }
   return metadata;
 }
@@ -159,7 +167,19 @@ export function safeEventMetadata(event: unknown): Metadata {
   for (const label of ['Success', 'Truncated']) {
     if (typeof raw[label] === 'boolean') metadata[label] = raw[label] as boolean;
   }
+  if (type === 'trace/error') {
+    if (typeof raw.Message === 'string') metadata.Message = clipText(raw.Message, 500);
+    if (typeof raw.Code === 'string' && /^[A-Za-z0-9][A-Za-z0-9_.:-]{0,63}$/.test(raw.Code)) metadata.Code = raw.Code;
+    if (integer(raw.Status) && raw.Status >= 100 && raw.Status <= 599) metadata.Status = raw.Status as number;
+    if (typeof raw.Retryable === 'boolean') metadata.Retryable = raw.Retryable;
+  }
   return metadata;
+}
+
+/** Collapse whitespace and cap length so a value fits one table row. */
+export function clipText(value: string, limit: number): string {
+  const collapsed = value.replace(/[\u0000-\u001f\u007f]+/g, ' ').replace(/\s+/g, ' ').trim();
+  return collapsed.length > limit ? `${collapsed.slice(0, limit - 1)}…` : collapsed;
 }
 
 export interface LedgerEvent {
@@ -205,6 +225,7 @@ export function eventSummary(metadata: Metadata): string {
   if (metadata['Before tokens'] !== undefined && metadata['After tokens'] !== undefined) {
     parts.push(`${metadata['Before tokens']} → ${metadata['After tokens']} tokens`);
   }
+  if (metadata.Message !== undefined) parts.push(clipText(String(metadata.Message), 120));
   return parts.join(' · ');
 }
 
@@ -247,4 +268,60 @@ export function recordLabel(record: TrajectoryRecord): string {
   if (record.kind === 'model') return 'Model response';
   if (record.kind === 'tool') return record.name ?? 'Tool';
   return 'Record';
+}
+
+export interface RecordSection {
+  /** Source string stays an i18n key so the UI can translate it. */
+  label: string;
+  value: string;
+  tone: 'default' | 'error';
+  /** JSON payloads read better in a code face; prose does not. */
+  mono: boolean;
+}
+
+/**
+ * Text a reader can actually inspect for one record: the message that was sent or
+ * received, and the arguments and output of a tool call.
+ */
+export function recordSections(record: TrajectoryRecord): RecordSection[] {
+  if (record.kind === 'input') {
+    return record.text ? [{ label: 'User message', value: record.text, tone: 'default', mono: false }] : [];
+  }
+  if (record.kind === 'model') {
+    return record.text ? [{ label: 'Assistant message', value: record.text, tone: 'default', mono: false }] : [];
+  }
+  const failed = record.ok === false;
+  const sections: RecordSection[] = [];
+  if (record.arguments) sections.push({ label: 'Arguments', value: record.arguments, tone: 'default', mono: true });
+  if (record.output) {
+    sections.push({
+      label: failed ? 'Failure output' : 'Output',
+      value: record.output,
+      tone: failed ? 'error' : 'default',
+      mono: true,
+    });
+  }
+  return sections;
+}
+
+/** One-line hint for the record list; a failure surfaces its reason first. */
+export function recordPreview(record: TrajectoryRecord): string {
+  let source = record.text;
+  if (record.kind === 'tool') {
+    source = record.ok === false
+      ? record.output ?? record.arguments
+      : record.arguments ?? record.output;
+  }
+  return source ? clipText(source, 160) : '';
+}
+
+/** Everything a search query should match for one record, content included. */
+export function recordSearchText(record: TrajectoryRecord): string {
+  return [
+    Object.values(recordMetadata(record)).join(' '),
+    record.name ?? '',
+    record.text ?? '',
+    record.arguments ?? '',
+    record.output ?? '',
+  ].join(' ').toLowerCase();
 }

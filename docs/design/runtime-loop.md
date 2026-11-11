@@ -236,10 +236,12 @@ tool call 的分片在 provider 内部累积，循环只有在流结束拿到完
 
 | 出错位置 | 表现 |
 | --- | --- |
-| provider / stream | `error` 事件 + `turn.end(error)` |
+| provider / stream | `error` 事件（含可用的 HTTP status / provider code / 脱敏摘要）+ `turn.end(error)` |
 | 工具执行 | `ToolExecutor` 转成 `ok:false` 的 `ToolResult`，循环继续 |
 | `prepareToolCall` / 权限 hook / 审计 sink | **异常穿透 generator**，由 Session 捕获并写脱敏 trace，最终 `send()` reject |
 | UI 在消费事件时抛错 | 不属于 core 责任；generator 的 `return()` 会触发清理 |
+
+Provider 失败只有在响应体是结构化 JSON 时才会透出 `status`、`code` 和 `message`；消息会去掉控制字符、裁剪长度并脱敏常见凭据（`sk-*`、`Bearer *`、`api_key=*` 等）。无法结构化的响应体只保留 HTTP status，不把原始正文带进事件或 trace。其余内部异常仍在持久化时写成固定文案。
 
 因此，前端不能假设所有失败都会以 `error` 事件结束。Web 在 SSE 流里对「headers 已发送后的异常」补发 `error` + `turn.end(error)`；TUI 在 `send()` reject 时打印错误。
 
@@ -262,7 +264,7 @@ tool call 的分片在 provider 内部累积，循环只有在流结束拿到完
 | `tool.result` | `ToolResult` | `message/tool-result` | |
 | `context.compacted` | `beforeTokens`, `afterTokens` | `trace/context.compacted` | |
 | `turn.end` | `reason` | `trace/turn.end` | |
-| `error` | `AgentError` | `trace/error` | trace 中只记录固定文案 |
+| `error` | `AgentError` | `trace/error` | 结构化 provider 失败保留 status / code / 脱敏摘要；其余失败写固定文案 |
 
 `isTerminalEvent()` 把 `turn.end` 和 `error` 都视为 terminal，但实际循环会先发 `error` 再发 `turn.end(error)`。UI 如果只监听 terminal 事件，应保留 `turn.end` 作为最终状态。
 
@@ -365,5 +367,5 @@ Web 会在 `tool.call` 与 `permission.decided` 之间看到 `permission.request
 - `AgentLoop` 不负责审批 UI、持久化或会话选择；这些都在 Session / 前端。
 - `turn.start` 的 `step` 在每个 `run()` 内从 0 重新计数；goal 续轮会重新从 0 开始。
 - `max_tokens` 不执行工具，但 assistant 消息仍会被持久化，下一轮通过历史修复补齐结果。
-- 核心的 `error` 事件只包含异常 message；Web 在对外流中会把错误替换为固定文案，避免泄露内部信息。
+- 核心的 `error` 事件保留异常 message；结构化 provider 失败会附带 `code` / `status` / `retryable`。Web 对外流只透传这套已脱敏的结构化字段，其他错误仍替换为固定文案，避免泄露内部信息。
 - 协议中的 `permission.requested` / `plan.review.*` 是「可选的事件化审批」接口，不是所有 embedder 都必须实现。

@@ -397,6 +397,7 @@ goal 轮中完成或阻塞后，Session 通过 `deferGoalContext()` 注入 `<goa
 | `goal/change` | GoalController | `projectGoal`、goal 工具 |
 | `session/title` | `ensureTitle` / Web PATCH | `foldSessionTitle`、列表 |
 | `session/pinned` | Web pin 路由 | `projectPin`、列表 |
+| `session/archived` | Web archive 路由 | `foldSessionArchived`、列表/搜索过滤 |
 | `trace/*` | Session | trace 投影、轨迹、审计 |
 | `permission/dsh-preset` | 新会话创建 / 显式切换 | `projectDshPermissions` |
 | `agent/selected` | TUI / Web 创建或切换 | `projectAgentSelection` |

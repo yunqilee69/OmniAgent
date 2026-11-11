@@ -11,7 +11,7 @@ const hosts: WebHost[] = [];
 afterEach(async () => { await Promise.all(hosts.splice(0).map((host) => host.close())); });
 
 describe('session trajectory projection', () => {
-  it('projects ordered persisted activity without exposing arguments, output or private metadata', async () => {
+  it('projects ordered persisted activity with its readable content but without private metadata', async () => {
     const root = await mkdtemp(join(tmpdir(), 'omniagent-web-trajectory-'));
     const workspacePath = join(root, 'project');
     await mkdir(workspacePath);
@@ -57,11 +57,18 @@ describe('session trajectory projection', () => {
     expect(JSON.stringify(body.metrics)).not.toContain('SECRET');
     expect(body.trajectory.version).toBe(1);
     expect(body.trajectory.records.map((record) => record.kind)).toEqual(['input', 'model', 'tool']);
-    expect(body.trajectory.records[0]).toMatchObject({ kind: 'input', seq: 0, timestamp: 1000 });
-    expect(body.trajectory.records[2]).toMatchObject({ kind: 'tool', name: 'read_file', durationMs: 17, ok: true, decision: 'allow' });
+    expect(body.trajectory.records[0]).toMatchObject({
+      kind: 'input', seq: 0, timestamp: 1000, text: 'SECRET USER CONTENT',
+    });
+    expect(body.trajectory.records[1]).toMatchObject({ kind: 'model', text: 'SECRET ASSISTANT CONTENT' });
+    expect(body.trajectory.records[2]).toMatchObject({
+      kind: 'tool', name: 'read_file', durationMs: 17, ok: true, decision: 'allow',
+      arguments: '{\n  "file_path": "SECRET ARGUMENT"\n}', output: 'SECRET OUTPUT',
+    });
     expect(body.trajectory.timeline.sequence).toHaveLength(3);
     expect(body.trajectory.timeline.time).toHaveLength(3);
-    expect(JSON.stringify(body.trajectory)).not.toContain('SECRET');
+    // Permission rule text stays out of the payload; content is served by design.
+    expect(JSON.stringify(body.trajectory)).not.toContain('SECRET METADATA');
     expect(body.events.map((event) => event.type)).toContain('trace/permission.decided');
     expect(JSON.stringify(body.events)).not.toContain('SECRET');
 

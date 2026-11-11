@@ -107,7 +107,7 @@ TUI 的审计在 `<workspace>/.omniagent/audit.jsonl`。附件批次由 Web 回�
 - 工具错误 → 返回 `ok:false` 的 `ToolOutput`，不要抛穿主循环；
 - 配置 / schema 错误 → 明确失败，不回退旧值；
 - 前端 HTTP 错误 → `HttpError(status, message)`；
-- 内部异常 → 脱敏后返回固定文案，原始错误只写本地日志 / trace 固定文案。
+- 内部异常 → 脱敏后返回固定文案；结构化 provider 失败可透传 status / code / 脱敏摘要，原始正文仍只写本地日志。
 
 ### 4.5 注释
 

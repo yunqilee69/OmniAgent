@@ -222,6 +222,80 @@ describe('workspace sidebar', () => {
     expect(html).toContain('1 subagents running');
   });
 
+  it('renders five sessions per group and offers the next five on demand', () => {
+    const sessions = Array.from({ length: 12 }, (_, index) => ({
+      id: `session-${index}`,
+      title: `Session ${index}`,
+      updatedAt: 100 - index,
+    }));
+    const html = renderSidebar({ sessions });
+    expect(html).toContain('Session 4');
+    expect(html).not.toContain('Session 5');
+    expect(html).toContain('Show more (5)');
+  });
+
+  it('keeps archived sessions out of the list and offers the archive view', () => {
+    const html = renderSidebar({
+      sessions: [
+        { id: 'visible', title: 'Visible session' },
+        { id: 'hidden', title: 'Filed away', archived: true },
+      ],
+    });
+    expect(html).toContain('Visible session');
+    expect(html).not.toContain('Filed away');
+    expect(html).toContain('aria-label="Archived sessions"');
+  });
+
+  it('archives a session from its row menu', async () => {
+    vi.resetModules();
+    const hooks: unknown[] = [];
+    let cursor = 0;
+    vi.doMock('react', async (importOriginal) => {
+      const react = await importOriginal<typeof import('react')>();
+      return {
+        ...react,
+        useState: (initial: unknown) => {
+          const index = cursor++;
+          if (!(index in hooks)) hooks[index] = typeof initial === 'function' ? (initial as () => unknown)() : initial;
+          return [hooks[index], (next: unknown) => { hooks[index] = typeof next === 'function' ? (next as (value: unknown) => unknown)(hooks[index]) : next; }];
+        },
+        useMemo: (factory: () => unknown) => factory(),
+        useEffect: (effect: () => void) => effect(),
+        useSyncExternalStore: (_subscribe: unknown, getSnapshot: () => unknown) => getSnapshot(),
+      };
+    });
+    try {
+      const { Sidebar: TestSidebar } = await import('../ui/src/components/Sidebar.tsx');
+      const { store: testStore, AppStore: TestStore } = await import('../ui/src/lib/store.ts');
+      const state = {
+        ...new TestStore().getSnapshot(), locale: 'en' as const, workspaces, workspaceId: 'a',
+        workspacesLoading: false, sessionsLoading: false,
+        sessions: [{ id: 'shared', title: 'Alpha session' }],
+      };
+      vi.spyOn(testStore, 'getSnapshot').mockReturnValue(state);
+      const archive = vi.spyOn(testStore, 'setSessionArchived').mockResolvedValue(true);
+      type Tree = { props?: { children?: unknown; role?: string; title?: string; items?: Array<{ id: string }>; onSelect?: (id: string) => void } };
+      const nodes = (value: unknown): Tree[] => {
+        if (Array.isArray(value)) return value.flatMap(nodes);
+        if (typeof value !== 'object' || value === null) return [];
+        const node = value as Tree;
+        return [node, ...nodes(node.props?.children)];
+      };
+      cursor = 0;
+      const tree = nodes(TestSidebar({ drawer: false, onClose: () => {} }));
+      const row = tree.find((node) => node.props?.role === 'treeitem' && node.props.title === 'shared')!;
+      const menu = nodes(row).find((node) => node.props?.items?.some((item) => item.id === 'archive'))!;
+      expect(menu.props?.items?.map((item) => item.id)).toEqual([
+        'pin', 'rename', 'fork', 'archive', 'session-actions', 'copy-id', 'session-danger', 'delete',
+      ]);
+      menu.props?.onSelect?.('archive');
+      expect(archive).toHaveBeenCalledWith('shared', true, 'a');
+    } finally {
+      vi.doUnmock('react');
+      vi.resetModules();
+    }
+  });
+
   it('shows the newly active workspace sessions after a switch', () => {
     const html = renderSidebar({
       workspaceId: 'b',

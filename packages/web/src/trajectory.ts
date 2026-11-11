@@ -49,10 +49,14 @@ interface TrajectoryRecordBase {
   stepId: string | null;
   step: number | null;
   timestamp: number | null;
+  /** True when a content field was clipped by the projection limit. */
+  clipped: boolean;
 }
 
 export interface TrajectoryInputRecord extends TrajectoryRecordBase {
   kind: 'input';
+  /** The user's own words: message text or the text parts of the message content. */
+  text: string | null;
 }
 
 export interface TrajectoryModelRecord extends TrajectoryRecordBase {
@@ -61,6 +65,8 @@ export interface TrajectoryModelRecord extends TrajectoryRecordBase {
   assistantRecordedAt: number | null;
   inputTokens: number | null;
   outputTokens: number | null;
+  /** The assistant's message text; reasoning and replay payloads stay out. */
+  text: string | null;
 }
 
 export interface TrajectoryToolRecord extends TrajectoryRecordBase {
@@ -74,6 +80,10 @@ export interface TrajectoryToolRecord extends TrajectoryRecordBase {
   ok: boolean | null;
   truncated: boolean | null;
   decision: 'allow' | 'deny' | null;
+  /** The call arguments as pretty-printed JSON, so a reader can see what ran. */
+  arguments: string | null;
+  /** The tool result text a model saw; for failures this carries the reason. */
+  output: string | null;
 }
 
 export type TrajectoryRecord = TrajectoryInputRecord | TrajectoryModelRecord | TrajectoryToolRecord;
@@ -103,6 +113,8 @@ interface ToolObservation {
   ok: boolean | null;
   truncated: boolean | null;
   decision: 'allow' | 'deny' | null;
+  arguments: unknown;
+  content: string | null;
 }
 
 interface ToolGroup {
@@ -146,6 +158,44 @@ function toolName(value: string | null): TrajectoryToolName | null {
   return value !== null && TRAJECTORY_TOOL_NAMES.has(value) ? value as TrajectoryToolName : null;
 }
 
+/** Content longer than this many characters is clipped out of a projection. */
+export const TRAJECTORY_CONTENT_LIMIT = 8_000;
+
+interface Content {
+  value: string;
+  clipped: boolean;
+}
+
+function content(value: string): Content | null {
+  if (value.length === 0) return null;
+  return value.length > TRAJECTORY_CONTENT_LIMIT
+    ? { value: value.slice(0, TRAJECTORY_CONTENT_LIMIT), clipped: true }
+    : { value, clipped: false };
+}
+
+/** Message body text: either a plain string or the text parts of a content array. */
+function messageText(value: unknown): Content | null {
+  if (typeof value === 'string') return content(value);
+  if (!Array.isArray(value)) return null;
+  const text = value.flatMap((part) => {
+    const item = object(part);
+    return item?.type === 'text' && typeof item.text === 'string' ? [item.text] : [];
+  }).join('\n\n');
+  return content(text);
+}
+
+/** Tool arguments as pretty-printed JSON, so a reader can see what actually ran. */
+function argumentText(value: unknown): Content | null {
+  if (value === undefined || value === null) return null;
+  if (typeof value === 'string') return content(value);
+  try {
+    const serialized = JSON.stringify(value, null, 2);
+    return serialized === undefined ? null : content(serialized);
+  } catch {
+    return null;
+  }
+}
+
 function endReason(value: unknown): TrajectoryEndReason | null {
   switch (value) {
     case 'end_turn': case 'tool_use': case 'max_tokens': case 'max_steps': case 'interrupted': case 'error':
@@ -160,6 +210,7 @@ function decision(value: unknown): 'allow' | 'deny' | null {
 }
 
 function observation(kind: ToolObservationKind, event: TrajectoryEvent, data: Data | null, index = 0): ToolObservation {
+  const isResult = kind === 'message-result' || kind === 'trace-result';
   return {
     kind, event, index,
     callId: string(kind === 'assistant-call' || kind === 'trace-call' ? data?.id : data?.callId),
@@ -168,6 +219,8 @@ function observation(kind: ToolObservationKind, event: TrajectoryEvent, data: Da
     ok: boolean(data?.ok),
     truncated: boolean(data?.truncated),
     decision: decision(data?.decision),
+    arguments: isResult ? undefined : data?.arguments,
+    content: isResult ? string(data?.content) : null,
   };
 }
 
@@ -242,6 +295,8 @@ function projectTools(group: ToolGroup): TrajectoryToolRecord[] {
     const call = sorted.find((candidate) => candidate.kind === 'trace-call');
     const result = sorted.find((candidate) => candidate.kind === 'message-result' || candidate.kind === 'trace-result');
     const resultItems = sorted.filter((candidate) => candidate.kind === 'message-result' || candidate.kind === 'trace-result');
+    const args = argumentText(sorted.find((candidate) => candidate.arguments !== undefined)?.arguments);
+    const output = content(resultItems.find((candidate) => candidate.content !== null)?.content ?? '');
     return {
       id: `tool:${first.event.seq}:${first.index}`,
       kind: 'tool',
@@ -259,6 +314,9 @@ function projectTools(group: ToolGroup): TrajectoryToolRecord[] {
       ok: consistent(resultItems.map((candidate) => candidate.ok)),
       truncated: consistent(resultItems.map((candidate) => candidate.truncated)),
       decision: consistent(sorted.map((candidate) => candidate.decision)),
+      arguments: args?.value ?? null,
+      output: output?.value ?? null,
+      clipped: args?.clipped === true || output?.clipped === true,
     };
   });
 }
@@ -285,7 +343,7 @@ function timeSpan(record: TrajectoryRecord): TrajectorySpan | null {
 }
 
 /**
- * Project a committed event snapshot to a privacy-limited, JSON-serializable ledger.
+ * Project a committed event snapshot to a bounded, JSON-serializable ledger.
  *
  * Sequence numbers determine order and identity; duplicate/invalid numbers throw.
  * Turns begin at user input or an otherwise unowned step, and repeated `turn.start`
@@ -293,8 +351,11 @@ function timeSpan(record: TrajectoryRecord): TrajectorySpan | null {
  * turn fragment. Tool associations never cross a step or user-turn boundary, and ambiguous IDs
  * remain separate. Orphan events have no turn. Unknown metadata is null.
  *
- * Tool names are restricted to built-ins; arbitrary names and IDs, all messages,
- * arguments, results, permission rules, and error strings are deliberately omitted.
+ * Records carry the text a reader needs — the user message, the assistant message,
+ * tool arguments and the tool result — clipped to {@link TRAJECTORY_CONTENT_LIMIT}
+ * characters and flagged with `clipped`. Still deliberately omitted: call IDs, tool
+ * names outside the built-in allowlist, permission rule text, reasoning and provider
+ * replay payloads, and error strings (the persisted error trace is a placeholder).
  * Model spans are observation points, not durations. Tool spans reflect recorded
  * call/result event times, not execution time; durationMs is separately recorded.
  */
@@ -349,8 +410,10 @@ export function projectTrajectory(events: readonly TrajectoryEvent[]): Trajector
       if (data?.role !== undefined && data.role !== 'user') continue;
       if (data?.source !== undefined && object(data.source)?.kind !== 'user') continue;
       beginTurn(event.seq, `input:${event.seq}`);
+      const input = messageText(data?.text) ?? messageText(data?.content);
       records.push({ id: `input:${event.seq}`, kind: 'input', seq: event.seq, turnId: turn!.id,
-        stepId: null, step: null, timestamp: timestamp(event) });
+        stepId: null, step: null, timestamp: timestamp(event),
+        text: input?.value ?? null, clipped: input?.clipped === true });
     } else if (event.type === 'trace/turn.start') {
       const stepNumber = integer(data?.step);
       if (turn === null || (stepSeen && stepNumber !== null
@@ -360,7 +423,8 @@ export function projectTrajectory(events: readonly TrajectoryEvent[]): Trajector
       stepSeen = true;
       step = { id: `model:${event.seq}`, kind: 'model', seq: event.seq, turnId: turn!.id,
         stepId: `step:${event.seq}`, step: stepNumber, timestamp: timestamp(event),
-        assistantSeq: null, assistantRecordedAt: null, inputTokens: null, outputTokens: null };
+        assistantSeq: null, assistantRecordedAt: null, inputTokens: null, outputTokens: null,
+        text: null, clipped: false };
       group = null;
       records.push(step);
     } else if (event.type === 'trace/turn.end') {
@@ -381,14 +445,18 @@ export function projectTrajectory(events: readonly TrajectoryEvent[]): Trajector
       else {
         model = { id: `model:${event.seq}`, kind: 'model', seq: event.seq, turnId: (turn as TrajectoryTurn | null)?.id ?? null,
           stepId: step?.stepId ?? null, step: step?.step ?? null, timestamp: timestamp(event),
-          assistantSeq: null, assistantRecordedAt: null, inputTokens: null, outputTokens: null };
+          assistantSeq: null, assistantRecordedAt: null, inputTokens: null, outputTokens: null,
+          text: null, clipped: false };
         records.push(model);
       }
       const usage = object(data?.usage);
+      const answer = messageText(data?.content);
       model.assistantSeq = event.seq;
       model.assistantRecordedAt = timestamp(event);
       model.inputTokens = integer(usage?.inputTokens);
       model.outputTokens = integer(usage?.outputTokens);
+      model.text = answer?.value ?? null;
+      model.clipped = model.clipped || answer?.clipped === true;
       if (Array.isArray(data?.toolCalls)) {
         for (const [index, value] of data.toolCalls.entries()) {
           const call = object(value);

@@ -976,10 +976,21 @@ export class Session {
           afterTokens: event.afterTokens,
         });
         break;
-      case 'error':
-        // Provider and tool errors can contain arbitrary credentials or conversation content.
-        await this.appendMessage('trace/error', { message: 'An error occurred during the turn.' });
+      case 'error': {
+        // Structured provider failures carry a redacted, bounded summary.
+        // Everything else can contain credentials or conversation content.
+        if (event.error.code === undefined && event.error.status === undefined) {
+          await this.appendMessage('trace/error', { message: 'An error occurred during the turn.' });
+          break;
+        }
+        await this.appendMessage('trace/error', {
+          message: event.error.message,
+          ...(event.error.code === undefined ? {} : { code: event.error.code }),
+          ...(event.error.status === undefined ? {} : { status: event.error.status }),
+          ...(event.error.retryable === undefined ? {} : { retryable: event.error.retryable }),
+        });
         break;
+      }
     }
   }
 

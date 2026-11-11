@@ -191,6 +191,7 @@
 .row {
   width: 100%;
   min-height: 38px;
+  padding-block: 5px;
   border: none;
   border-bottom: 0.5px solid var(--dsw-alias-border-l2);
   background: transparent;
@@ -249,6 +250,13 @@
 
 .rowMain {
   display: flex;
+  flex-direction: column;
+  gap: 2px;
+  min-width: 0;
+}
+
+.rowHead {
+  display: flex;
   align-items: center;
   gap: 8px;
   min-width: 0;
@@ -269,6 +277,19 @@
   font-size: 11px;
   text-overflow: ellipsis;
   white-space: nowrap;
+}
+
+.rowPreview {
+  overflow: hidden;
+  color: var(--dsw-alias-label-tertiary);
+  font-size: 11px;
+  line-height: 15px;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.rowPreviewError {
+  color: var(--dsw-alias-state-error-primary);
 }
 
 .rowsEmpty {
@@ -316,13 +337,106 @@
   font-weight: 500;
 }
 
+.inspectorBody {
+  flex: 1;
+  min-height: 0;
+  display: flex;
+  flex-direction: column;
+  gap: 10px;
+  padding: 0 14px 14px;
+  overflow-y: auto;
+}
+
+.section {
+  display: flex;
+  flex-direction: column;
+  gap: 4px;
+}
+
+.sectionHead {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 8px;
+}
+
+.sectionLabel {
+  color: var(--dsw-alias-label-tertiary);
+  font-size: 11px;
+  font-weight: 600;
+  letter-spacing: 0.03em;
+  text-transform: uppercase;
+}
+
+.sectionLabelError {
+  color: var(--dsw-alias-state-error-primary);
+}
+
+.sectionCopy {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  width: 22px;
+  height: 22px;
+  padding: 0;
+  border: none;
+  border-radius: var(--dsw-radius-sm);
+  background: transparent;
+  color: var(--dsw-alias-label-tertiary);
+  cursor: pointer;
+}
+
+.sectionCopy svg {
+  width: 13px;
+  height: 13px;
+}
+
+.sectionCopy:hover {
+  background: var(--dsw-alias-interactive-bg-hover);
+  color: var(--dsw-alias-label-primary);
+}
+
+.sectionBody {
+  margin: 0;
+  padding: 8px 10px;
+  max-height: 240px;
+  overflow: auto;
+  border: 0.5px solid var(--dsw-alias-border-l2);
+  border-radius: var(--dsw-radius-sm);
+  background: var(--dsw-alias-bg-base);
+  color: var(--dsw-alias-label-secondary);
+  font-family: inherit;
+  font-size: 12px;
+  line-height: 18px;
+  white-space: pre-wrap;
+  overflow-wrap: anywhere;
+}
+
+.sectionBodyMono {
+  font-family: var(--ds-font-family-code);
+  font-size: 11px;
+  line-height: 17px;
+}
+
+.sectionBodyError {
+  border-color: var(--dsw-alias-state-error-primary);
+  color: var(--dsw-alias-state-error-primary);
+}
+
+.sectionEmpty,
+.sectionNote {
+  margin: 0;
+  color: var(--dsw-alias-label-tertiary);
+  font-size: 11px;
+  line-height: 16px;
+}
+
 .metadata {
   display: flex;
   flex-direction: column;
   gap: 0;
   margin: 0;
-  padding: 0 14px 14px;
-  overflow-y: auto;
+  padding: 0;
 }
 
 .metadataRow {
@@ -410,6 +524,10 @@
     grid-template-columns: 54px 30px minmax(0, 1fr) 66px;
     gap: 5px;
     padding: 0 6px;
+  }
+
+  .row {
+    padding-block: 5px;
   }
 
   .kind {

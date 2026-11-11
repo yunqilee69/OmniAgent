@@ -193,7 +193,7 @@ Web 由一个本地 Node HTTP Host（`packages/web/src`）和一个 React 工作
 ### 3.4 错误与脱敏
 
 - 500 一律返回 `{ error: 'Internal server error' }`；
-- SSE 内的错误只返回固定文案；
+- SSE 内的非结构化错误返回固定文案；结构化 provider 失败透传 `message` / `code` / `status` / `retryable`，其中 message 已由 core 脱敏并限长；
 - 未知 workspace / session 返回 404；
 - 非法 URL 编码返回 400；
 - 路径静态文件服务拒绝 `\0`、`..`、绝对路径，并校验 resolve 后仍在 root 下。
@@ -250,7 +250,7 @@ server 维护：
    - `keep-alive`
 8. `source = session.send(content)`；如果有 approval turn，用 `approval.stream(source)` 交错事件。
 9. 每个事件经 `publicAgentEvent()`：
-   - `error` → 固定文案；
+   - `error` → 结构化 provider 失败原样透传已脱敏字段，其余固定文案；
    - `assistant.message` → `safePublicMessages`；
    - `turn.end.history`（如果有）→ schema 校验 + 脱敏；
    - 其他原样。
@@ -425,8 +425,8 @@ tool.result
 
 - `projectMessages()` + `safePublicMessages()`：会话详情和 SSE 的 assistant 消息；
 - `projectPublicHistory()`：在消息上追加稳定的 `messageId`（身份 + 事件哈希）和 `timestamp`，供复制和显示时间；
-- `projectTraceEvents()`：只保留元数据；
-- `projectTrajectory()`：轨迹图数据；
+- `projectTraceEvents()`：只保留元数据（`trace/error` 例外，保留去控制字符、≤500 字符的文本，以及 core 已校验的 `code` / `status` / `retryable`）；
+- `projectTrajectory()`：轨迹图数据，记录里带用户 / 助手正文和工具入参、出参（各自裁剪到 8,000 字符并置 `clipped`），不含 callId、权限规则、reasoning 与 provider replay；
 - `projectSessionMetrics()`：runs / steps / requests / usage / cache / throughput 聚合；
 - `projectLastTurn()` / `sessionPendingKind()`：会话列表的 `lastTurn` 与 `pending`，前者读最后一条 `trace/turn.end`，后者把待答请求归成 `approval` / `plan-review`；
 - `exportSession()`：Markdown / JSON；
@@ -491,6 +491,8 @@ AuthGate
 
 等待计划审阅时不再弹出遮挡式对话框：会话末尾显示计划卡片，点击卡片或输入区里的「查看计划」把完整计划以 Markdown 形式放到右栏 `plan` 视图；输入区同时切换为计划审阅模式，可直接批准，或输入反馈后继续规划。右栏保留最后一次审阅的计划，审阅结束后仍可查看。
 
+侧边栏每个工作区组默认只渲染最新的 5 条会话，底部「显示更多（N）」按钮一次再放出 5 条（`SESSIONS_PER_PAGE`，按工作区记窗口大小）；当前选中的会话即使落在窗口之外也会强制显示，搜索态不做分页，命中的会话全部列出。会话行菜单的「归档会话」写入 `session/archived` 事件：行立即从列表消失，但对话记录、标题和子智能体都留在数据目录里，仍可按键入的会话 id 打开；工作区标题右侧的归档按钮打开「归档会话」弹窗，那里按工作区拉取归档列表（`?archived=1`），每行可以「恢复会话」，恢复后重新拉一次侧边栏列表。
+
 子智能体在标题栏呈现为一棵可导航的路径：打开子会话时，标题变成「主会话标题 / 子任务名」，主会话那一段是可点击按钮，点击即切回主会话（多层嵌套则逐段可点）。团队入口只出现一次：主会话视图是标题右侧的「N 个子智能体」文字按钮；子会话视图不再显示这个按钮，改成当前子任务名本身可以点开——在这个位置选其他子智能体。两种入口打开的是同一张卡片，每行给出状态点、任务名、任务说明、可继续 / 状态、耗时和 token 总量，点击某行切到该子会话。侧边栏只列用户自己发起的会话，子智能体不再占用任务列表的一行，全部从这张卡片进入。标题文字统一取自工作区会话列表（与侧边栏同源），因为标题可能在回合一结束之后才生成，只有列表里有；列表数据里的 `subagentStatus` 与 `usage` 投影提供状态与 token，展开卡片时重新拉一次列表，因此子智能体结束后状态不会停在「运行中」。
 
 响应式：
@@ -534,7 +536,7 @@ AuthGate
 - `consumeStream()`：逐事件 `applyAgentEvent`，同时用 `applyMetricsEvent` 增量维护 metrics；
 - `stopTurn()`：先置 stopping，再 `POST interrupt`；
 - `resolveApproval()` / `resolvePlanReview()`：HTTP 回填；
-- `compactSession()`、`queueMessage()`、`steerMessage()`、`renameSession()`、`setSessionPinned()`、`forkSession()`、`deleteSession()`、`exportSession()`；
+- `compactSession()`、`queueMessage()`、`steerMessage()`、`renameSession()`、`setSessionPinned()`、`setSessionArchived()`、`listArchivedSessions()`、`forkSession()`、`deleteSession()`、`exportSession()`；归档后行从 `sessionsByWorkspace` 移除，恢复时重新拉列表，归档列表只存在于归档弹窗自己的状态里；
 - `ensureStatusStream()` / `consumeStatusStream()`：订阅 `GET /api/workspaces/:id/events`，把宿主推送的 `session.status` 合并进 `statusBySession`；流不可用或断开时退回列表基线，只有曾经连通过才在 2 秒后重连；
 - `reconcileSessionStatuses()`：用列表基线补齐每个会话的现状（含 `lastTurn` 失败标记），与推送走同一套迁移规则；
 - `observeSessionStatus()`：处理单条推送；`running` 真→假时若该会话不是当前会话，置 `completionUnread`，并在 400 毫秒后调用 `refreshSessions()` 一次性刷新排序与结果；

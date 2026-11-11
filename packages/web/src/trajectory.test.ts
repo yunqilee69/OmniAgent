@@ -3,7 +3,7 @@ import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { describe, expect, it } from 'vitest';
 import { FakeModel, Session, SessionStore, textResponse, toolCallResponse } from '@omniagent/core';
-import { projectTrajectory } from './trajectory';
+import { projectTrajectory, TRAJECTORY_CONTENT_LIMIT } from './trajectory';
 import { projectSessionMetrics } from './session-metrics';
 import type { TrajectoryEvent, TrajectoryToolRecord } from './trajectory';
 
@@ -36,14 +36,16 @@ describe('projectTrajectory', () => {
       version: 1,
       turns: [{ id: 'turn:0', inputRecordId: 'input:0', startSeq: 0, endSeq: 9, endReason: 'end_turn' }],
       records: [
-        { id: 'input:0', kind: 'input', seq: 0, turnId: 'turn:0', stepId: null, step: null, timestamp: 0 },
+        { id: 'input:0', kind: 'input', seq: 0, turnId: 'turn:0', stepId: null, step: null, timestamp: 0,
+          text: 'private input', clipped: false },
         { id: 'model:1', kind: 'model', seq: 1, turnId: 'turn:0', stepId: 'step:1', step: 0, timestamp: 1,
-          assistantSeq: 2, assistantRecordedAt: 10, inputTokens: 7, outputTokens: 0 },
+          assistantSeq: 2, assistantRecordedAt: 10, inputTokens: 7, outputTokens: 0, text: null, clipped: false },
         { id: 'tool:2:0', kind: 'tool', seq: 2, turnId: 'turn:0', stepId: 'step:1', step: 0, timestamp: 10,
           name: 'read_file', callSeq: 3, callRecordedAt: 12, resultSeq: 5, resultRecordedAt: 20,
-          durationMs: 7, ok: true, truncated: false, decision: 'allow' },
+          durationMs: 7, ok: true, truncated: false, decision: 'allow',
+          arguments: '{\n  "file_path": "private"\n}', output: 'private output', clipped: false },
         { id: 'model:7', kind: 'model', seq: 7, turnId: 'turn:0', stepId: 'step:7', step: 1, timestamp: 22,
-          assistantSeq: 8, assistantRecordedAt: 23, inputTokens: null, outputTokens: null },
+          assistantSeq: 8, assistantRecordedAt: 23, inputTokens: null, outputTokens: null, text: null, clipped: false },
       ],
       timeline: {
         sequence: [
@@ -62,31 +64,46 @@ describe('projectTrajectory', () => {
     });
   });
 
-  it('returns only allowlisted facts, never raw text, identifiers, names, or arbitrary event data', () => {
-    const secret = 'PRIVATE_SECRET_/home/user';
+  it('keeps the readable text while dropping identifiers, replay data, and permission rules', () => {
+    const question = 'Please read the release notes';
+    const answer = 'Reading them now';
+    const args = { file_path: 'RELEASE.md' };
+    const output = 'notes body';
+    const callId = 'private-call-identifier';
+    const rule = 'private-permission-rule';
+    const replay = 'private-replay-signature';
     const events = [
-      event(0, 'message/user', { text: secret, metadata: secret }, 0),
-      event(1, 'trace/turn.start', { step: 0, text: secret }, 1),
-      event(2, 'message/assistant', { role: 'assistant', content: [{ text: secret }],
+      event(0, 'message/user', { text: question, metadata: replay }, 0),
+      event(1, 'trace/turn.start', { step: 0, text: replay }, 1),
+      event(2, 'message/assistant', { role: 'assistant', content: [{ type: 'text', text: answer }],
         usage: { inputTokens: -1, outputTokens: 3 },
-        toolCalls: [{ id: secret, name: secret, arguments: secret, raw: secret }] }, 2),
-      event(3, 'trace/tool.call', { id: secret, name: secret, arguments: secret }, 3),
-      event(4, 'trace/permission.decided', { callId: secret, decision: 'deny', source: secret, rule: secret }, 4),
-      event(5, 'message/tool-result', { result: { callId: secret, name: secret, ok: false,
-        content: secret, fullOutputRef: secret, durationMs: 8 } }, 5),
-      event(6, 'trace/error', { message: secret }, 6),
-      event(7, 'trace/turn.end', { reason: secret }, 7),
-      event(8, 'other/private', { secret }, 8),
-      event(9, 'user/message', { text: secret, source: { kind: 'model' } }, 9),
+        toolCalls: [{ id: callId, name: 'read_file', arguments: args, raw: replay }] }, 2),
+      event(3, 'trace/tool.call', { id: callId, name: 'read_file', arguments: args }, 3),
+      event(4, 'trace/permission.decided', { callId, decision: 'deny', source: rule, rule }, 4),
+      event(5, 'message/tool-result', { result: { callId, name: 'read_file', ok: false,
+        content: output, fullOutputRef: replay, durationMs: 8 } }, 5),
+      event(6, 'trace/error', { message: replay }, 6),
+      event(7, 'trace/turn.end', { reason: 'error' }, 7),
+      event(8, 'other/private', { replay }, 8),
+      event(9, 'user/message', { text: 'injected model text', source: { kind: 'model' } }, 9),
     ];
     const projection = projectTrajectory(events);
+    const serialized = JSON.stringify(projection);
 
-    expect(JSON.stringify(projection)).not.toContain(secret);
-    expect(projection.turns).toHaveLength(1);
-    expect(projection.turns[0]?.endReason).toBeNull();
-    expect(projection.records.find((record) => record.kind === 'model')).toMatchObject({ inputTokens: null, outputTokens: 3 });
-    expect(projection.records.find((record) => record.kind === 'tool')).toMatchObject({ name: null, decision: 'deny', ok: false });
     expect(projection.records.map((record) => record.kind)).toEqual(['input', 'model', 'tool']);
+    expect(projection.records.find((record) => record.kind === 'input')).toMatchObject({ text: question });
+    expect(projection.records.find((record) => record.kind === 'model')).toMatchObject({
+      inputTokens: null, outputTokens: 3, text: answer,
+    });
+    expect(projection.records.find((record) => record.kind === 'tool')).toMatchObject({
+      name: 'read_file', ok: false, decision: 'deny',
+      arguments: JSON.stringify(args, null, 2), output,
+    });
+    expect(serialized).not.toContain(callId);
+    expect(serialized).not.toContain(rule);
+    expect(serialized).not.toContain(replay);
+    expect(serialized).not.toContain('injected model text');
+    expect(projection.turns[0]).toMatchObject({ endReason: 'error' });
   });
 
   it('distinguishes agent steps from turns and isolates incomplete and orphaned turns', () => {
@@ -283,20 +300,37 @@ describe('projectTrajectory', () => {
     expect(() => projectTrajectory([event(0, 'message/user', {}), event(0, 'message/user', {})])).toThrow();
   });
 
-  it('projects bash tool calls without exposing their command or output', () => {
+  it('projects bash tool calls with their command and output', () => {
     const records = tools([
-      event(0, 'message/user', { text: 'private input' }, 0),
+      event(0, 'message/user', { text: 'run the suite' }, 0),
       event(1, 'trace/turn.start', { step: 0 }, 1),
       event(2, 'message/assistant', { role: 'assistant', content: [],
-        toolCalls: [{ id: 's', name: 'bash', arguments: { command: 'PRIVATE COMMAND' } }] }, 2),
+        toolCalls: [{ id: 's', name: 'bash', arguments: { command: 'pnpm test' } }] }, 2),
       event(3, 'trace/tool.call', { id: 's', name: 'bash' }, 3),
-      event(4, 'message/tool-result', { result: { callId: 's', name: 'bash', ok: true, content: 'PRIVATE OUTPUT' } }, 4),
+      event(4, 'message/tool-result', { result: { callId: 's', name: 'bash', ok: true, content: 'all green' } }, 4),
       event(5, 'trace/tool.result', { callId: 's', name: 'bash', ok: true, truncated: false, durationMs: 9 }, 5),
     ]);
 
     expect(records).toHaveLength(1);
-    expect(records[0]).toMatchObject({ name: 'bash', ok: true, truncated: false, durationMs: 9 });
-    expect(JSON.stringify(records)).not.toContain('PRIVATE');
+    expect(records[0]).toMatchObject({
+      name: 'bash', ok: true, truncated: false, durationMs: 9,
+      arguments: '{\n  "command": "pnpm test"\n}', output: 'all green', clipped: false,
+    });
+  });
+
+  it('clips oversized content instead of shipping it whole', () => {
+    const huge = 'x'.repeat(20_000);
+    const records = tools([
+      event(0, 'message/user', { text: huge }, 0),
+      event(1, 'trace/turn.start', { step: 0 }, 1),
+      event(2, 'message/assistant', { role: 'assistant', content: [],
+        toolCalls: [{ id: 's', name: 'bash', arguments: { command: huge } }] }, 2),
+      event(3, 'message/tool-result', { result: { callId: 's', name: 'bash', ok: false, content: huge } }, 3),
+    ]);
+
+    expect(records[0]).toMatchObject({ clipped: true, output: huge.slice(0, TRAJECTORY_CONTENT_LIMIT) });
+    expect(records[0]!.output!.length).toBe(TRAJECTORY_CONTENT_LIMIT);
+    expect(records[0]!.arguments!.length).toBeLessThanOrEqual(TRAJECTORY_CONTENT_LIMIT);
   });
 
   it('projects a real Session trace without audit duplicates or private metadata leaks', async () => {
@@ -320,7 +354,11 @@ describe('projectTrajectory', () => {
       expect(projection.records.find((record) => record.kind === 'tool')).toMatchObject({
         name: 'read_file', ok: false, decision: 'deny', durationMs: null,
       });
-      expect(JSON.stringify(projection)).not.toMatch(/SECRET|private-id|\/private/);
+      expect(projection.records.find((record) => record.kind === 'input')).toMatchObject({ text: 'SECRET QUESTION' });
+      expect(projection.records.find((record) => record.kind === 'tool')).toMatchObject({
+        arguments: '{\n  "file_path": "SECRET ARGUMENT"\n}',
+      });
+      expect(JSON.stringify(projection)).not.toMatch(/private-id|\/private/);
       const metrics = projectSessionMetrics(log.events);
       expect(metrics.runs).toMatchObject({ started: 1, completed: 1, knownDurationCount: 1 });
       expect(metrics.steps.started).toBe(2);

@@ -135,6 +135,25 @@ describe('web client protocol', () => {
     expect(turn.approval).toBeUndefined();
     expect(turn.error).toBe('Turn failed');
   });
+
+  it('keeps a structured provider failure in the turn notice', () => {
+    const turn = createLiveState();
+    applyAgentEvent(turn, {
+      type: 'error',
+      error: {
+        message: 'HTTP 503 · all_backends_unavailable: no available backends',
+        code: 'all_backends_unavailable',
+        status: 503,
+        retryable: true,
+      },
+    });
+    expect(turn.error).toBe('HTTP 503 · all_backends_unavailable: no available backends');
+    expect(turn.transcript.at(-1)).toMatchObject({
+      kind: 'notice',
+      tone: 'error',
+      text: 'HTTP 503 · all_backends_unavailable: no available backends',
+    });
+  });
   it('renders accessible copy controls and valid message times', () => {
     const t = translator('en');
     const markup = renderToStaticMarkup(createElement(MessageActions, { text: 'Hello', timestamp: 1234, locale: 'en', t }));
@@ -396,10 +415,28 @@ describe('web client protocol', () => {
       { type: 'trace/tool.call', seq: secret, ts: secret, data: { name: secret, id: secret, arguments: secret } },
       { type: 'trace/permission.decided', data: { callId: secret, decision: secret, source: secret } },
       { type: 'trace/turn.end', data: { reason: secret } },
-      { type: 'trace/error', data: { error: { code: secret, message: secret }, message: secret } },
+      { type: 'trace/error', data: { error: { code: secret, message: secret } } },
       { type: 'audit.tool', ts: secret, data: { tool: secret, callId: secret, decision: secret, durationMs: -1, step: 1.5, ok: secret } },
       { type: 'trace/' + secret, data: { message: secret } },
     ]) expect(JSON.stringify(safeEventMetadata(event))).not.toContain(secret);
+    expect(safeEventMetadata({ type: 'trace/error', data: { message: 'An error occurred during the turn.' } }))
+      .toMatchObject({ Type: 'trace/error', Message: 'An error occurred during the turn.' });
+    expect(safeEventMetadata({ type: 'trace/error', data: {
+      message: 'HTTP 503 · all_backends_unavailable: no available backends',
+      code: 'all_backends_unavailable', status: 503, retryable: true,
+    } })).toMatchObject({
+      Type: 'trace/error',
+      Message: 'HTTP 503 · all_backends_unavailable: no available backends',
+      Code: 'all_backends_unavailable',
+      Status: 503,
+      Retryable: true,
+    });
+    expect(safeEventMetadata({ type: 'trace/error', data: {
+      code: 'not a code', status: 42, retryable: 'yes',
+    } })).toEqual({ Type: 'trace/error' });
+    // Error text is collapsed to one line and clipped so it can share a table row.
+    expect(safeEventMetadata({ type: 'trace/error', data: { message: 'line\nbreak\u0000' } }).Message).toBe('line break');
+    expect(String(safeEventMetadata({ type: 'trace/error', data: { message: 'x'.repeat(600) } }).Message)).toHaveLength(500);
     expect(safeEventMetadata({ type: 'trace/' + secret })).toMatchObject({ Type: 'trace/unknown' });
     expect(safeEventMetadata({ type: 'trace/turn.start', seq: -1, ts: Number.MAX_SAFE_INTEGER, data: { step: 1.5 } }))
       .toEqual({ Type: 'trace/turn.start' });

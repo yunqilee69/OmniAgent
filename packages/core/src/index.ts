@@ -55,6 +55,8 @@ export type {
 } from './providers/types';
 export { FakeModel, textResponse, toolCallResponse } from './providers/fake';
 export type { FakeStep } from './providers/fake';
+export { ProviderRequestError, agentErrorFromUnknown } from './providers/errors';
+export type { ProviderErrorFields } from './providers/errors';
 export {
   OpenAIModel,
   toModelResponse,
@@ -187,6 +189,8 @@ export type {
 } from './session/title';
 export { SESSION_PIN_EVENT, createSessionPinEvent, foldSessionPinned } from './session/pin';
 export type { SessionPinEventData } from './session/pin';
+export { SESSION_ARCHIVE_EVENT, createSessionArchiveEvent, foldSessionArchived } from './session/archive';
+export type { SessionArchiveEventData } from './session/archive';
 export { SESSION_FORK_EVENT, createSessionForkEvent, foldSessionForkSource } from './session/fork';
 export type { SessionForkEventData } from './session/fork';
 export { projectMessages, safePublicMessages } from './session/projection';

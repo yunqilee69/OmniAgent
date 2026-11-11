@@ -7,10 +7,13 @@ import { extname, isAbsolute, normalize, resolve, sep } from 'node:path';
 import { fileURLToPath } from 'node:url';
 import {
   AgentDefinitionWriteSchema,
+  agentErrorFromUnknown,
+  createSessionArchiveEvent,
   createSessionForkEvent,
   createSessionPinEvent,
   DEFAULT_SESSION_TITLE_LIMITS,
   estimateModelHistory,
+  foldSessionArchived,
   foldSessionPinned,
   foldSessionTitle,
   hasHumanMessage,
@@ -20,6 +23,7 @@ import {
   normalizeSessionTitle,
   projectMessages,
   ScheduleInputError,
+  SESSION_ARCHIVE_EVENT,
   SESSION_FORK_EVENT,
   SESSION_PIN_EVENT,
   SESSION_TITLE_EVENT,
@@ -27,6 +31,7 @@ import {
 } from '@omniagent/core';
 import type {
   AgentAuthoringService,
+  AgentError,
   AgentEvent,
   AgentUsage,
   ModelBinding,
@@ -679,6 +684,8 @@ async function route(
     }
     const byPath = new Map(workspaces.map((workspace) => [workspace.path, workspace]));
     const sessions = (await options.store.list())
+      // Archive hides a session from every search surface, not just the sidebar.
+      .filter((session) => session.archived !== true)
       .filter((session) => session.parentSessionId === undefined && session.depth === undefined)
       .flatMap((session) => {
         const workspace = byPath.get(session.workspace);
@@ -1073,7 +1080,12 @@ async function route(
   }
   if (parts[3] !== 'sessions') throw new HttpError(404, 'Not found');
   if (request.method === 'GET' && parts.length === 4) {
-    const listed = (await options.store.list()).filter((item) => item.workspace === workspace.path);
+    // Archived sessions keep their transcripts but leave the default listing.
+    // The archived view asks for them explicitly with `?archived=1`.
+    const archivedOnly = url.searchParams.get('archived') === '1';
+    const listed = (await options.store.list())
+      .filter((item) => item.workspace === workspace.path)
+      .filter((item) => (item.archived === true) === archivedOnly);
     const opened = await Promise.all(listed.map(async (item) => {
       try {
         return { item, events: (await options.store.open(item.workspace, item.id)).events };
@@ -1292,6 +1304,17 @@ async function route(
       await handle.append(createSessionPinEvent(body.pinned));
     }
     return json(response, 200, { pinned: body.pinned });
+  }
+  if (request.method === 'POST' && parts.length === 6 && parts[5] === 'archive') {
+    const body = await readJson(request);
+    if (Object.keys(body).length !== 1 || typeof body.archived !== 'boolean') {
+      throw new HttpError(400, 'A boolean archived value is required');
+    }
+    const handle = await openSession(options.store, workspace, sessionId);
+    if (foldSessionArchived(handle.events) !== body.archived) {
+      await handle.append(createSessionArchiveEvent(body.archived));
+    }
+    return json(response, 200, { archived: body.archived });
   }
   if (request.method === 'POST' && parts.length === 6 && parts[5] === 'fork') {
     if (running.size > 0 || creating.size > 0) {
@@ -1786,13 +1809,13 @@ async function route(
             await Promise.all(turn.deliveries);
             publishTurnEvent(turn, { type: 'turn.end', reason: turn.cancelled ? 'interrupted' : 'error' });
           }
-        } catch {
+        } catch (error) {
           turn.closing = true;
           await Promise.all(turn.deliveries);
           if (!attachmentFinished) {
             await stored.finish(await attachmentsCommitted(options.store, workspace, sessionId, stored.parts)).catch(() => undefined);
           }
-          publishTurnEvent(turn, { type: 'error', error: { message: 'The turn failed' } });
+          publishTurnEvent(turn, publicAgentError(agentErrorFromUnknown(error)));
           publishTurnEvent(turn, { type: 'turn.end', reason: 'error' });
         } finally {
           markReady();
@@ -2031,10 +2054,25 @@ function publishTurnEvent(turn: RunningTurn, event: unknown, excluded?: ServerRe
   }
 }
 
-function publicAgentEvent(event: AgentEvent): unknown {
-  if (event.type === 'error') {
+function publicAgentError(error: AgentError): unknown {
+  // Unstructured failures can contain credentials or conversation content.
+  // Structured provider failures already carry a redacted, bounded summary.
+  if (error.code === undefined && error.status === undefined) {
     return { type: 'error', error: { message: 'The turn failed' } };
   }
+  return {
+    type: 'error',
+    error: {
+      message: error.message,
+      ...(error.code === undefined ? {} : { code: error.code }),
+      ...(error.status === undefined ? {} : { status: error.status }),
+      ...(error.retryable === undefined ? {} : { retryable: error.retryable }),
+    },
+  };
+}
+
+function publicAgentEvent(event: AgentEvent): unknown {
+  if (event.type === 'error') return publicAgentError(event.error);
   if (event.type === 'assistant.message') {
     return { ...event, message: safePublicMessages([event.message])[0] };
   }
@@ -2289,6 +2327,7 @@ async function forkSession(
   const events = source.events
     .filter((event) => event.type !== SESSION_TITLE_EVENT
       && event.type !== SESSION_PIN_EVENT
+      && event.type !== SESSION_ARCHIVE_EVENT
       && event.type !== SESSION_FORK_EVENT)
     .map(({ type, data, ts }) => ({ type, data, ts }));
   if (sourceTitle !== undefined) {
@@ -2323,6 +2362,7 @@ function summarize(handle: SessionHandle): SessionSummary {  const agent = proje
     ...(handle.header.description === undefined ? {} : { description: handle.header.description }),
     ...(title === undefined ? {} : { title: title.title, titleSource: title.source }),
     ...(foldSessionPinned(handle.events) ? { pinned: true } : {}),
+    ...(foldSessionArchived(handle.events) ? { archived: true } : {}),
     blank: !hasHumanMessage(handle.events),
     workspace: handle.header.workspace,
     cwd: handle.header.cwd,

@@ -260,15 +260,18 @@ TUI 和 Web 的审计文件互不读取、不迁移。
 - ok；
 - truncated；
 - durationMs；
-- beforeTokens / afterTokens。
+- beforeTokens / afterTokens；
+- `trace/error` 的 message（去控制字符、上限 500 字符）；
+- `trace/error` 的 status、code、retryable（仅结构化 provider 失败）。
 
 不保留：
 
 - callId；
 - 工具参数；
 - 工具结果；
-- 权限规则；
-- 错误文本。
+- 权限规则。
+
+`trace/error` 的正文在写入时只保留结构化 provider 失败的脱敏摘要（status / code / message / detail），其他异常仍写占位符；工具失败的原因在工具结果正文里，由轨迹记录携带。
 
 ### 8.2 轨迹
 
@@ -293,7 +296,13 @@ TUI 和 Web 的审计文件互不读取、不迁移。
 - 只在唯一匹配时合并 call / result / decision；
 - 时间轴使用事件记录时间，不代表模型延迟。
 
-不包含消息正文、参数、结果内容、权限规则或错误字符串。
+每条记录额外携带读者需要的正文，超出 8,000 字符的部分被裁剪并置 `clipped`：
+
+- `input` 记录：`text`（用户原话，含 content 里的文本片段）；
+- `model` 记录：`text`（助手回复文本，不含 reasoning / provider replay）；
+- `tool` 记录：`arguments`（美化后的 JSON）与 `output`（工具回灌给模型的正文，失败时即失败原因）。
+
+不包含：callId、白名单外的工具名、权限规则文本、reasoning、provider replay、错误字符串。轨迹与 `messages` 在同一个响应里下发，因此暴露面不超过已有的对话投影；导出仍走 `session-export.ts`，与轨迹无关。
 
 ### 8.3 导出
 
@@ -439,6 +448,7 @@ jq . ~/.omniagent/workspaces.json
 | `workspaces.json` | 本地路径、默认工作区标记 | Web API 返回注册信息 |
 | 实时 SSE / `run.snapshot` | 完整 assistant / tool 事件、baseline 消息与指标 | 认证关闭时只受 loopback 和 Host/Origin 保护；不是脱敏导出 |
 | 会话导出 | 对话文本、工具输出 | 可能含秘密，需人工检查 |
-| 轨迹 / trace | 元数据，无正文 / 参数 / 结果 | 相对安全，但仍暴露工具调用模式 |
+| 轨迹 | 消息正文、工具入参 / 出参（裁剪到 8,000 字符） | 与 `messages` 同一响应，暴露面相同；不含 callId 与权限规则 |
+| trace | 元数据 + `trace/error` 脱敏文本与 status / code | 相对安全，但仍暴露工具调用模式 |
 
 Web 认证默认关闭；启用后所有业务 API（包括 SSE / follow）要求登录 cookie。认证只限制通过 HTTP 的访问，不隔离同一 OS 用户的其他进程：它们仍可读取会话文件、附件、审计和明文配置。Host / Origin 检查始终只是浏览器侧保护。

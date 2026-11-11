@@ -10,6 +10,7 @@ import { openAIResponsesApi } from '@earendil-works/pi-ai/api/openai-responses.l
 import { ProviderReplaySchema, text } from '../domain/message';
 import type { AssistantMessage } from '../domain/message';
 import type { ModelClient, ModelRequest, ModelResponse, ModelStreamDelta } from './types';
+import { providerRequestError } from './errors';
 import { resolvePiAiRoute } from './pi-catalog';
 import { replayEndpointHash } from './replay-identity';
 import { setWireField } from './wire';
@@ -254,7 +255,13 @@ export class PiAiModel implements ModelClient {
         if (event.type === 'text_delta') yield { type: 'text', text: event.delta };
         if (event.type === 'thinking_delta') yield { type: 'reasoning', text: event.delta };
         if (event.type === 'toolcall_end') completed.set(event.contentIndex, structuredClone(event.toolCall));
-        if (event.type === 'error') throw new Error(signal.aborted ? 'pi-ai request aborted' : 'pi-ai provider request failed');
+        if (event.type === 'error') {
+          if (signal.aborted) throw new Error('pi-ai request aborted');
+          throw providerRequestError(
+            event.error.errorMessage,
+            `pi-ai provider "${this.name}" request failed`,
+          );
+        }
         if (event.type === 'done') return responseOf(event.message, model, completed, endpointHash);
       }
       throw new Error('pi-ai event stream ended without a terminal event');

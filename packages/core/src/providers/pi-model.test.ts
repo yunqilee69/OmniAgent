@@ -159,6 +159,18 @@ describe('PiAiModel', () => {
     await expect(client.complete(baseRequest)).rejects.toThrow(/terminal|ended/i);
   });
 
+  it('surfaces a structured provider failure with its status and code', async () => {
+    const errorMessage = '503: {"code":"all_backends_unavailable","message":"route \'fixture\' has no available backends"}';
+    const { client } = fixture([{
+      type: 'error', reason: 'error', error: native({ stopReason: 'error', errorMessage }),
+    }]);
+    await expect(client.complete(baseRequest)).rejects.toMatchObject({
+      status: 503,
+      code: 'all_backends_unavailable',
+      retryable: true,
+    });
+  });
+
   it('projects user images, tool declarations and tool results without dropping system history', async () => {
     const message = native({ content: [{ type: 'text', text: 'ok' }] });
     const { client, dispatch } = fixture([{ type: 'done', reason: 'stop', message }], {

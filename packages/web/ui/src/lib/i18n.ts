@@ -122,6 +122,17 @@ const zh: Record<string, string> = {
   'Unpin session': '取消置顶',
   'Rename session': '重命名会话',
   'Fork session': '分叉会话',
+  'Archive session': '归档会话',
+  'Archived sessions': '归档会话',
+  'Restore session': '恢复会话',
+  'No archived sessions.': '没有归档的会话。',
+  'Loading archived sessions…': '正在加载归档会话…',
+  'Could not load archived sessions: {message}': '无法加载归档会话：{message}',
+  'Archived sessions are hidden from the sidebar and from session search. Their transcripts stay on disk.':
+    '归档的会话不再显示在侧边栏，也不会出现在会话搜索结果中。对话记录仍保存在数据目录里。',
+  'The server returned a different archive state.': '服务端返回了不同的归档状态。',
+  'Could not update session archive: {message}': '无法更新会话归档状态：{message}',
+  'Show more ({count})': '显示更多（{count}）',
   'Delete session': '删除会话',
   'Session name': '会话名称',
   'Delete “{name}”? This removes the session transcript from this device and cannot be undone.':
@@ -490,6 +501,8 @@ const zh: Record<string, string> = {
 
   // Block labels.
   'Code': '代码',
+  'Status': '状态',
+  'Retryable': '可重试',
   'Wrap lines': '自动换行',
   'Unwrap lines': '取消自动换行',
   'Copy': '复制',
@@ -573,6 +586,15 @@ const zh: Record<string, string> = {
   'Before tokens': '压缩前 token',
   'After tokens': '压缩后 token',
   'No metadata': '无元数据',
+  'User message': '用户消息',
+  'Assistant message': '模型回复',
+  'Error message': '错误信息',
+  'Failure output': '失败原因',
+  'No content recorded for this record.': '该记录没有可显示的内容。',
+  'Long content is clipped to the first {limit} characters.': '内容较长，仅显示前 {limit} 个字符。',
+  'Select a record to inspect its content and metadata.': '选择一个记录以查看内容与元数据。',
+  'Yes': '是',
+  'No': '否',
 
   // Store alerts.
   'Could not load workspaces: {message}': '无法加载工作区：{message}',

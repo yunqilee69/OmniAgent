@@ -28,6 +28,8 @@ export interface SessionSummary {
   title?: string;
   titleSource?: unknown;
   pinned?: boolean;
+  /** Hidden from the sidebar and from session search, but still on disk. */
+  archived?: boolean;
   blank?: boolean;
   /** Host-authoritative run state; present on every listed session. */
   running?: boolean;
@@ -696,6 +698,14 @@ export interface TrajectoryRecord {
   decision?: string;
   inputTokens?: number;
   outputTokens?: number;
+  /** User or assistant message text. */
+  text?: string | null;
+  /** Tool arguments as pretty-printed JSON. */
+  arguments?: string | null;
+  /** Tool result text; failures carry their reason here. */
+  output?: string | null;
+  /** True when the host clipped a content field at the payload limit. */
+  clipped?: boolean;
 }
 
 export interface TrajectoryProjection {

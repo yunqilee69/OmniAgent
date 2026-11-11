@@ -1745,6 +1745,41 @@ describe('workbench store', () => {
     expect(store.getSnapshot().sessions.map((session) => session.id)).toEqual(['shared', 'older']);
   });
 
+  it('archives a session out of the list and restores it from the host list', async () => {
+    let archived = false;
+    const store = await boot(sessionFetcher(async (url, init) => {
+      if (url === '/api/workspaces/a/sessions' && (init?.method ?? 'GET') === 'GET') {
+        return json({ sessions: [
+          { id: 'shared', updatedAt: 10 },
+          ...(archived ? [] : [{ id: 'older', updatedAt: 5 }]),
+        ] });
+      }
+      if (url === '/api/workspaces/a/sessions?archived=1') {
+        return json({ sessions: archived ? [{ id: 'older', updatedAt: 5, archived: true }] : [] });
+      }
+      if (url === '/api/workspaces/a/sessions/older/archive' && init?.method === 'POST') {
+        archived = (JSON.parse(String(init.body)) as { archived: boolean }).archived;
+        return json({ archived });
+      }
+      if (url === '/api/workspaces/a/sessions/shared') return json(detail());
+      return undefined;
+    }));
+
+    expect(store.getSnapshot().sessions.map((session) => session.id)).toEqual(['shared', 'older']);
+    await expect(store.listArchivedSessions()).resolves.toEqual([]);
+
+    await expect(store.setSessionArchived('older', true)).resolves.toBe(true);
+    expect(store.getSnapshot().sessions.map((session) => session.id)).toEqual(['shared']);
+    await expect(store.listArchivedSessions()).resolves.toEqual([
+      expect.objectContaining({ id: 'older', archived: true }),
+    ]);
+
+    // Restoring re-reads the host list, so the row returns in activity order.
+    await expect(store.setSessionArchived('older', false)).resolves.toBe(true);
+    expect(store.getSnapshot().sessions.map((session) => session.id)).toEqual(['shared', 'older']);
+    await expect(store.listArchivedSessions()).resolves.toEqual([]);
+  });
+
   it('renames the selected session in both the list and the open entry', async () => {
     const patches: unknown[] = [];
     const store = await boot(sessionFetcher(async (url, init) => {

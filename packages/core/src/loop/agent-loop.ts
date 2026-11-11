@@ -11,6 +11,7 @@ import type {
   ModelResponse,
   ModelStreamDelta,
 } from '../providers/types';
+import { agentErrorFromUnknown } from '../providers/errors';
 import type { ToolSpec } from '../domain/tool';
 import type { ToolRegistry } from '../tools/registry';
 import { ToolExecutor } from '../exec/executor';
@@ -134,7 +135,7 @@ export class AgentLoop {
           ...(signal ? { signal } : {}),
         };
 
-        let response: ModelResponse;
+        let response: ModelResponse | undefined;
         const requestStartedAt = performance.now();
         // 首 token 延迟只能从流式 delta 里量：非流式请求没有可观测的首包时刻。
         let firstTokenAt: number | null = null;
@@ -146,6 +147,7 @@ export class AgentLoop {
         } else {
           response = await this.deps.model.complete(request);
         }
+        if (response === undefined) throw new Error('model stream ended without a response');
 
         const requestDurationMs = performance.now() - requestStartedAt;
 
@@ -160,7 +162,7 @@ export class AgentLoop {
           if (firstTokenDurationMs > 0) assistant.firstTokenDurationMs = firstTokenDurationMs;
         }
         if (Number.isSafeInteger(inputTokens) && inputTokens >= 0
-          && Number.isSafeInteger(usage.outputTokens) && usage.outputTokens >= 0) {
+          && Number.isSafeInteger(usage?.outputTokens) && usage.outputTokens >= 0) {
           const cachedInputTokens = usage.cachedInputTokens;
           assistant.usage = { inputTokens, outputTokens: usage.outputTokens,
             ...(Number.isSafeInteger(cachedInputTokens) && cachedInputTokens! >= 0 && cachedInputTokens! <= inputTokens
@@ -184,7 +186,7 @@ export class AgentLoop {
           yield { type: 'turn.end', reason: 'interrupted' };
           return messages;
         }
-        yield { type: 'error', error: { message: messageOf(error) } };
+        yield { type: 'error', error: agentErrorFromUnknown(error) };
         yield { type: 'turn.end', reason: 'error' };
         return messages;
       }
@@ -301,8 +303,4 @@ function deniedResult(call: ToolCall, source: string): ToolResult {
     content: `调用被权限策略拒绝（${source}）。不要重试同一调用，换一种方式或向用户说明。`,
     truncated: false,
   };
-}
-
-function messageOf(error: unknown): string {
-  return error instanceof Error ? error.message : String(error);
 }

@@ -59,7 +59,18 @@ export type SafeTraceData = Partial<{
   durationMs: number;
   beforeTokens: number;
   afterTokens: number;
+  /** Bounded, control-character-free error text; a placeholder for unstructured failures. */
+  message: string;
+  /** Provider error identifier, already validated by core. */
+  code: string;
+  /** HTTP status of a provider failure. */
+  status: number;
+  /** Whether retrying the same request may succeed. */
+  retryable: boolean;
 }>;
+
+/** Error text is clipped so a single failure cannot bloat the session payload. */
+const ERROR_TEXT_LIMIT = 500;
 
 export interface SafeTraceEvent {
   seq?: number;
@@ -98,6 +109,16 @@ function safeBoolean(value: unknown): boolean | undefined {
   return typeof value === 'boolean' ? value : undefined;
 }
 
+function errorCode(value: unknown): string | undefined {
+  return typeof value === 'string' && /^[A-Za-z0-9][A-Za-z0-9_.:-]{0,63}$/.test(value) ? value : undefined;
+}
+
+function httpStatus(value: unknown): number | undefined {
+  return typeof value === 'number' && Number.isSafeInteger(value) && value >= 100 && value <= 599
+    ? value
+    : undefined;
+}
+
 function toolName(value: unknown): TraceToolName | undefined {
   return typeof value === 'string' && TRACE_TOOL_NAMES.has(value) ? value as TraceToolName : undefined;
 }
@@ -118,6 +139,13 @@ function stopReason(value: unknown): TraceStopReason | undefined {
 
 function decision(value: unknown): TraceDecision | undefined {
   return value === 'allow' || value === 'deny' ? value : undefined;
+}
+
+function boundedText(value: unknown): string | undefined {
+  if (typeof value !== 'string') return undefined;
+  const stripped = value.replace(/[\u0000-\u001f\u007f]+/gu, ' ').trim();
+  if (stripped === '') return undefined;
+  return stripped.length > ERROR_TEXT_LIMIT ? `${stripped.slice(0, ERROR_TEXT_LIMIT)}…` : stripped;
 }
 
 function nestedRecord(data: RecordValue | undefined, key: string): RecordValue | undefined {
@@ -158,6 +186,10 @@ function projectData(type: SafeTraceEventType, value: unknown): SafeTraceData {
       setIfDefined(projected, 'afterTokens', safeIndex(data?.afterTokens));
       break;
     case 'trace/error':
+      setIfDefined(projected, 'message', boundedText(data?.message));
+      setIfDefined(projected, 'code', errorCode(data?.code));
+      setIfDefined(projected, 'status', httpStatus(data?.status));
+      setIfDefined(projected, 'retryable', safeBoolean(data?.retryable));
       break;
   }
 
@@ -169,9 +201,11 @@ function projectData(type: SafeTraceEventType, value: unknown): SafeTraceData {
  *
  * Unknown event types are discarded. Known event types remain observable even
  * when their data is malformed, but their data then becomes an empty object.
- * Only nonnegative safe-integer `seq`/`ts` values are retained. No stored call
- * ID, argument, result, permission source/rule, error text, or other arbitrary
- * string is copied to the result.
+ * Only nonnegative safe-integer `seq`/`ts` values are retained. The error message
+ * is kept as bounded, control-character-free text: structured provider failures
+ * carry a redacted summary, while other failures use a placeholder. No stored
+ * call ID, argument, result, permission source/rule, or other arbitrary string
+ * is copied.
  */
 export function projectTraceEvents(events: readonly unknown[]): SafeTraceEvent[] {
   if (!Array.isArray(events)) return [];

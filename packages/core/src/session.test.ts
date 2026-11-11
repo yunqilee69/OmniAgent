@@ -5,6 +5,7 @@ import { snapshotDshPermissions } from './permissions/dsh-permissions';
 import type { DshPermissionPreset, DshPermissionSnapshot } from './permissions/dsh-permissions';
 import type { ModelClient, ModelRequest, ModelResponse } from './providers/types';
 import { FakeModel, textResponse, toolCallResponse } from './providers/fake';
+import { providerRequestError } from './providers/errors';
 import { toOpenAIMessages } from './providers/openai';
 import { Session } from './session';
 import { SessionStore } from './session/store';
@@ -407,6 +408,44 @@ describe('Session', () => {
     expect(JSON.stringify(trace?.data)).not.toContain('secret-content');
     expect(JSON.stringify(trace?.data).length).toBeLessThan(256);
     expect(fresh.events.at(-1)).toMatchObject({ type: 'trace/turn.end', data: { reason: 'error' } });
+  });
+
+  it('records structured provider failures with their status, code, and detail', async () => {
+    const root = await temporaryWorkspace('omniagent-session-provider-error-');
+    const handle = await new SessionStore(root).create({ id: 'agent', workspace: root, cwd: root });
+    const failure = providerRequestError(
+      '503: {"code":"all_backends_unavailable","message":"route \'fixture\' has no available backends",'
+        + '"detail":[{"model":"cn:fixture","status":"cooldown","reason":"全部密钥冷却中"}]}',
+      'fallback',
+    );
+    const model: ModelClient = {
+      name: 'failing',
+      async complete() { throw failure; },
+    };
+    const session = new Session({
+      cwd: root, model, dshPermissions: snapshot('read-only'), approve: async () => 'deny', session: handle,
+    });
+    const events = await collect(session.send('start'));
+    expect(events.find((event) => event.type === 'error')).toEqual({
+      type: 'error',
+      error: {
+        message: failure.message,
+        code: 'all_backends_unavailable',
+        status: 503,
+        retryable: true,
+      },
+    });
+    const fresh = await new SessionStore(root).open(root, 'agent');
+    expect(fresh.events.find((event) => event.type === 'trace/error')).toMatchObject({
+      data: {
+        message: expect.stringContaining('all_backends_unavailable'),
+        code: 'all_backends_unavailable',
+        status: 503,
+        retryable: true,
+      },
+    });
+    expect(JSON.stringify(fresh.events.find((event) => event.type === 'trace/error')?.data))
+      .toContain('cn:fixture: cooldown');
   });
 
   it('remembers an interrupt while the user message is being persisted', async () => {

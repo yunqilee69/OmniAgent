@@ -11,6 +11,7 @@
  */
 
 import type { ModelClient } from '../providers/types';
+import { SESSION_ARCHIVE_EVENT } from './archive';
 import { SESSION_PIN_EVENT } from './pin';
 import type { SessionEvent } from './types';
 
@@ -338,13 +339,14 @@ export function hasHumanMessage(events: readonly SessionEvent[]): boolean {
 
 /**
  * Last activity timestamp for list ordering. Background title updates and pin
- * changes are UI state, not conversation activity, so neither may make an
- * older conversation jump to the top of the sidebar.
+ * or archive changes are UI state, not conversation activity, so none of them
+ * may make an older conversation jump to the top of the sidebar.
  */
 export function lastActivityTime(events: readonly SessionEvent[], fallback: number): number {
   for (let index = events.length - 1; index >= 0; index -= 1) {
     const event = events[index];
-    if (event !== undefined && event.type !== SESSION_TITLE_EVENT && event.type !== SESSION_PIN_EVENT) {
+    if (event !== undefined && event.type !== SESSION_TITLE_EVENT && event.type !== SESSION_PIN_EVENT
+      && event.type !== SESSION_ARCHIVE_EVENT) {
       return event.ts;
     }
   }

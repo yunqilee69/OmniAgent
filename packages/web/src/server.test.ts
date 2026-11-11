@@ -552,6 +552,46 @@ describe('workspace web host', () => {
     expect((await fetch(`${url}/missing/pin`, jsonRequest({ pinned: true }))).status).toBe(404);
   });
 
+  it('archives sessions out of the list and search without deleting the transcript', async () => {
+    const { base, first, store } = await setup();
+    const url = sessionsUrl(base, first.id);
+    const kept = await store.create({ id: 'kept', workspace: first.path, cwd: first.path });
+    await kept.append({ type: 'message/user', data: { text: 'keep me' }, ts: 10 });
+    const archived = await store.create({ id: 'archived', workspace: first.path, cwd: first.path });
+    await archived.append({ type: 'message/user', data: { text: 'hide me' }, ts: 20 });
+
+    type Listed = { sessions: Array<{ id: string; archived?: boolean; updatedAt: number }> };
+    expect((await jsonResponse<Listed>(await fetch(url))).sessions.map((session) => session.id))
+      .toEqual(['archived', 'kept']);
+
+    const hide = await fetch(`${url}/archived/archive`, jsonRequest({ archived: true }));
+    expect(hide.status).toBe(200);
+    expect(await hide.json()).toEqual({ archived: true });
+    // Archiving is UI metadata: it hides the row but never reorders activity.
+    expect((await jsonResponse<Listed>(await fetch(url))).sessions).toEqual([
+      expect.objectContaining({ id: 'kept', updatedAt: 10 }),
+    ]);
+    expect((await jsonResponse<Listed>(await fetch(`${url}?archived=1`))).sessions)
+      .toEqual([expect.objectContaining({ id: 'archived', archived: true, updatedAt: 20 })]);
+    expect((await jsonResponse<{ sessions: Array<{ id: string }> }>(
+      await fetch(`${base}/api/sessions/recent?workspaceId=${first.id}`),
+    )).sessions.map((session) => session.id)).toEqual(['kept']);
+    // The transcript itself stays readable by id.
+    expect((await fetch(`${url}/archived`)).status).toBe(200);
+
+    const show = await fetch(`${url}/archived/archive`, jsonRequest({ archived: false }));
+    expect(show.status).toBe(200);
+    expect(await show.json()).toEqual({ archived: false });
+    expect((await jsonResponse<Listed>(await fetch(url))).sessions.map((session) => session.id))
+      .toEqual(['archived', 'kept']);
+    expect((await jsonResponse<Listed>(await fetch(`${url}?archived=1`))).sessions).toEqual([]);
+
+    for (const body of [{ archived: 'yes' }, { archived: true, extra: true }, {}]) {
+      expect((await fetch(`${url}/archived/archive`, jsonRequest(body))).status).toBe(400);
+    }
+    expect((await fetch(`${url}/missing/archive`, jsonRequest({ archived: true }))).status).toBe(404);
+  });
+
   it('deletes one session without touching its siblings', async () => {
     const { base, first, store } = await setup();
     const url = sessionsUrl(base, first.id);
@@ -1594,6 +1634,39 @@ describe('workspace web host', () => {
     expect(response.status).toBe(200);
     expect(events.at(-2)?.type).toBe('error');
     expect(events.at(-1)).toEqual({ type: 'turn.end', reason: 'error' });
+  });
+
+  it('passes structured provider failures through the event stream', async () => {
+    const { base, first } = await setup(async (id) => ({
+      id,
+      async *send() {
+        yield {
+          type: 'error' as const,
+          error: {
+            message: "HTTP 503 · all_backends_unavailable: route 'fixture' has no available backends",
+            code: 'all_backends_unavailable',
+            status: 503,
+            retryable: true,
+          },
+        };
+        yield { type: 'turn.end', reason: 'error' };
+      },
+      interrupt() {},
+    }));
+    const url = sessionsUrl(base, first.id);
+    const { session } = await (await fetch(url, jsonRequest({}))).json() as { session: { id: string } };
+    const response = await fetch(`${url}/${session.id}/messages`, jsonRequest({ text: 'fail' }));
+    const events = (await response.text()).split('\n\n').filter((frame) => frame.startsWith('data: '))
+      .map((frame) => JSON.parse(frame.slice(6)) as { type: string; error?: unknown });
+    expect(events.find((event) => event.type === 'error')).toEqual({
+      type: 'error',
+      error: {
+        message: "HTTP 503 · all_backends_unavailable: route 'fixture' has no available backends",
+        code: 'all_backends_unavailable',
+        status: 503,
+        retryable: true,
+      },
+    });
   });
 
   it('reads audit entries through the session audit route without leaking sensitive fields', async () => {
