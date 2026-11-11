@@ -184,7 +184,7 @@ export interface WebHostOptions {
   /** Agent definition files for the manual Settings → Agents editor. */
   agentAuthoring?: AgentAuthoringService;
   readAudit?: (workspace: Workspace, sessionId: string) => Promise<unknown[]>;
-  permissionSettings?: Pick<PermissionSettings, 'read' | 'update' | 'snapshot'>;
+  permissionSettings?: Pick<PermissionSettings, 'read' | 'update' | 'snapshot' | 'current'>;
   approvalBroker?: ApprovalBroker;
   /** Credential-free model metadata for the configured catalog. */
   modelCatalog?: () => ModelSummary[] | Promise<ModelSummary[]>;
@@ -277,6 +277,12 @@ interface RunningTurn {
   replayBytes: number;
   replayOverflow: boolean;
   followers: Set<ServerResponse>;
+  /**
+   * A model or permission switch landed while this turn was running. The turn
+   * keeps the runtime it captured at admission, so the cached runtime is
+   * retired only once it settles instead of being replaced mid-run.
+   */
+  staleRuntime?: boolean;
 }
 
 interface CachedSession {
@@ -376,7 +382,6 @@ export function createWebHost(options: WebHostOptions): WebHost {
   const failedPermissions = new Set<string>();
   const compactRequests = new Set<string>();
   const statusHub = new SessionStatusHub();
-  let permissionDefaultUpdates = 0;
   const observedSockets = new WeakSet<object>();
   const server = createServer((request, response) => {
     // A client can reset the connection while a response write is in flight;
@@ -436,7 +441,7 @@ export function createWebHost(options: WebHostOptions): WebHost {
         response.once('close', () => clearTimeout(timeout));
       }
       await route(request, response, options, sessions, running, creating, removing, permissionLocks, failedPermissions,
-        compactRequests, statusHub, () => permissionDefaultUpdates, (value) => { permissionDefaultUpdates = value; });
+        compactRequests, statusHub);
     })().catch((error: unknown) => {
       if (response.headersSent) {
         if (!response.destroyed && !response.writableEnded) response.end();
@@ -652,8 +657,6 @@ async function route(
   failedPermissions: Set<string>,
   compactRequests: Set<string>,
   statusHub: SessionStatusHub,
-  getPermissionDefaultUpdates: () => number,
-  setPermissionDefaultUpdates: (value: number) => void,
 ): Promise<void> {
   const url = new URL(request.url ?? '/', 'http://localhost');
   if (request.method === 'GET' && url.pathname === '/health') return json(response, 200, { ok: true });
@@ -919,19 +922,15 @@ async function route(
     if (request.method === 'GET') return json(response, 200, { settings: await options.permissionSettings.read() });
     if (request.method === 'PUT') {
       const body = await readJson(request);
-      if (running.size > 0 || creating.size > 0) {
-        throw new HttpError(409, 'Cannot change the global permission default while a turn or session creation is active');
-      }
-      setPermissionDefaultUpdates(getPermissionDefaultUpdates() + 1);
+      // The global default only seeds new sessions, so a running turn or an
+      // in-flight session creation is unrelated: those keep the preset they
+      // already snapshot. PermissionSettings serializes the writes itself, and
+      // session creation waits for them, so no control-plane guard is needed.
       try {
-        try {
-          return json(response, 200, { settings: await options.permissionSettings.update(body) });
-        } catch (error) {
-          if (error instanceof InvalidPermissionSettings) throw new HttpError(400, 'Invalid permission settings');
-          throw error;
-        }
-      } finally {
-        setPermissionDefaultUpdates(getPermissionDefaultUpdates() - 1);
+        return json(response, 200, { settings: await options.permissionSettings.update(body) });
+      } catch (error) {
+        if (error instanceof InvalidPermissionSettings) throw new HttpError(400, 'Invalid permission settings');
+        throw error;
       }
     }
   }
@@ -1115,12 +1114,6 @@ async function route(
   }
   if (request.method === 'POST' && parts.length === 4) {
     const body = await readJson(request);
-    // A new session only snapshots the current global default preset, so a turn
-    // running in another session is unrelated. An in-flight default update is
-    // different: the new session must not persist a half-applied default.
-    if (getPermissionDefaultUpdates() > 0) {
-      throw new HttpError(409, 'Cannot create a session while the default permission is being updated');
-    }
     if (removing.has(workspace.id)) throw new HttpError(409, 'Workspace is being unregistered');
     creating.set(workspace.id, (creating.get(workspace.id) ?? 0) + 1);
     try {
@@ -1201,7 +1194,9 @@ async function route(
       const handle = await options.store.create({ workspace: workspace.path, cwd: workspace.path });
       const key = `${workspace.path}\0${handle.id}`;
       await withPermissionLock(permissionLocks, key, async () => {
-        const settings = options.permissionSettings?.snapshot() ?? resolveDshDefaultPreset(undefined);
+        // Waits out a default update that is mid-write instead of failing the
+        // request, so the new session records the preset the user just chose.
+        const settings = await (options.permissionSettings?.current() ?? resolveDshDefaultPreset(undefined));
         if (handle.events.length === 0 && !settings.requiresSelection && isDshPermissionPreset(settings.defaultPreset)) {
           try {
             await handle.append(createInitialDshPermissionEvent(settings.defaultPreset));
@@ -1218,7 +1213,7 @@ async function route(
       });
       await options.workspaces.touch(workspace.id);
       // Report the preset applied at creation so the client can skip a
-      // redundant permission write, which is still blocked during any turn.
+      // redundant permission write.
       return json(response, 201, {
         session: summarize(handle),
         permission: { preset: permissionProjection(handle, key, failedPermissions).preset },
@@ -1299,7 +1294,7 @@ async function route(
     return json(response, 200, { pinned: body.pinned });
   }
   if (request.method === 'POST' && parts.length === 6 && parts[5] === 'fork') {
-    if (running.size > 0 || creating.size > 0 || getPermissionDefaultUpdates() > 0) {
+    if (running.size > 0 || creating.size > 0) {
       throw new HttpError(409, 'Cannot fork a session while a turn or session creation is active');
     }
     if (removing.has(workspace.id)) throw new HttpError(409, 'Workspace is being unregistered');
@@ -1375,28 +1370,29 @@ async function route(
       throw new HttpError(400, 'A valid permission preset is required');
     }
     const preset = body.preset;
-    const permission = await withPermissionLock(permissionLocks, key, async () => {
-      if (running.size > 0) throw new HttpError(409, 'Cannot change permissions while a turn is active');
-      if (running.has(key)) throw new HttpError(409, 'Cannot change a session permission while its turn is active');
+    const { permission, changed } = await withPermissionLock(permissionLocks, key, async () => {
       if (removing.has(workspace.id)) throw new HttpError(409, 'Workspace is being unregistered');
       const registered = await options.workspaces.get(workspace.id);
       if (!registered || registered.path !== workspace.path) throw new HttpError(404, 'Workspace not found');
       const handle = await openSession(options.store, workspace, sessionId);
       const projection = permissionProjection(handle, key, failedPermissions);
       const event = createDshPresetSwitch(projection, preset);
-      if (event) {
-        try {
-          await handle.append(event);
-          failedPermissions.delete(key);
-        } catch (error) {
-          failedPermissions.add(key);
-          sessions.delete(key);
-          options.liveSessions?.delete(key);
-          throw error;
-        }
+      const next = { permission: { preset }, changed: event !== undefined };
+      if (event === undefined) return next;
+      try {
+        await handle.append(event);
+        failedPermissions.delete(key);
+      } catch (error) {
+        failedPermissions.add(key);
+        sessions.delete(key);
+        options.liveSessions?.delete(key);
+        throw error;
       }
-      return { preset };
+      return next;
     });
+    // A running turn keeps the permission snapshot it captured at admission, so
+    // this switch is only recorded here and applies from the next turn.
+    if (changed) retireSessionRuntime(sessions, options.liveSessions, running, key);
     return json(response, 200, { permission });
   }
   if (request.method === 'POST' && parts.length === 6 && parts[5] === 'agent') {
@@ -1408,7 +1404,7 @@ async function route(
     }
     const agent = body.agent;
     const result = await withPermissionLock(permissionLocks, key, async () => {
-      if (running.size > 0 || running.has(key)) throw new HttpError(409, 'Cannot change the agent while a turn is active');
+      if (running.has(key)) throw new HttpError(409, 'Cannot change the agent while a turn is active');
       if (removing.has(workspace.id)) throw new HttpError(409, 'Workspace is being unregistered');
       const registered = await options.workspaces.get(workspace.id);
       if (!registered || registered.path !== workspace.path) throw new HttpError(404, 'Workspace not found');
@@ -1433,10 +1429,9 @@ async function route(
       const current = projectAgentSelection(handle.events);
       const event = createAgentSwitch(current, { version: 1, agent });
       if (event) await handle.append(event);
-      sessions.delete(key);
-      options.liveSessions?.delete(key);
       return agentSummary(resolved);
     });
+    retireSessionRuntime(sessions, options.liveSessions, running, key);
     return json(response, 200, { agent: result });
   }
   if (request.method === 'POST' && parts.length === 6 && parts[5] === 'model') {
@@ -1445,8 +1440,7 @@ async function route(
     const parsed = ModelBindingSchema.safeParse(body);
     if (!parsed.success) throw new HttpError(400, 'A valid model binding is required');
     const binding = parsed.data;
-    const result = await withPermissionLock(permissionLocks, key, async () => {
-      if (running.size > 0 || running.has(key)) throw new HttpError(409, 'Cannot change the model while a turn is active');
+    const { result, changed } = await withPermissionLock(permissionLocks, key, async () => {
       if (removing.has(workspace.id)) throw new HttpError(409, 'Workspace is being unregistered');
       const registered = await options.workspaces.get(workspace.id);
       if (!registered || registered.path !== workspace.path) throw new HttpError(404, 'Workspace not found');
@@ -1465,14 +1459,16 @@ async function route(
         throw new HttpError(409, error instanceof Error ? error.message : 'The selected model is unavailable');
       }
       const event = createModelSwitch(projectModelSelection(handle.events), binding);
-      if (event) await handle.append(event);
-      sessions.delete(key);
-      options.liveSessions?.delete(key);
-      return {
-        model: binding,
-        resolvedModel: resolvedModelSummary(resolved),
+      const next = {
+        result: { model: binding, resolvedModel: resolvedModelSummary(resolved) },
+        changed: event !== undefined,
       };
+      if (event !== undefined) await handle.append(event);
+      return next;
     });
+    // A running turn keeps the runtime it captured at admission, so the switch
+    // applies from the next turn and the live session is retired after it ends.
+    if (changed) retireSessionRuntime(sessions, options.liveSessions, running, key);
     return json(response, 200, result);
   }
   if (request.method === 'POST' && parts.length === 6 && parts[5] === 'plan') {
@@ -1482,7 +1478,7 @@ async function route(
       throw new HttpError(400, 'A boolean plan mode state is required');
     }
     await withPermissionLock(permissionLocks, key, async () => {
-      if (running.size > 0 || running.has(key)) throw new HttpError(409, 'Cannot change plan mode while a turn is active');
+      if (running.has(key)) throw new HttpError(409, 'Cannot change plan mode while a turn is active');
       if (removing.has(workspace.id)) throw new HttpError(409, 'Workspace is being unregistered');
       const registered = await options.workspaces.get(workspace.id);
       if (!registered || registered.path !== workspace.path) throw new HttpError(404, 'Workspace not found');
@@ -1490,9 +1486,8 @@ async function route(
       if (projectPlanMode(handle.events).active !== active) {
         await handle.append(createPlanModeEvent(active));
       }
-      sessions.delete(key);
-      options.liveSessions?.delete(key);
     });
+    retireSessionRuntime(sessions, options.liveSessions, running, key);
     return json(response, 200, { plan: { active } });
   }
   if (request.method === 'POST' && parts.length === 6 && parts[5] === 'plan-review' && options.approvalBroker) {
@@ -1805,6 +1800,10 @@ async function route(
           turn.approval?.close();
           if (running.get(key) === turn) {
             running.delete(key);
+            if (turn.staleRuntime === true) {
+              sessions.delete(key);
+              options.liveSessions?.delete(key);
+            }
             turn.publishStatus(false);
           }
           for (const follower of turn.followers) follower.end();
@@ -1823,6 +1822,10 @@ async function route(
         turn.approval?.close();
         const registered = running.get(key) === turn;
         if (registered) running.delete(key);
+        if (registered && turn.staleRuntime === true) {
+          sessions.delete(key);
+          options.liveSessions?.delete(key);
+        }
         publishTurnEvent(turn, { type: 'turn.end', reason: turn.cancelled ? 'interrupted' : 'error' });
         if (registered) turn.publishStatus(false);
         for (const follower of turn.followers) follower.end();
@@ -2066,6 +2069,30 @@ function withPermissionLock<T>(
   locks.set(key, settled);
   void settled.then(() => { if (locks.get(key) === settled) locks.delete(key); });
   return result;
+}
+
+/**
+ * Drop the live runtime a session selection change invalidated.
+ *
+ * A turn keeps the agent, model, and permission snapshot it captured at
+ * admission, so replacing the cached runtime while it runs would leave the run
+ * (and the clients following it) pointing at a different object than the one
+ * writing messages. The cache entry is only marked here and retired when the
+ * turn settles; the next turn then rebuilds from the log.
+ */
+function retireSessionRuntime(
+  sessions: Map<string, CachedSession>,
+  liveSessions: WebHostOptions['liveSessions'],
+  running: Map<string, RunningTurn>,
+  key: string,
+): void {
+  const turn = running.get(key);
+  if (turn !== undefined) {
+    turn.staleRuntime = true;
+    return;
+  }
+  sessions.delete(key);
+  liveSessions?.delete(key);
 }
 
 async function getSession(

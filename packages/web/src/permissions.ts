@@ -156,6 +156,17 @@ export class PermissionSettings {
     return { ...this.value, revision: this.revision };
   }
 
+  /**
+   * Snapshot taken after any queued write has landed, so a session started
+   * while the default is being saved records the preset the user just chose
+   * instead of the one it replaces. Reads never fail here: a rejected write
+   * leaves the previous value in place.
+   */
+  async current(): Promise<PermissionRuntime> {
+    await this.pending;
+    return this.snapshot();
+  }
+
   async update(input: unknown): Promise<PermissionSettingsValue> {
     const nextPreset = validateUpdate(input);
     const operation = this.pending.then(async () => {

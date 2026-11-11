@@ -39,6 +39,12 @@ export interface UserItem {
   attachments?: UserAttachment[];
 }
 
+/** Token accounting a provider reported for one model call. */
+export interface MessageUsage {
+  inputTokens: number;
+  outputTokens: number;
+}
+
 export interface AssistantItem {
   kind: 'assistant';
   id: string;
@@ -46,6 +52,20 @@ export interface AssistantItem {
   text: string;
   timestamp?: number;
   streaming: boolean;
+  usage?: MessageUsage;
+}
+
+/**
+ * Read the token accounting of one message, keeping only a complete pair of
+ * non-negative counts: a half-reported usage would read as a cheaper reply.
+ */
+export function messageUsage(value: unknown): MessageUsage | undefined {
+  if (typeof value !== 'object' || value === null) return undefined;
+  const record = value as { inputTokens?: unknown; outputTokens?: unknown };
+  const tokens = (candidate: unknown): candidate is number =>
+    typeof candidate === 'number' && Number.isSafeInteger(candidate) && candidate >= 0;
+  if (!tokens(record.inputTokens) || !tokens(record.outputTokens)) return undefined;
+  return { inputTokens: record.inputTokens, outputTokens: record.outputTokens };
 }
 
 export interface ReasoningItem {
@@ -322,7 +342,7 @@ export function applyAgentEvent(turn: LiveTurnState, event: AgentEvent | Record<
       return;
     }
     case 'assistant.message': {
-      const message = data.message as { content?: unknown; toolCalls?: ToolCall[] } | undefined;
+      const message = data.message as { content?: unknown; toolCalls?: ToolCall[]; usage?: unknown } | undefined;
       const text = messageText(message);
       const meta = currentTurn(turn);
       let assistant: AssistantItem | undefined;
@@ -343,6 +363,8 @@ export function applyAgentEvent(turn: LiveTurnState, event: AgentEvent | Record<
       if (assistant !== undefined) {
         assistant.text = text;
         assistant.streaming = false;
+        const usage = messageUsage(message?.usage);
+        if (usage !== undefined) assistant.usage = usage;
       }
       for (const call of message?.toolCalls ?? []) {
         if (findTool(turn, call.id) === undefined) {
@@ -508,8 +530,9 @@ export function hydrateTranscript(messages: readonly PublicMessage[], events: re
     if (message.role === 'assistant') {
       if (!started) startTurn();
       const text = message.content === undefined ? '' : messageText(message);
+      const usage = messageUsage(message.usage);
       if (text !== '') {
-        transcript.push({ kind: 'assistant', id: itemId('assistant'), turn: turnIndex, text, streaming: false, ...(typeof message.timestamp === 'number' && Number.isFinite(message.timestamp) ? { timestamp: message.timestamp } : {}) });
+        transcript.push({ kind: 'assistant', id: itemId('assistant'), turn: turnIndex, text, streaming: false, ...(typeof message.timestamp === 'number' && Number.isFinite(message.timestamp) ? { timestamp: message.timestamp } : {}), ...(usage === undefined ? {} : { usage }) });
       }
       for (const call of message.toolCalls ?? []) {
         if (findToolIn(transcript, call.id) === undefined) {

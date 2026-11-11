@@ -759,6 +759,50 @@ describe('workbench store', () => {
     expect(store.currentEntry()?.modelError).toBe('');
   });
 
+  it('switches model and permission while a turn is running', async () => {
+    const switches: string[] = [];
+    let controller!: ReadableStreamDefaultController<Uint8Array>;
+    const stream = new ReadableStream<Uint8Array>({ start(value) { controller = value; } });
+    const store = await boot(sessionFetcher(async (url, init) => {
+      if (url === '/api/workspaces/a/sessions/shared/messages' && init?.method === 'POST') {
+        return new Response(stream, { status: 200, headers: { 'content-type': 'text/event-stream' } });
+      }
+      if (url === '/api/workspaces/a/sessions/shared/model' && init?.method === 'POST') {
+        switches.push('model');
+        const body = JSON.parse(String(init.body));
+        return json({
+          model: body,
+          resolvedModel: { provider: 'provider-a', model: 'model-2', name: 'Model Two', capabilities: { imageInput: false } },
+        });
+      }
+      if (url === '/api/workspaces/a/sessions/shared/permission' && init?.method === 'POST') {
+        const body = JSON.parse(String(init.body)) as { preset: string };
+        switches.push(`permission:${body.preset}`);
+        return json({ permission: { preset: body.preset } });
+      }
+      if (url === '/api/workspaces/a/sessions/shared') return json(detail());
+      return undefined;
+    }));
+
+    await store.sendMessage('Long turn');
+    await waitFor(() => store.currentEntry()?.run !== undefined);
+
+    const binding = { version: 2 as const, kind: 'model' as const, provider: 'provider-a', model: 'model-2' };
+    await store.saveSessionModel(binding);
+    await store.saveSessionPermission('read-only');
+    expect(switches).toEqual(['model', 'permission:read-only']);
+    expect(store.currentEntry()?.binding).toEqual(binding);
+    expect(store.currentEntry()?.permission).toBe('read-only');
+    // The turn itself is untouched by the switches.
+    expect(store.currentEntry()?.run).not.toBeUndefined();
+    expect(store.currentEntry()?.modelSaving).toBe(false);
+    expect(store.currentEntry()?.permissionSaving).toBe(false);
+
+    controller.enqueue(new TextEncoder().encode('data: {"type":"turn.end","reason":"end_turn"}\n\n'));
+    controller.close();
+    await waitFor(() => store.currentEntry()?.run === undefined);
+  });
+
   it('filters subagent-only agents and persists a session agent switch', async () => {
     const switches: string[] = [];
     let currentAgent = defaultAgent;

@@ -47,7 +47,13 @@ const CONFIG = {
   },
 };
 
-async function setup() {
+/** Holds a turn open so a test can act while it is running. */
+interface TurnHold {
+  started: () => void;
+  gate: Promise<void>;
+}
+
+async function setup(hold?: TurnHold) {
   const root = await mkdtemp(join(tmpdir(), 'omniagent-runtime-route-'));
   const configDir = join(root, 'config');
   const path = join(root, 'workspace');
@@ -101,17 +107,19 @@ async function setup() {
   const modeStore = new ModeStore({ path: join(configDir, 'modes.json'), configStore, agents });
   const roleSettings = await RoleSettings.open(join(configDir, 'config.json'));
   const captured: ResolvedSessionRuntime[] = [];
+  const permissionSettings = {
+    async read() { return { defaultPreset: 'workspace-write' as const, requiresSelection: false }; },
+    async update(value: { defaultPreset: 'workspace-write' }) { return value; },
+    snapshot() { return { defaultPreset: 'workspace-write' as const, requiresSelection: false, revision: 0 }; },
+    async current() { return this.snapshot(); },
+  };
   const host = await startWebHost({
     workspaces,
     store,
     runtime,
     modeStore,
     roleSettings,
-    permissionSettings: {
-      async read() { return { defaultPreset: 'workspace-write', requiresSelection: false }; },
-      async update(value: { defaultPreset: 'workspace-write' }) { return value; },
-      snapshot() { return { defaultPreset: 'workspace-write', requiresSelection: false, revision: 0 }; },
-    } as unknown as WebHostOptions['permissionSettings'],
+    permissionSettings: permissionSettings as unknown as WebHostOptions['permissionSettings'],
     listAgents: async () => {
       const snapshot = await configStore.refresh();
       const catalog = await agents.refresh(snapshot.catalog);
@@ -158,7 +166,16 @@ async function setup() {
       captured.push(resolved);
       return {
         id: handle.id,
-        async *send() { yield { type: 'turn.end', reason: 'end_turn' }; },
+        async *send() {
+          if (hold === undefined) {
+            yield { type: 'turn.end', reason: 'end_turn' };
+            return;
+          }
+          yield { type: 'turn.start', step: 0 };
+          hold.started();
+          await hold.gate;
+          yield { type: 'turn.end', reason: 'end_turn' };
+        },
         interrupt() {},
       };
     },
@@ -286,6 +303,46 @@ describe('configured session API', () => {
     };
     expect(detail.agent.id).toBe('writer');
     expect(detail.resolvedModel).toMatchObject({ model: 'deepseek-v4-pro', reasoningEffort: 'low' });
+  });
+
+  it('switches the model while a turn is running and applies it to the next turn', async () => {
+    let release!: () => void;
+    let started!: () => void;
+    const gate = new Promise<void>((resolve) => { release = resolve; });
+    const running = new Promise<void>((resolve) => { started = resolve; });
+    const { url, store, workspace, captured } = await setup({ started: () => { started(); }, gate });
+    const { sessionUrl, id } = await create(url);
+
+    const response = await fetch(`${sessionUrl}/messages`, post({ text: 'go' }));
+    expect(response.status).toBe(200);
+    const reader = response.body!.getReader();
+    try {
+      expect(new TextDecoder().decode((await reader.read()).value)).toContain('turn.start');
+      await running;
+
+      const binding = { version: 2, kind: 'role', role: 'quick' } as const;
+      const switched = await fetch(`${sessionUrl}/model`, post(binding));
+      expect(switched.status).toBe(200);
+      expect(await switched.json()).toEqual({
+        model: binding,
+        resolvedModel: expect.objectContaining({ model: 'deepseek-v4-pro', reasoningEffort: 'low' }),
+      });
+      // The running turn keeps the runtime it captured at admission.
+      expect(captured).toHaveLength(1);
+      expect(captured[0]!.modelId).toBe('deepseek-flash');
+      expect(projectModelSelection((await store.open(workspace.path, id)).events))
+        .toEqual({ status: 'selected', binding });
+    } finally {
+      release();
+      while (!(await reader.read()).done) { /* drain the rest of the turn */ }
+    }
+    expect(captured).toHaveLength(1);
+
+    const next = await fetch(`${sessionUrl}/messages`, post({ text: 'again' }));
+    expect(next.status).toBe(200);
+    await next.text();
+    expect(captured).toHaveLength(2);
+    expect(captured[1]!.modelId).toBe('deepseek-v4-pro');
   });
 
   it('rejects malformed creation bodies, subagent-only agents, and unknown models', async () => {

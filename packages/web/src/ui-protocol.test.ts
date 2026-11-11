@@ -1,7 +1,7 @@
 import { describe, expect, it, vi } from 'vitest';
 import { createElement } from 'react';
 import { renderToStaticMarkup } from 'react-dom/server';
-import { ConversationView, MessageActions, UserContent } from '../ui/src/components/ConversationView.tsx';
+import { ConversationView, elapsedClock, MessageActions, usageDetail, UserContent } from '../ui/src/components/ConversationView.tsx';
 import { translator } from '../ui/src/lib/i18n.ts';
 import {
   applyAgentEvent,
@@ -137,12 +137,45 @@ describe('web client protocol', () => {
   });
   it('renders accessible copy controls and valid message times', () => {
     const t = translator('en');
-    const markup = renderToStaticMarkup(createElement(MessageActions, { text: 'Hello', timestamp: 1234, t }));
+    const markup = renderToStaticMarkup(createElement(MessageActions, { text: 'Hello', timestamp: 1234, locale: 'en', t }));
     expect(markup).toContain('aria-label="Copy message"');
     expect(markup).toContain('dateTime="1970-01-01T00:00:01.234Z"');
-    const absent = renderToStaticMarkup(createElement(MessageActions, { text: '', timestamp: NaN, t }));
+    // The visible time names the day and the clock, never the year.
+    const shown = /<time[^>]*>([^<]*)<\/time>/.exec(markup)?.[1] ?? '';
+    expect(shown).toBe(new Date(1234).toLocaleString('en-US', { month: 'short', day: 'numeric', hour: 'numeric', minute: '2-digit' }));
+    expect(shown).not.toContain('1970');
+    expect(shown).not.toContain('70');
+    const absent = renderToStaticMarkup(createElement(MessageActions, { text: '', timestamp: NaN, locale: 'en', t }));
     expect(absent).not.toContain('<time');
     expect(absent).not.toContain('<button');
+  });
+
+  it('shows a reply token spend with its input and output split', () => {
+    const zh = translator('zh');
+    const markup = renderToStaticMarkup(createElement(MessageActions, {
+      text: 'Answer', usage: { inputTokens: 1500, outputTokens: 250 }, locale: 'zh', t: zh,
+    }));
+    // The chip carries a token icon and rides in the hover-revealed action row,
+    // the same slot as the timestamp and the copy control.
+    expect(markup).toContain('data-icon="dsw-icon-database-outline-regular"');
+    expect(markup.indexOf('_actions_')).toBeLessThan(markup.indexOf('data-message-usage'));
+    expect(markup).not.toContain('_footer_');
+    expect(markup).toContain('1.8K tok');
+    expect(usageDetail({ inputTokens: 1500, outputTokens: 250 }, 'zh', zh)).toBe('输入 token 1,500 · 输出 token 250');
+    expect(usageDetail({ inputTokens: 1500, outputTokens: 250 }, 'en', translator('en'))).toBe('Input tokens 1,500 · Output tokens 250');
+    // A locally resolved call reports no usage and gets no chip.
+    const none = renderToStaticMarkup(createElement(MessageActions, {
+      text: 'Answer', usage: { inputTokens: 0, outputTokens: 0 }, locale: 'zh', t: zh,
+    }));
+    expect(none).not.toContain('data-message-usage');
+  });
+
+  it('counts the running status in seconds and minutes', () => {
+    const zh = translator('zh');
+    expect(elapsedClock(zh, 0)).toBe('0秒');
+    expect(elapsedClock(zh, 45)).toBe('45秒');
+    expect(elapsedClock(zh, 162)).toBe('2分42秒');
+    expect(elapsedClock(translator('en'), 162)).toBe('2m42s');
   });
 
 
@@ -202,8 +235,27 @@ describe('web client protocol', () => {
     }
   });
 
-  it('keeps live turn indices aligned with loaded history', () => {
-    const turn = createLiveState();
+  it('carries a reply token usage from the live stream and from loaded history', () => {
+    const run = createLiveState();
+    applyAgentEvent(run, { type: 'assistant.delta', text: 'Hi' }, 1000);
+    applyAgentEvent(run, {
+      type: 'assistant.message',
+      message: { role: 'assistant', content: [{ type: 'text', text: 'Hi' }], toolCalls: [], usage: { inputTokens: 200, outputTokens: 30 } },
+    }, 1500);
+    expect(run.transcript.at(-1)).toMatchObject({ kind: 'assistant', usage: { inputTokens: 200, outputTokens: 30 } });
+
+    const history = hydrateTranscript([
+      { role: 'user', content: [{ type: 'text', text: 'Hi' }] },
+      { role: 'assistant', content: [{ type: 'text', text: 'Hello' }], toolCalls: [], usage: { inputTokens: 10, outputTokens: 5 } },
+      // A half-reported usage would read as a cheaper reply, so it is dropped.
+      { role: 'assistant', content: [{ type: 'text', text: 'Again' }], toolCalls: [], usage: { inputTokens: 7 } as never },
+    ]).transcript;
+    expect(history[1]).toMatchObject({ kind: 'assistant', text: 'Hello', usage: { inputTokens: 10, outputTokens: 5 } });
+    expect(history[2]).toMatchObject({ kind: 'assistant', text: 'Again' });
+    expect(history[2]).not.toHaveProperty('usage');
+  });
+
+  it('keeps live turn indices aligned with loaded history', () => {    const turn = createLiveState();
     turn.turns.push({ index: 2, startedAt: 1 });
     applyAgentEvent(turn, { type: 'turn.start' });
     applyAgentEvent(turn, { type: 'assistant.delta', text: 'reply' });

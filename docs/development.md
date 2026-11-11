@@ -336,7 +336,7 @@ jq . ~/.omniagent/schedules.json
 - 刷新页面，让 `loadDetail()` 与服务器对账；
 - 检查 SSE 是否在 `turn.end` 后仍有事件；
 - 检查 `approval` 是否在断线后仍显示；
-- 检查 localStorage 中的 draft / queue / activeSessions；
+- 检查 localStorage 中的 composerDraft / queue / activeSessions；
 - 用 `pnpm test -- ui-store ui-protocol` 跑前端状态测试。
 
 ## 7. 安全评审清单

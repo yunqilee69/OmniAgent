@@ -660,7 +660,7 @@ describe('workspace web host', () => {
     expect((await fetch(`${url}/${session.id}/messages`, jsonRequest({ text: 'allowed' }))).status).toBe(200);
   });
 
-  it('captures the durable session preset before asynchronous startup and uses later changes on the next turn', async () => {
+  it('captures the durable session preset before asynchronous startup and applies a switch to the next turn', async () => {
     const starting = signal();
     const continueStartup = signal();
     const snapshots: DshPermissionSnapshot[] = [];
@@ -681,8 +681,10 @@ describe('workspace web host', () => {
     const pending = fetch(`${url}/${session.id}/messages`, jsonRequest({ text: 'first' }));
     await starting.promise;
     try {
+      // The switch is accepted and recorded, but the admitted turn already
+      // captured its snapshot, so it keeps running with `workspace-write`.
       const changed = await fetch(`${url}/${session.id}/permission`, jsonRequest({ preset: 'read-only' }));
-      expect(changed.status).toBe(409);
+      expect(changed.status).toBe(200);
     } finally {
       continueStartup.resolve();
     }
@@ -900,7 +902,7 @@ describe('workspace web host', () => {
     expect(calls).toBe(1);
   });
 
-  it('uses the permission snapshot captured when a turn is accepted', async () => {
+  it('changes the global default while a turn is starting without affecting that turn', async () => {
     const root = await mkdtemp(join(tmpdir(), 'omniagent-web-permissions-snapshot-'));
     const settings = await PermissionSettings.open(join(root, 'config.json'));
     const expected = { preset: 'workspace-write', sandbox: 'workspace-write', approval: 'ask' };
@@ -931,12 +933,14 @@ describe('workspace web host', () => {
     const pending = fetch(`${url}/${session.id}/messages`, jsonRequest({ text: 'first' }));
     await lookupBlocked.promise;
     try {
+      // The global default seeds new sessions only, so changing it never has to
+      // wait for a turn: a running turn keeps the preset in its own history.
       const updated = await fetch(`${base}/api/settings/permissions`, {
         method: 'PUT',
         headers: { 'content-type': 'application/json' },
         body: JSON.stringify({ defaultPreset: 'read-only' }),
       });
-      expect(updated.status).toBe(409);
+      expect(updated.status).toBe(200);
     } finally {
       continueLookup.resolve();
     }
@@ -945,6 +949,7 @@ describe('workspace web host', () => {
 
     expect(snapshots).toHaveLength(1);
     expect(snapshots[0]).toEqual(expected);
+    expect(await settings.read()).toEqual({ defaultPreset: 'read-only', requiresSelection: false });
   });
 
   it('preserves not-found responses when an unknown startup is interrupted', async () => {
@@ -1189,28 +1194,31 @@ describe('workspace web host', () => {
     }
   });
 
-  it('rejects session creation while a global permission update is being persisted', async () => {
+  it('creates a session with the default that finishes persisting first', async () => {
     const root = await mkdtemp(join(tmpdir(), 'omniagent-web-default-update-'));
     const settings = await PermissionSettings.open(join(root, 'config.json'));
     const { base, first } = await setup(undefined, undefined, settings);
     const started = signal();
     const gate = signal();
-    const update = settings.update.bind(settings);
-    settings.update = async (value) => {
+    const stubbed = settings as unknown as { write: (text: string) => Promise<void> };
+    const write = stubbed.write.bind(settings);
+    stubbed.write = async (text) => {
       started.resolve();
       await gate.promise;
-      return update(value);
+      return write(text);
     };
     const changing = fetch(`${base}/api/settings/permissions`, {
       method: 'PUT', headers: { 'content-type': 'application/json' }, body: JSON.stringify({ defaultPreset: 'read-only' }),
     });
     await started.promise;
-    try {
-      expect((await fetch(sessionsUrl(base, first.id), jsonRequest({}))).status).toBe(409);
-    } finally {
-      gate.resolve();
-      await changing;
-    }
+    const created = fetch(sessionsUrl(base, first.id), jsonRequest({}));
+    gate.resolve();
+    const response = await created;
+    // Creating a session waits for the pending write instead of failing, so it
+    // records the preset the user just chose rather than the one it replaces.
+    expect(response.status).toBe(201);
+    expect((await response.json() as { permission: { preset: string | null } }).permission.preset).toBe('read-only');
+    expect((await changing).status).toBe(200);
   });
 
   it('allows a concurrent session and turn while another turn is active', async () => {
@@ -1247,12 +1255,16 @@ describe('workspace web host', () => {
       secondReader = second.body!.getReader();
       expect(new TextDecoder().decode((await secondReader.read()).value)).toContain('turn.start');
 
-      // Authorization mutations on other sessions remain blocked.
-      expect((await fetch(`${url}/${other.id}/permission`, jsonRequest({ preset: 'danger-full-access' }))).status).toBe(409);
+      // Another session's preset is not part of this turn's authorization: the
+      // switch is recorded and applies to that session's own next turn. The
+      // global default is a different knob — it seeds new sessions only, so it
+      // stays editable while turns run.
+      expect((await fetch(`${url}/${other.id}/permission`, jsonRequest({ preset: 'danger-full-access' }))).status).toBe(200);
       expect((await fetch(`${base}/api/settings/permissions`, {
         method: 'PUT', headers: { 'content-type': 'application/json' },
         body: JSON.stringify({ defaultPreset: 'danger-full-access' }),
-      })).status).toBe(409);
+      })).status).toBe(200);
+      expect((await settings.read()).defaultPreset).toBe('danger-full-access');
     } finally {
       active.resolve();
       await reader.cancel();

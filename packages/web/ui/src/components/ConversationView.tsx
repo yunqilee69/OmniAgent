@@ -6,6 +6,7 @@ import {
   IconCheckOutlineRegular,
   IconContextInjectionOutlineRegular,
   IconCopyOutlineRegular,
+  IconDatabaseOutlineRegular,
   IconLoadingOutlineRegular,
   IconThinkOutlineRegular,
   MarkdownText,
@@ -15,10 +16,19 @@ import {
   UserMessageBubble,
   useClipboardCopy,
 } from '../../vendor/primitives/index.ts';
-import { groupTurns, userMessageCopyText, type DisplayTurn, type TranscriptItem, type UserItem } from '../lib/events.ts';
+import {
+  groupTurns,
+  userMessageCopyText,
+  type DisplayTurn,
+  type LiveTurnState,
+  type MessageUsage,
+  type TranscriptItem,
+  type UserItem,
+} from '../lib/events.ts';
 import { useApp } from '../lib/store.ts';
 import type { SessionEntry } from '../lib/store.ts';
 import { markdownLabels } from '../lib/labels.ts';
+import { formatTokens } from '../lib/session-readings.ts';
 import { MarkdownDelegateProvider } from '../../vendor/primitives/index.ts';
 import { translator, type Locale, type Translate } from '../lib/i18n.ts';
 import { ToolView } from './ToolView.tsx';
@@ -50,14 +60,58 @@ function durationText(t: Translate, turn: DisplayTurn, locale: Locale): string {
   return t('Worked for {duration}', { duration: duration });
 }
 
-export function MessageActions({ text, timestamp, t }: { text: string; timestamp?: number; t: Translate }): ReactNode {
+/** A message timestamp reads as day and time; the year is never shown. */
+function messageTime(date: Date, locale: Locale): string {
+  return date.toLocaleString(locale === 'zh' ? 'zh-CN' : 'en-US', {
+    month: 'short',
+    day: 'numeric',
+    hour: 'numeric',
+    minute: '2-digit',
+  });
+}
+
+/**
+ * Exact input/output split behind a reply's token chip. The chip itself stays
+ * compact; the split is what a reader checking a bill wants to see.
+ */
+export function usageDetail(usage: MessageUsage, locale: Locale, t: Translate): string {
+  const exact = (value: number): string => value.toLocaleString(locale === 'zh' ? 'zh-CN' : 'en-US');
+  return `${t('Input tokens')} ${exact(usage.inputTokens)} · ${t('Output tokens')} ${exact(usage.outputTokens)}`;
+}
+
+/**
+ * Token accounting for one reply: an icon and the compact total a reply spent,
+ * with the input/output split on hover. Messages the provider reported nothing
+ * for (and calls that resolved locally) simply have no chip.
+ */
+function UsageChip({ usage, locale, t }: { usage: MessageUsage; locale: Locale; t: Translate }): ReactNode {
+  const total = usage.inputTokens + usage.outputTokens;
+  if (total === 0) return null;
+  return (
+    <Tooltip label={usageDetail(usage, locale, t)} side="top" delayMs={400}>
+      <span className={messageCss.usage} data-message-usage>
+        <IconDatabaseOutlineRegular />
+        {t('{count} tok', { count: formatTokens(total, t) })}
+      </span>
+    </Tooltip>
+  );
+}
+
+export function MessageActions({ text, timestamp, usage, locale, t }: {
+  text: string;
+  timestamp?: number;
+  usage?: MessageUsage;
+  locale: Locale;
+  t: Translate;
+}): ReactNode {
   const { copied, failed, onCopy } = useClipboardCopy(text);
   const date = timestamp === undefined ? null : new Date(timestamp);
   const validDate = date !== null && Number.isFinite(date.getTime()) ? date : null;
   const label = copied ? t('Copied') : failed ? t('Could not copy message') : t('Copy message');
   return (
     <div className={messageCss.actions}>
-      {validDate !== null && <time dateTime={validDate.toISOString()}>{validDate.toLocaleString()}</time>}
+      {usage !== undefined && <UsageChip usage={usage} locale={locale} t={t} />}
+      {validDate !== null && <time dateTime={validDate.toISOString()}>{messageTime(validDate, locale)}</time>}
       {text !== '' && <Tooltip label={label} side="top" delayMs={400}>
         <button type="button" className={messageCss.action} aria-label={label} onClick={onCopy}>
           {copied ? <IconCheckOutlineRegular /> : <IconCopyOutlineRegular />}
@@ -187,6 +241,73 @@ function NoticeView({ item, t }: { item: Extract<TranscriptItem, { kind: 'notice
   );
 }
 
+/** Whole seconds under a minute, minutes and seconds from there on. */
+export function elapsedClock(t: Translate, seconds: number): string {
+  return seconds < 60
+    ? t('{seconds}s', { seconds })
+    : t('{minutes}m{seconds}s', { minutes: Math.floor(seconds / 60), seconds: seconds % 60 });
+}
+
+/** The running turn's own start, once this tab has recorded one. */
+function openTurnStart(turns: readonly DisplayTurn[]): number | undefined {
+  const last = turns.at(-1);
+  return last !== undefined && last.live && last.endedAt === undefined ? last.startedAt : undefined;
+}
+
+/**
+ * Seconds the running status has counted. A turn this tab started records its
+ * own start; a run followed from another tab may publish none, so the first
+ * active frame stands in until a turn reports a real start.
+ */
+function useRunningSeconds(start: number | undefined, active: boolean): number | undefined {
+  const [anchor, setAnchor] = useState<number | undefined>(undefined);
+  const [now, setNow] = useState(() => Date.now());
+  useEffect(() => {
+    setNow(Date.now());
+    if (!active) {
+      setAnchor(undefined);
+      return;
+    }
+    if (start !== undefined) {
+      setAnchor(start);
+      return;
+    }
+    setAnchor((current) => current ?? Date.now());
+  }, [active, start]);
+  useEffect(() => {
+    if (!active) return;
+    const timer = setInterval(() => { setNow(Date.now()); }, 1000);
+    return () => { clearInterval(timer); };
+  }, [active]);
+  return anchor === undefined ? undefined : Math.max(0, Math.floor((now - anchor) / 1000));
+}
+
+/** The status row under the transcript: what the agent is doing, and for how long. */
+function RunningStatus({ run, startedAt, t }: { run: LiveTurnState; startedAt: number | undefined; t: Translate }): ReactNode {
+  const seconds = useRunningSeconds(startedAt, run.stopping !== true && run.finishing !== true);
+  return (
+    <div className={chatCss.running} data-holding={run.finishing ? '' : undefined}>
+      <span className={chatCss.runningDivider} aria-hidden />
+      <div className={chatCss.runningContent} role="status">
+        <span className={chatCss.runningIcon} aria-hidden>
+          <IconLoadingOutlineRegular className={css.spin} />
+        </span>
+        <span className={chatCss.runningText}>
+          <TextShimmer>
+            {run.stopping === true ? t('Stopping…')
+              : run.finishing === true ? t('Saving session…')
+                : run.approval !== undefined ? t('Waiting for approval')
+                  : t('Agent is working')}
+          </TextShimmer>
+          {seconds !== undefined && (
+            <span className={chatCss.runningElapsed} data-running-elapsed>{`· ${elapsedClock(t, seconds)}`}</span>
+          )}
+        </span>
+      </div>
+    </div>
+  );
+}
+
 function TurnView({ turn, processDisplay, locale, t }: { turn: DisplayTurn; processDisplay: 'collapsed' | 'expanded'; locale: Locale; t: Translate }): ReactNode {
   const [override, setOverride] = useState<boolean | null>(null);
   const open = override ?? (turn.live || processDisplay === 'expanded');
@@ -199,7 +320,7 @@ function TurnView({ turn, processDisplay, locale, t }: { turn: DisplayTurn; proc
         <div className={clsx(messageCss.userRow, messageCss.message)}>
           <div className={messageCss.userStack}>
             <UserContent user={turn.user} />
-            <MessageActions text={userMessageCopyText(turn.user.text, turn.user.attachments)} timestamp={turn.user.timestamp} t={t} />
+            <MessageActions text={userMessageCopyText(turn.user.text, turn.user.attachments)} timestamp={turn.user.timestamp} locale={locale} t={t} />
           </div>
         </div>
       )}
@@ -238,7 +359,7 @@ function TurnView({ turn, processDisplay, locale, t }: { turn: DisplayTurn; proc
             />
             {turn.reason === 'interrupted' && !turn.live && <span className={assistantCss.stopped}>{t('Stopped')}</span>}
           </div>
-          <MessageActions text={turn.final.text} timestamp={turn.final.timestamp} t={t} />
+          <MessageActions text={turn.final.text} timestamp={turn.final.timestamp} usage={turn.final.usage} locale={locale} t={t} />
         </div>
       )}
       {turn.extras.map((item) => item.kind === 'notice' ? <NoticeView key={item.id} item={item} t={t} /> : null)}
@@ -346,22 +467,7 @@ export function ConversationView({ entry, processDisplay, onOpenPlan, onOpenFile
             <PlanReviewCard review={live.planReview} onOpen={() => { onOpenPlan?.(); }} />
           )}
           {entry.run !== undefined && entry.run.planReview === undefined && (
-            <div className={chatCss.running} data-holding={entry.run.finishing ? '' : undefined}>
-              <span className={chatCss.runningDivider} aria-hidden />
-              <div className={chatCss.runningContent} role="status">
-                <span className={chatCss.runningIcon} aria-hidden>
-                  <IconLoadingOutlineRegular className={css.spin} />
-                </span>
-                <span className={chatCss.runningText}>
-                  <TextShimmer>
-                    {entry.run.stopping === true ? t('Stopping…')
-                      : entry.run.finishing === true ? t('Saving session…')
-                        : entry.run.approval !== undefined ? t('Waiting for approval')
-                          : t('Agent is working')}
-                  </TextShimmer>
-                </span>
-              </div>
-            </div>
+            <RunningStatus run={entry.run} startedAt={openTurnStart(turns)} t={t} />
           )}
         </div>
       </div>

@@ -50,8 +50,16 @@ import {
   type WorkspaceFileEntry,
 } from '../lib/wire.ts';
 import { authFetch } from '../lib/auth.ts';
-import { store, useApp, useSessionEntry, sessionKey } from '../lib/store.ts';
+import { store, useApp, useSessionEntry } from '../lib/store.ts';
 import type { BusySendMode, SessionEntry } from '../lib/store.ts';
+import {
+  clearComposerDraft,
+  composerDraftKey,
+  draftFollowsSession,
+  readComposerDraft,
+  writeComposerDraft,
+  type DraftTarget,
+} from '../lib/composer-drafts.ts';
 import {
   detectTrigger,
   directoryReference,
@@ -200,13 +208,20 @@ export function Composer({ hero = false, onOpenPlanPreview }: { hero?: boolean; 
       ? app.modeOptions.skills
       : app.modeOptions.skills.filter((skill) => selector.includes(skill.name));
   }, [draftSession, draftMode, entry, app.modes, app.modeOptions.skills]);
-  const key = draftSession && app.sessionId !== null
-    ? app.sessionId
-    : app.workspaceId !== null && app.sessionId !== null ? sessionKey(app.workspaceId, app.sessionId) : 'new';
-  const drafts = useRef(new Map<string, string>());
+  // A drafted message is cached per target so it survives switching sessions,
+  // leaving the workspace or reloading the page. A session that the host has not
+  // created yet has no id of its own to be cached under, so its text belongs to
+  // the workspace (see lib/composer-drafts.ts).
+  const target: DraftTarget = { workspaceId: app.workspaceId, sessionId: app.sessionId, draft: draftSession };
+  const key = composerDraftKey(target);
+  const drafts = useRef<{ key: string | null; target: DraftTarget; text: string }>({
+    key,
+    target,
+    text: key === null ? '' : readComposerDraft(key),
+  });
   const currentKey = useRef(key);
   currentKey.current = key;
-  const [draft, setDraft] = useState(drafts.current.get(key) ?? '');
+  const [draft, setDraft] = useState(drafts.current.text);
   const [caret, setCaret] = useState(0);
   const [risk, setRisk] = useState<{ preset: PermissionPreset; acknowledged: boolean } | null>(null);
   const [attachments, setAttachments] = useState<Attachment[]>([]);
@@ -239,9 +254,22 @@ export function Composer({ hero = false, onOpenPlanPreview }: { hero?: boolean; 
   const menuKey = `${mode ?? 'none'}:${triggerVisible ? triggerKey : ''}`;
 
   useEffect(() => {
-    setDraft(drafts.current.get(key) ?? '');
-    setAttachments([]);
-    setAttachmentError('');
+    const previous = drafts.current;
+    if (previous.key !== key) {
+      setAttachments([]);
+      setAttachmentError('');
+      if (key !== null && previous.key !== null
+        && previous.text.trim() !== '' && draftFollowsSession(previous.target, target)) {
+        // Moving an unstarted session to another workspace keeps what was typed;
+        // every other switch loads the draft cached for that target.
+        writeComposerDraft(key, previous.text);
+        clearComposerDraft(previous.key);
+        drafts.current = { key, target, text: previous.text };
+      } else {
+        drafts.current = { key, target, text: key === null ? '' : readComposerDraft(key) };
+      }
+      setDraft(drafts.current.text);
+    }
   }, [key]);
 
   useEffect(() => {
@@ -376,6 +404,9 @@ export function Composer({ hero = false, onOpenPlanPreview }: { hero?: boolean; 
     && entry?.agent !== null && entry?.binding !== null && (draft.trim() !== '' || attachments.length > 0)
     && (run === undefined || (run.stopping !== true && run.finishing !== true));
   const locked = !available || busy || saving;
+  // Model and permission switches are recorded for the next turn, so a running
+  // turn does not block them; only a missing session or a pending write does.
+  const switchLocked = !available || saving;
   const attachLocked = !available || saving || sending || readingFiles;
   const placeholder = app.workspaceId === null ? t('Select a workspace')
     : creating ? t('Create a session to begin')
@@ -391,7 +422,8 @@ export function Composer({ hero = false, onOpenPlanPreview }: { hero?: boolean; 
 
   const setDraftValue = (value: string): void => {
     setDraft(value);
-    drafts.current.set(key, value);
+    drafts.current.text = value;
+    if (drafts.current.key !== null) writeComposerDraft(drafts.current.key, value);
   };
 
   const focusCaret = (position: number): void => {
@@ -580,7 +612,9 @@ export function Composer({ hero = false, onOpenPlanPreview }: { hero?: boolean; 
           : await store.steerMessage(text, payload)
         : await store.sendMessage(text, payload);
       if (accepted) {
-        drafts.current.delete(key);
+        // The text now lives in the conversation, so its cached draft goes away.
+        if (key !== null) clearComposerDraft(key);
+        if (drafts.current.key === key) drafts.current.text = '';
         if (currentKey.current === key) {
           setDraft('');
           setAttachments([]);
@@ -880,8 +914,10 @@ export function Composer({ hero = false, onOpenPlanPreview }: { hero?: boolean; 
                     id: value, label: t(preset.label), icon: permissionIcon(value as PermissionPreset),
                   }))}
                   onSelect={choosePermission} ariaLabel={t('Session permission')}
-                  title={selectedPermission === null ? t('Choose a permission for this session.') : t(permissionPresets[selectedPermission].description)}
-                  disabled={locked} side="top"
+                  title={selectedPermission === null ? t('Choose a permission for this session.')
+                    : busy ? t('{permission} · applies from your next message', { permission: t(permissionPresets[selectedPermission].description) })
+                      : t(permissionPresets[selectedPermission].description)}
+                  disabled={switchLocked} side="top"
                   leading={selectedPermission === null ? undefined : permissionIcon(selectedPermission)}
                   listClassName={appCss.selectMenuList}>
                   {permissionLabel}
@@ -937,8 +973,9 @@ export function Composer({ hero = false, onOpenPlanPreview }: { hero?: boolean; 
                     ariaLabel={t('Model source')}
                     title={draftSession || creating
                       ? t('Model source for the next session')
-                      : t('Model source for this session')}
-                    disabled={busy || saving || (!available && !creating)}
+                      : busy ? t('Model source for this session · applies from your next message')
+                        : t('Model source for this session')}
+                    disabled={saving || (!available && !creating)}
                     side="top"
                     align="end"
                   />

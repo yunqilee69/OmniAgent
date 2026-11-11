@@ -3,6 +3,7 @@ import { createPortal } from 'react-dom';
 import { Tooltip } from '../../vendor/primitives/index.ts';
 import { authFetch } from '../lib/auth.ts';
 import { sessionApiPath, validateContextEstimate, type ContextEstimate } from '../lib/wire.ts';
+import { carryProjection, contextOccupancy } from '../lib/context-reading.ts';
 import { formatTokens } from '../lib/session-readings.ts';
 import { translator, type Locale } from '../lib/i18n.ts';
 import { MEASURE_STYLE, useStatDialog } from './stat-dialog.tsx';
@@ -41,7 +42,10 @@ const READING_SLOT = '\0';
  * The reading is bound to one scope (workspace + session + model source) and is
  * only dropped when that scope changes. A new turn, a poll, or a failed request
  * updates the numbers in place; blanking the meter on those transients made the
- * ring disappear and remount between turns.
+ * ring disappear and remount between turns. A poll that lands mid-turn answers
+ * without a projection at all, so the ring keeps the last settled breakdown
+ * instead of vanishing until the turn settles — and a session that has not
+ * settled a turn yet reads 0% rather than disappearing.
  */
 export function ContextMeter({ workspaceId, sessionId, draft, busy, modelSaving, modelKey, locale }: Props): ReactNode {
   const [snapshot, setSnapshot] = useState<{ scope: string; value: ContextEstimate } | null>(null);
@@ -78,7 +82,16 @@ export function ContextMeter({ workspaceId, sessionId, draft, busy, modelSaving,
           if (!response.ok) throw new Error('Context request failed');
           return validateContextEstimate(await response.json());
         })
-        .then((value) => { if (current && !signal.aborted) setSnapshot({ scope, value }); })
+        .then((value) => {
+          if (!current || signal.aborted) return;
+          // A turn in flight answers without a projection, because the runtime
+          // will not project history it is still rewriting. Hold the last
+          // settled breakdown; the window fields are still fresher than ours.
+          setSnapshot((previous) => ({
+            scope,
+            value: carryProjection(previous !== null && previous.scope === scope ? previous.value : undefined, value),
+          }));
+        })
         // A failed or aborted poll leaves the previous reading in place.
         .catch(() => {});
     };
@@ -89,17 +102,19 @@ export function ContextMeter({ workspaceId, sessionId, draft, busy, modelSaving,
 
   const t = translator(locale);
   const value = snapshot !== null && snapshot.scope === scope ? snapshot.value : null;
-  const projection = value?.projection;
-  const capacity = value?.modelWindow;
-  const usedTokens = projection?.projectedTokens;
-  if (projection === undefined || capacity === undefined || usedTokens === undefined || capacity <= 0) return null;
+  // The ring belongs to the session, not to the reading: it stays mounted for
+  // as long as there is a session to report on, and reads 0% until the first
+  // settled projection arrives.
+  if (!pollable && value === null) return null;
 
-  const percent = Math.min(100, Math.round(usedTokens / capacity * 100));
+  const { percent, settled, projection, capacity } = contextOccupancy(value);
   const reading = `${percent}%`;
-  const sentence = t('{percent}% of context used', { percent: reading });
+  const sentence = settled
+    ? t('{percent}% of context used', { percent: reading })
+    : t('Context usage is counted when a turn finishes');
   const [headBefore = '', headAfter = ''] = t('{percent}% of context used', { percent: READING_SLOT })
     .split(READING_SLOT).map((part) => part.trim());
-  const rows = [
+  const rows = projection === undefined ? [] : [
     { key: 'system', label: t('System prompt'), tokens: projection.breakdown.systemTokens, color: css.colorSystem },
     { key: 'tools', label: t('Tool definitions'), tokens: projection.breakdown.toolsTokens, color: css.colorTools },
     { key: 'messages', label: t('Conversation messages'), tokens: projection.breakdown.messageTokens, color: css.colorMessages },
@@ -129,24 +144,36 @@ export function ContextMeter({ workspaceId, sessionId, draft, busy, modelSaving,
             <span className={css.headline}>{headBefore}</span>
             <span className={css.percent}>{reading}</span>
             <span className={css.headline}>{headAfter}</span>
-            <span className={css.figures}>
-              {`~${formatTokens(usedTokens, t)} / ${formatTokens(capacity, t)}`}
-            </span>
+            {projection !== undefined && capacity !== undefined && (
+              <span className={css.figures}>
+                {`~${formatTokens(projection.projectedTokens, t)} / ${formatTokens(capacity, t)}`}
+              </span>
+            )}
           </div>
-          <div className={css.bar}>
-            {segments.filter((segment) => segment.width > 0).map((segment) => (
-              <div key={segment.key} className={segment.color === '' ? css.segment : `${css.segment} ${segment.color}`}
-                style={{ width: `${segment.width}%` }} />
-            ))}
-          </div>
-          <dl className={css.rows}>
-            {rows.map((row) => (
-              <div key={row.key} className={css.row}>
-                <dt><span className={`${css.swatch} ${row.color}`} aria-hidden />{row.label}</dt>
-                <dd>{`~${formatTokens(row.tokens, t)}`}</dd>
+          {projection === undefined && (
+            <p className={css.hint}>{t('The first reading appears when this turn finishes.')}</p>
+          )}
+          {projection !== undefined && capacity === undefined && (
+            <p className={css.hint}>{t('This model has no known context window.')}</p>
+          )}
+          {projection !== undefined && (
+            <>
+              <div className={css.bar}>
+                {segments.filter((segment) => segment.width > 0).map((segment) => (
+                  <div key={segment.key} className={segment.color === '' ? css.segment : `${css.segment} ${segment.color}`}
+                    style={{ width: `${segment.width}%` }} />
+                ))}
               </div>
-            ))}
-          </dl>
+              <dl className={css.rows}>
+                {rows.map((row) => (
+                  <div key={row.key} className={css.row}>
+                    <dt><span className={`${css.swatch} ${row.color}`} aria-hidden />{row.label}</dt>
+                    <dd>{`~${formatTokens(row.tokens, t)}`}</dd>
+                  </div>
+                ))}
+              </dl>
+            </>
+          )}
         </div>,
         document.body,
       )}

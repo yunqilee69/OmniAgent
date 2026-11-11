@@ -10,6 +10,20 @@
   opacity: 0;
 }
 
+/* A reply's token spend rides in the action row, so it appears with the
+   timestamp and the copy control rather than adding a permanent footer. */
+.usage {
+  display: inline-flex;
+  align-items: center;
+  gap: 4px;
+  font-variant-numeric: tabular-nums;
+}
+
+.usage svg {
+  width: 14px;
+  height: 14px;
+}
+
 .message:hover .actions,
 .message:focus-within .actions {
   opacity: 1;

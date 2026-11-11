@@ -2607,7 +2607,9 @@ export class AppStore {
     if (workspaceId === null || sessionId === null || !isPermissionPreset(preset)) return;
     const key = sessionKey(workspaceId, sessionId);
     const entry = this.state.entries[key];
-    if (entry === undefined || !entry.loaded || entry.loading || entry.permissionSaving || entry.run !== undefined) return;
+    // A running turn keeps the permission snapshot it started with; the new
+    // preset is persisted now and takes effect from the next turn.
+    if (entry === undefined || !entry.loaded || entry.loading || entry.permissionSaving) return;
     if (entry.draft === true) {
       this.patchEntry(key, { permission: preset, permissionError: '' });
       return;
@@ -2748,6 +2750,11 @@ export class AppStore {
     }
   }
 
+  /**
+   * Persist a model switch. Allowed while a turn is running — a failing or
+   * stalled model is the main reason to switch — because the server records the
+   * binding and the running turn keeps the runtime it started with.
+   */
   async saveSessionModel(binding: ModelBinding): Promise<void> {
     const { workspaceId, sessionId } = this.state;
     if (workspaceId === null || sessionId === null) {
@@ -2773,7 +2780,7 @@ export class AppStore {
       });
       return;
     }
-    if (entry.loading || entry.permissionSaving || entry.agentSaving || entry.modelSaving || entry.run !== undefined) return;
+    if (entry.loading || entry.permissionSaving || entry.agentSaving || entry.modelSaving) return;
     if (JSON.stringify(entry.binding) === JSON.stringify(binding)) return;
     this.patchEntry(key, { modelSaving: true, modelError: '' });
     try {

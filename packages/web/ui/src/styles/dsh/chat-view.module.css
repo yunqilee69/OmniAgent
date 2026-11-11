@@ -273,6 +273,14 @@
   font-variant-numeric: tabular-nums;
 }
 
+/* How long the agent has been working, trailing the shimmering label. Muted:
+   the label names the activity and the count follows it. */
+.runningElapsed {
+  margin-left: 6px;
+  color: var(--dsw-alias-label-tertiary);
+  font-variant-numeric: tabular-nums;
+}
+
 .runningIcon {
   position: relative;
   display: inline-flex;

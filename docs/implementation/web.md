@@ -205,16 +205,17 @@ server 维护：
 - `running`：正在执行的 turn；
 - `creating`：正在创建会话；
 - `removing`：正在删除工作区；
-- `permissionDefaultUpdates`：正在更新默认权限；
 - `compactRequests`：待执行的手动压缩。
 
 以下操作在任意 turn 运行时返回 409：
 
-- 修改默认权限、agent、model、plan；
+- 修改当前会话/工作区的 agent、model、plan；
 - fork；
 - 删除工作区。
 
-新建会话不受运行中 turn 的限制：新会话只快照当前全局默认权限，而该默认值在 turn 运行期间不可变，不同会话的回合可以并行执行。只有默认权限更新进行中时，新建会话才返回 409，避免快照到未完成的默认值。
+全局默认权限不受这些限制：它只决定新会话的初始预设，运行中的 turn 与正在创建的会话都已在自身事件历史里记录预设，因此该值任何时候都可以修改，写入由 `PermissionSettings` 内部串行化。
+
+新建会话不受运行中 turn 的限制：新会话只快照当前全局默认权限，不同会话的回合可以并行执行。默认权限正在写入时，新建会话通过 `PermissionSettings.current()` 等待这次写入落盘再快照，因此拿到的是用户刚选的预设，而不是返回 409。
 
 上述限制是为了防止运行中的沙盒命令通过 Web 控制面改变后续回合的授权。它是竞态保护，不替代认证；即使启用了 Web 认证，这些 409 仍然生效。
 
@@ -462,6 +463,8 @@ AuthGate
    │   │   └─ SettingsAgents
    │   ├─ ConversationView
    │   │   ├─ TurnView → ToolView / ReasoningView / MarkdownText / CompactionView / NoticeView
+   │   │   │   └─ MessageActions（回复页脚：token 用量 + 时间 + 复制）
+   │   │   ├─ RunningStatus（回合进行中的状态行与已用时长）
    │   │   ├─ PlanReviewCard（等待审阅时作为 AI 回复卡片，点击在右栏打开计划）
    │   │   ├─ ApprovalView
    │   │   └─ Composer → PlanReviewComposer（等待计划审阅时替换输入区）
@@ -479,8 +482,12 @@ AuthGate
 
 - `SessionStats` 渲染两枚药丸：`ActivityPill`（`N 轮 M 步 · X tok/s`）和 `UsagePill`（`总 token · 缓存命中 X%`）。药丸默认是静态读数，只有存在可解释的明细时才变成按钮，点开锚定在药丸上方的弹窗；弹窗标题带精确总量，明细按「模型用时 / 工具调用用时 / 首 token 平均（TTFT）/ 输出速度（TPS）」和「缓存命中 / 未缓存输入 / 缓存读取 / 输出」分两栏列出。同一时刻只开一个弹窗，Escape 或外部点击关闭。
 - `ContextMeter` 渲染环形占比和百分比，点开是「上下文已用 X%」加三色构成条与「系统提示词 / 工具定义 / 对话消息」明细。读数按「工作区 + 会话 + 模型来源」定域：只有换会话或换模型才丢弃旧值，轮次开始/结束、轮询返回、请求失败都只更新数字，不卸载环形；一轮进行中每个 effect run 只取一次（占用在中途不会稳定），空闲时每 5 秒轮询。
+- 一轮进行中 `.../context` 不返回 `projection`（runtime 拒绝投影正在被改写的历史），所以环形保留上一次已结算的投影，只把更「新」的窗口字段换掉（`lib/context-reading.ts` 的 `carryProjection`）。否则每次轮次开始都会用一个没有投影的回答覆盖读数，环形就会在一轮里整段消失。占比分母取已解析的 `window.tokens`（配置覆盖或模型窗口，也就是压缩真正用的预算），缺失时回退到 `modelWindow`（`contextCapacity`），避免模型描述符没写窗口时环形整个不渲染。
+- 环形跟着会话走，不跟着读数走：只要有会话就渲染，还没有任何已结算投影时（会话第一轮进行中）读 0%，弹窗里写「本轮结束后出现首个读数」；一轮结束、轮询拿到投影后再结算成真实百分比（`contextOccupancy`）。新建会话的草稿态（还没有会话）不渲染环形。
 - 读数全部来自服务端 `metrics` 和 `.../context` 投影，不做前端二次猜测；数字格式（K/M、分组、时长、缓存命中率）集中在 `lib/session-readings.ts`，缓存命中不会把部分命中四舍五入成 100%。
 - 样式在 `styles/dsh/stats-pills.module.css`、`stat-dialog.module.css`、`context-meter.module.css`；弹窗定位复用 `useAnchoredPosition`（视口夹取、`--dsh-anchored-max-width/height`）。
+
+输入框里还没发出去的文字按「目标」缓存（`lib/composer-drafts.ts`）：已有会话用 `[工作区, 会话]` 作键；还没落库的会话没有自己的 id（UI-only `draft-…` 每次刷新都会重新编号），所以它的草稿按工作区缓存一份，也就是「新建会话」页里输入的内容。草稿写进 `localStorage`，切换会话、切工作区、刷新页面都还在，最多保留 32 份、按写入时间淘汰，发送成功后立刻删除。把一个未落库的会话切到另一个工作区时草稿跟着走（`draftFollowsSession`），其余切换各读各自的缓存。
 
 等待计划审阅时不再弹出遮挡式对话框：会话末尾显示计划卡片，点击卡片或输入区里的「查看计划」把完整计划以 Markdown 形式放到右栏 `plan` 视图；输入区同时切换为计划审阅模式，可直接批准，或输入反馈后继续规划。右栏保留最后一次审阅的计划，审阅结束后仍可查看。
 
@@ -514,6 +521,7 @@ AuthGate
   - `omniagent.activeSessions`
   - `omniagent.busySend`
   - `omniagent.queue:<ws>:<sid>`
+  - `omniagent.composerDraft:<workspaceId 或 [ws, sid]>`（输入框草稿，见 9.1）
 
 关键行为：
 
@@ -554,7 +562,7 @@ AuthGate
 - `turn.start`：建 / 推进 TurnMeta；
 - `assistant.reasoning.delta`：懒建 ReasoningItem 并累加；
 - `assistant.delta`：懒建 AssistantItem；
-- `assistant.message`：替换流式文本，补 tool calls，结束 reasoning；
+- `assistant.message`：替换流式文本，补 tool calls，记录该次请求的 `usage`，结束 reasoning；
 - `tool.call`：去重 / 合并 ToolItem；
 - `permission.requested`：写入 `turn.approval`；
 - `permission.decided`：标记 denied，清除 approval；
@@ -570,6 +578,12 @@ AuthGate
 - 其余进入 `process`；
 - notice 进入 `extras`；
 - 最后一个 running turn 标记为 live。
+
+消息操作行（`MessageActions`）与运行状态行：
+
+- 回复消耗的 token 来自 `assistant.message` 上的 `usage`（历史消息从 `hydrateTranscript()` 的 `PublicMessage.usage` 取得），`messageUsage()` 只接受一对完整的非负计数——只报了一半的用量会被整条丢弃，避免读成「更便宜的回答」；读数带一个 token 图标（与 `UsagePill` 同源的数据库图标）和 `formatTokens()` 缩略总量，悬停给出精确的「输入 token / 输出 token」拆分；它和时间、复制按钮同在 `MessageActions` 这一行里，随整行在悬停 / 聚焦时才显现，不额外占用正文下方的高度。`0 tok` 不渲染（本地命中的调用没有真实用量）。
+- 这一行的时间只显示月日与时分，不显示年份；`<time>` 的 `dateTime` 仍保留完整 ISO 时间供无障碍与复制使用。
+- 状态行（`RunningStatus`）在「智能体正在工作 / 等待审批」后面追加已用时长，按 `{秒}秒` 或 `{分}分{秒}秒` 递增；起点取当前回合的 `startedAt`，跟随其他标签页已在运行的回合时该回合可能没有起始时间，就用本视图第一次看到运行状态的时间代替。计时器只存在于状态行自己的组件里，整秒重渲染不会重算整个会话的 turn 列表；`stopping` / `finishing` 时不再计时（此时显示的是收尾文案）。
 
 ### 9.4 SSE 解析
 

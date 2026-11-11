@@ -29,6 +29,7 @@ async function setup(initial: Preset | null = 'workspace-write') {
     async read() { return { defaultPreset, requiresSelection: defaultPreset === null }; },
     async update(value: { defaultPreset: Preset }) { defaultPreset = value.defaultPreset; revision += 1; return this.read(); },
     snapshot() { return { defaultPreset, requiresSelection: defaultPreset === null, revision }; },
+    async current() { return this.snapshot(); },
   };
   const host = await startWebHost({
     workspaces, store,

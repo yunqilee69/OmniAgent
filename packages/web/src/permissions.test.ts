@@ -196,6 +196,26 @@ describe('permission settings API', () => {
     expect(settings.snapshot()).toEqual({ ...selected('danger-full-access'), revision });
   });
 
+  it('resolves a snapshot only after an in-flight write lands', async () => {
+    const root = await mkdtemp(join(tmpdir(), 'omniagent-web-dsh-current-'));
+    const configPath = join(root, 'config.json');
+    const settings = await permissionStore(configPath);
+    let release!: () => void;
+    const gate = new Promise<void>((resolve) => { release = resolve; });
+    const stubbed = settings as unknown as { write: (text: string) => Promise<void> };
+    const write = stubbed.write.bind(settings);
+    stubbed.write = async (text) => { await gate; await write(text); };
+    const updating = settings.update(preset('read-only'));
+    // The queued write has not landed, so the synchronous snapshot is stale but
+    // an awaiting reader still observes the preset the user chose.
+    expect(settings.snapshot().defaultPreset).toBe('workspace-write');
+    const current = settings.current();
+    release();
+    expect((await current).defaultPreset).toBe('read-only');
+    expect(await updating).toEqual(selected('read-only'));
+    expect((await settings.current()).defaultPreset).toBe('read-only');
+  });
+
   it('requires an explicit selection to replace an invalid stored preset', async () => {
     const config = {
       provider: { apiKey: 'SECRET' },
@@ -491,7 +511,7 @@ describe('permission settings API', () => {
     expect(second.snapshot()).toEqual({ ...selected('read-only'), revision: 0 });
   });
 
-  it('retains the session preset across a default update and the next turn', async () => {
+  it('records a session preset switched mid-turn and applies it from the next turn', async () => {
     let release!: () => void;
     let started!: () => void;
     const gate = new Promise<void>((resolve) => { release = resolve; });
@@ -515,20 +535,25 @@ describe('permission settings API', () => {
     const pending = send(url, 'first');
     await active;
     try {
+      // The global default seeds new sessions only, so it moves freely while a
+      // turn runs; that turn keeps the preset in its own event history.
       expect(settings.snapshot()).toEqual({ ...defaults, revision: 0 });
-      expect((await fetch(`${base}/api/settings/permissions`, put(preset('read-only')))).status).toBe(409);
+      expect((await fetch(`${base}/api/settings/permissions`, put(preset('read-only')))).status).toBe(200);
+      // The session preset can move too: the running turn keeps its snapshot.
       expect((await fetch(`${url.replace(/\/messages$/u, '')}/permission`, {
         method: 'POST', headers: { 'content-type': 'application/json' }, body: JSON.stringify({ preset: 'danger-full-access' }),
-      })).status).toBe(409);
-      expect(settings.snapshot()).toEqual({ ...defaults, revision: 0 });
+      })).status).toBe(200);
+      expect(settings.snapshot()).toEqual({ ...selected('read-only'), revision: 1 });
       expect(snapshots).toEqual([sessionSnapshot]);
     } finally {
       release();
       await pending;
     }
     expect((await fetch(`${base}/api/settings/permissions`, put(preset('read-only')))).status).toBe(200);
-    expect(settings.snapshot()).toEqual({ ...selected('read-only'), revision: 1 });
+    expect(settings.snapshot()).toEqual({ ...selected('read-only'), revision: 2 });
     await send(url, 'second');
-    expect(snapshots).toEqual([sessionSnapshot]);
+    expect(snapshots).toEqual([sessionSnapshot, {
+      preset: 'danger-full-access', sandbox: 'danger-full-access', approval: 'never',
+    }]);
   });
 });
