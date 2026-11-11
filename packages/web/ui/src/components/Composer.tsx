@@ -923,10 +923,6 @@ export function Composer({ hero = false, onOpenPlanPreview }: { hero?: boolean; 
                       {agentLabel}
                     </SelectMenu>
                   )}
-                  <ContextMeter workspaceId={app.workspaceId} sessionId={app.sessionId}
-                    draft={draftSession} busy={busy} refreshing={entry?.loading === true}
-                    revision={entry?.request ?? 0} modelSaving={entry?.modelSaving === true}
-                    modelKey={JSON.stringify(binding)} locale={app.locale} />
                   <ModelPicker
                     binding={binding}
                     models={app.models}
@@ -1044,7 +1040,12 @@ export function Composer({ hero = false, onOpenPlanPreview }: { hero?: boolean; 
             </ul>
           </div>
         )}
-        <SessionStats entry={entry} />
+        <div className={appCss.composerReadings}>
+          <SessionStats entry={entry} />
+          <ContextMeter workspaceId={app.workspaceId} sessionId={app.sessionId}
+            draft={draftSession} busy={busy} modelSaving={entry?.modelSaving === true}
+            modelKey={JSON.stringify(binding)} locale={app.locale} />
+        </div>
       </div>
       <RiskConfirmation
         open={risk !== null}

@@ -449,6 +449,23 @@
   width: 100%;
 }
 
+/* Readings share one centered row: session timing, token accounting, and the
+   context ring. The row keeps its height before any reading arrives so the
+   composer never jumps when a projection lands. */
+.composerReadings {
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  flex-wrap: wrap;
+  gap: 12px;
+  min-height: calc(22px + var(--dsh-content-font-delta-secondary, 0px));
+  max-width: 100%;
+}
+
+.composerReadings:empty {
+  display: none;
+}
+
 .queueDock {
   box-sizing: border-box;
   width: 100%;

@@ -454,14 +454,22 @@ AuthGate
    │   │   ├─ PlanReviewCard（等待审阅时作为 AI 回复卡片，点击在右栏打开计划）
    │   │   ├─ ApprovalView
    │   │   └─ Composer → PlanReviewComposer（等待计划审阅时替换输入区）
-   │   │       ├─ ContextMeter（5 秒轮询 .../context）
-   │   │       └─ SessionStats（runs / steps / tok/s / usage / cache）
+   │   │       └─ composerReadings（输入卡片下的读数行）
+   │   │           ├─ SessionStats → ActivityPill / UsagePill（点开统计弹窗）
+   │   │           └─ ContextMeter（环形占比 + 上下文构成弹窗，5 秒轮询 .../context）
    │   └─ TrajectoryView
    ├─ RightPanel（guide / plan / files / preview / terminal）
    └─ NewSessionDialog
 ```
 
 认证启用时 `AuthGate` 先检查 `/api/auth/status`；登录成功后才渲染 `App`。`authFetch()` 统一携带 cookie，遇到 401 会把状态切回登录界面并清空当前 store。工作区行菜单的「查看文件列表」把左栏切成 `WorkspaceFileTree`，选中文件后在右栏预览；右栏 tab 显示「文件预览｜<文件名>」，预览由 `WorkspaceFilePreview`（薄壳）委托给 `preview/PreviewSurface`，后者按扩展名分派到具体 viewer。
+
+输入卡片下方是一条居中的读数行（`composerReadings`），只做观测，不占输入区空间：
+
+- `SessionStats` 渲染两枚药丸：`ActivityPill`（`N 轮 M 步 · X tok/s`）和 `UsagePill`（`总 token · 缓存命中 X%`）。药丸默认是静态读数，只有存在可解释的明细时才变成按钮，点开锚定在药丸上方的弹窗；弹窗标题带精确总量，明细按「模型用时 / 工具调用用时 / 首 token 平均（TTFT）/ 输出速度（TPS）」和「缓存命中 / 未缓存输入 / 缓存读取 / 输出」分两栏列出。同一时刻只开一个弹窗，Escape 或外部点击关闭。
+- `ContextMeter` 渲染环形占比和百分比，点开是「上下文已用 X%」加三色构成条与「系统提示词 / 工具定义 / 对话消息」明细。读数按「工作区 + 会话 + 模型来源」定域：只有换会话或换模型才丢弃旧值，轮次开始/结束、轮询返回、请求失败都只更新数字，不卸载环形；一轮进行中每个 effect run 只取一次（占用在中途不会稳定），空闲时每 5 秒轮询。
+- 读数全部来自服务端 `metrics` 和 `.../context` 投影，不做前端二次猜测；数字格式（K/M、分组、时长、缓存命中率）集中在 `lib/session-readings.ts`，缓存命中不会把部分命中四舍五入成 100%。
+- 样式在 `styles/dsh/stats-pills.module.css`、`stat-dialog.module.css`、`context-meter.module.css`；弹窗定位复用 `useAnchoredPosition`（视口夹取、`--dsh-anchored-max-width/height`）。
 
 等待计划审阅时不再弹出遮挡式对话框：会话末尾显示计划卡片，点击卡片或输入区里的「查看计划」把完整计划以 Markdown 形式放到右栏 `plan` 视图；输入区同时切换为计划审阅模式，可直接批准，或输入反馈后继续规划。右栏保留最后一次审阅的计划，审阅结束后仍可查看。
 

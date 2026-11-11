@@ -455,46 +455,6 @@
 }
 
 .standardControls { display: flex; align-items: center; gap: 12px; min-width: 0; }
-.contextMeterRoot { position: relative; display: inline-flex; flex: none; }
-.contextMeterTrigger { display: inline-flex; align-items: center; gap: 6px; padding: 1px 8px; border: 0; border-radius: var(--dsw-radius-sm); background: transparent; color: var(--dsw-alias-label-tertiary); font: inherit; cursor: pointer; }
-.contextMeterTrigger:hover, .contextMeterTrigger[aria-expanded='true'] { background: var(--dsw-alias-interactive-bg-hover); }
-.contextMeterTrigger:focus-visible { outline: 2px solid var(--dsw-alias-state-business-primary); outline-offset: 2px; }
-.contextPanel { position: fixed; z-index: 30; box-sizing: border-box; width: min(300px, calc(100vw - 24px)); overflow: auto; overflow-wrap: anywhere; padding: 12px; border: 1px solid var(--dsw-alias-border-l4); border-radius: var(--dsw-radius-lg); background: var(--dsw-alias-bg-layer-1); color: var(--dsw-alias-label-secondary); box-shadow: var(--dsw-elevation-prominent); font-size: 12px; line-height: 1.5; }
-.contextPanel p { margin: 8px 0 0; }
-.contextHeader { display: flex; justify-content: space-between; gap: 8px; }
-.contextBar { display: flex; height: 4px; margin: 10px 0; overflow: hidden; border-radius: 999px; background: var(--dsw-alias-interactive-bg-hover); }
-.contextBar > span { height: 100%; }
-.contextSystem { background: var(--dsw-alias-label-tertiary); }
-.contextTools { background: #a78bfa; }
-.contextMessages { background: var(--dsw-alias-state-business-primary); }
-.contextRows { margin: 0; }
-.contextRows > div { display: flex; justify-content: space-between; gap: 12px; }
-.contextRows dd { margin: 0; }
-.contextSwatch { display: inline-block; width: 8px; height: 8px; margin-right: 6px; border-radius: 2px; }
-.contextMeter {
-  position: relative;
-  display: grid;
-  place-items: center;
-  flex: none;
-  width: 18px;
-  height: 18px;
-  color: var(--dsw-alias-label-secondary);
-}
-.contextMeter::before {
-  content: '';
-  position: absolute;
-  inset: 0;
-  border-radius: 50%;
-  corner-shape: round;
-  background: conic-gradient(var(--dsw-alias-state-business-primary) var(--context-percent), var(--dsw-alias-border-l4) 0);
-  mask: radial-gradient(circle, transparent 0 7px, #000 7px);
-}
-.contextMeter[data-known='false']::before { background: var(--dsw-alias-border-l4); }
-.contextMeterCenter {
-  font-size: 10px;
-  line-height: 1;
-}
-.contextMeter:focus-visible { outline: 2px solid var(--dsw-alias-state-business-primary); outline-offset: 2px; }
 .tools[hidden], .standardControls[hidden] { display: none; }
 .trailingActive { flex: 1; margin-left: 0; }
 .activity { display: flex; align-items: center; flex: none; }

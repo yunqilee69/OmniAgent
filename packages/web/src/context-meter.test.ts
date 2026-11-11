@@ -5,26 +5,28 @@ import { describe, expect, it } from 'vitest';
 import { ContextMeter } from '../ui/src/components/ContextMeter.tsx';
 
 const props = {
-  workspaceId: null, sessionId: null, draft: false, busy: false, refreshing: false,
-  revision: 0, modelSaving: false, modelKey: '', locale: 'en' as const,
+  workspaceId: null, sessionId: null, draft: false, busy: false,
+  modelSaving: false, modelKey: '', locale: 'en' as const,
 };
 
 describe('context meter', () => {
-  it('exposes an accessible dialog trigger without a visible percentage', () => {
-    const markup = renderToStaticMarkup(createElement(ContextMeter, props));
-    expect(markup).toContain('aria-label="Context usage unknown"');
-    expect(markup).toContain('aria-expanded="false"');
-    expect(markup).toContain('aria-haspopup="dialog"');
-    expect(markup).not.toContain('role="dialog"');
-    expect(markup).not.toContain('title=');
-    expect(markup).not.toMatch(/>\s*\d+%\s*</);
+  it('renders nothing until the session reports occupancy and a model window', () => {
+    expect(renderToStaticMarkup(createElement(ContextMeter, props))).toBe('');
   });
 
-  it('uses an opaque surface and a circular hollow ring', () => {
-    const css = readFileSync(new URL('../ui/src/styles/dsh/input-bar.module.css', import.meta.url), 'utf8');
-    expect(css).toMatch(/\.contextPanel\s*\{[^}]*background:\s*var\(--dsw-alias-bg-layer-1\)/);
-    expect(css).toMatch(/\.contextPanel\s*\{[^}]*width:\s*min\(300px,\s*calc\(100vw - 24px\)\)/);
-    expect(css).toMatch(/\.contextMeter::before\s*\{[^}]*corner-shape:\s*round/);
-    expect(css).toMatch(/\.contextMeter::before\s*\{[^}]*mask:\s*radial-gradient\(circle,\s*transparent/);
+  it('draws a ring with the percentage beside it in a quiet pill', () => {
+    const css = readFileSync(new URL('../ui/src/styles/dsh/context-meter.module.css', import.meta.url), 'utf8');
+    expect(css).toMatch(/\.track\s*\{[^}]*stroke:\s*var\(--dsw-alias-border-l3\)/);
+    expect(css).toMatch(/\.fill\s*\{[^}]*stroke:\s*var\(--dsw-alias-label-tertiary\)/);
+    expect(css).toMatch(/\.trigger\s*\{[^}]*padding:\s*1px 8px/);
+    expect(css).toMatch(/\.panel\s*\{[^}]*width:\s*min\(264px, 100vw - 24px\)/);
+    expect(css).toMatch(/\.segment\s*\{[^}]*background:\s*var\(--meter-tint/);
+  });
+
+  it('tints each breakdown row from the shared meter palette', () => {
+    const css = readFileSync(new URL('../ui/src/styles/dsh/context-meter.module.css', import.meta.url), 'utf8');
+    expect(css).toMatch(/\.colorSystem\s*\{\s*--meter-tint:\s*var\(--dsw-static-neutral-bluish-400\)/);
+    expect(css).toMatch(/\.colorTools\s*\{\s*--meter-tint:\s*#a78bfa/);
+    expect(css).toMatch(/\.colorMessages\s*\{\s*--meter-tint:\s*var\(--dsw-static-blue-450\)/);
   });
 });

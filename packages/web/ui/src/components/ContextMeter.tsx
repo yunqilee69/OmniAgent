@@ -1,35 +1,75 @@
-import { useEffect, useRef, useState, type CSSProperties, type ReactNode } from 'react';
+import { useEffect, useRef, useState, type ReactNode } from 'react';
+import { createPortal } from 'react-dom';
+import { Tooltip } from '../../vendor/primitives/index.ts';
 import { authFetch } from '../lib/auth.ts';
 import { sessionApiPath, validateContextEstimate, type ContextEstimate } from '../lib/wire.ts';
+import { formatTokens } from '../lib/session-readings.ts';
 import { translator, type Locale } from '../lib/i18n.ts';
-import css from '../styles/dsh/input-bar.module.css';
+import { MEASURE_STYLE, useStatDialog } from './stat-dialog.tsx';
+import css from '../styles/dsh/context-meter.module.css';
 
 interface Props {
   workspaceId: string | null;
   sessionId: string | null;
   draft: boolean;
+  /** Turns and model edits only re-trigger the poll; they never unmount the ring. */
   busy: boolean;
-  refreshing: boolean;
-  revision: number;
   modelSaving: boolean;
   modelKey: string;
   locale: Locale;
 }
 
-export function ContextMeter({ workspaceId, sessionId, draft, busy, refreshing, revision, modelSaving, modelKey, locale }: Props): ReactNode {
-  const [snapshot, setSnapshot] = useState<{ key: string; value: ContextEstimate } | null>(null);
-  const [open, setOpen] = useState(false);
-  const [panelPosition, setPanelPosition] = useState({ left: 12, bottom: 0, maxHeight: 0 });
-  const root = useRef<HTMLSpanElement>(null);
-  const trigger = useRef<HTMLButtonElement>(null);
-  const key = JSON.stringify([workspaceId, sessionId, revision, modelKey]);
+/** Ring geometry: 14px viewBox, 2px stroke. */
+const RADIUS = 5.5;
+const CIRCUMFERENCE = 2 * Math.PI * RADIUS;
+
+/** Poll cadence for a live session; the projection moves only when a turn settles. */
+const POLL_MS = 5000;
+
+/**
+ * Marker the localized occupancy sentence is split on, so the panel headline
+ * keeps the reading in its own tone while each locale still owns the word order
+ * (`45% of context used` / `上下文已用 45%`).
+ */
+const READING_SLOT = '\0';
+
+/**
+ * Composer context-occupancy meter: a ring and percentage below the card, with a
+ * click-open panel breaking the projection into system prompt, tools and
+ * conversation.
+ *
+ * The reading is bound to one scope (workspace + session + model source) and is
+ * only dropped when that scope changes. A new turn, a poll, or a failed request
+ * updates the numbers in place; blanking the meter on those transients made the
+ * ring disappear and remount between turns.
+ */
+export function ContextMeter({ workspaceId, sessionId, draft, busy, modelSaving, modelKey, locale }: Props): ReactNode {
+  const [snapshot, setSnapshot] = useState<{ scope: string; value: ContextEstimate } | null>(null);
+  const seat = useStatDialog();
+  const scope = JSON.stringify([workspaceId, sessionId, modelKey]);
+  const previousScope = useRef(scope);
+
+  // A different session or model source invalidates the reading; everything
+  // else keeps the last numbers on screen until a fresher projection lands.
   useEffect(() => {
+    if (previousScope.current === scope) return;
+    previousScope.current = scope;
     setSnapshot(null);
-    setOpen(false);
-    if (workspaceId === null || sessionId === null || draft || busy || refreshing || modelSaving) return;
+    seat.setOpen(false);
+  }, [scope, seat.setOpen]);
+
+  const pollable = workspaceId !== null && sessionId !== null && !draft && !modelSaving;
+  useEffect(() => {
+    if (!pollable || workspaceId === null || sessionId === null) return;
     let current = true;
-    let controller: AbortController | undefined;
+    let loaded = false;
+    let controller: AbortController | null = null;
     const load = (): void => {
+      // One reading per effect run is enough while a turn is streaming: the
+      // occupancy cannot settle mid-turn, and re-estimating a long history
+      // every five seconds would cost more than it tells.
+      if (busy && loaded) return;
+      loaded = true;
       controller?.abort();
       controller = new AbortController();
       const signal = controller.signal;
@@ -38,86 +78,78 @@ export function ContextMeter({ workspaceId, sessionId, draft, busy, refreshing, 
           if (!response.ok) throw new Error('Context request failed');
           return validateContextEstimate(await response.json());
         })
-        .then((value) => { if (current && !signal.aborted) setSnapshot({ key, value }); })
-        .catch(() => { if (current && !signal.aborted) setSnapshot(null); });
+        .then((value) => { if (current && !signal.aborted) setSnapshot({ scope, value }); })
+        // A failed or aborted poll leaves the previous reading in place.
+        .catch(() => {});
     };
     load();
-    const timer = window.setInterval(load, 5000);
+    const timer = window.setInterval(load, POLL_MS);
     return () => { current = false; controller?.abort(); window.clearInterval(timer); };
-  }, [workspaceId, sessionId, key, draft, busy, refreshing, revision, modelSaving]);
-
-  useEffect(() => {
-    if (!open) return;
-    const dismiss = (event: PointerEvent): void => { if (!root.current?.contains(event.target as Node)) setOpen(false); };
-    const escape = (event: KeyboardEvent): void => {
-      if (event.key === 'Escape') { setOpen(false); trigger.current?.focus(); }
-    };
-    document.addEventListener('pointerdown', dismiss);
-    document.addEventListener('keydown', escape);
-    return () => { document.removeEventListener('pointerdown', dismiss); document.removeEventListener('keydown', escape); };
-  }, [open]);
-
-  useEffect(() => {
-    if (!open) return;
-    const position = (): void => {
-      const rect = trigger.current?.getBoundingClientRect();
-      if (!rect) return;
-      const width = Math.min(300, Math.max(0, window.innerWidth - 24));
-      setPanelPosition({
-        left: Math.max(12, Math.min(rect.right - width, window.innerWidth - width - 12)),
-        bottom: window.innerHeight - rect.top + 8,
-        maxHeight: Math.max(0, Math.min(window.innerHeight / 2, rect.top - 20)),
-      });
-    };
-    position();
-    window.addEventListener('resize', position);
-    window.addEventListener('scroll', position, true);
-    return () => { window.removeEventListener('resize', position); window.removeEventListener('scroll', position, true); };
-  }, [open]);
+  }, [pollable, workspaceId, sessionId, scope, busy, modelSaving]);
 
   const t = translator(locale);
-  const value = !draft && !busy && !refreshing && !modelSaving && snapshot?.key === key ? snapshot.value : null;
+  const value = snapshot !== null && snapshot.scope === scope ? snapshot.value : null;
   const projection = value?.projection;
   const capacity = value?.modelWindow;
-  const percent = projection && capacity ? Math.min(100, Math.round(projection.projectedTokens / capacity * 100)) : undefined;
-  const reading = percent === undefined ? t('Context usage unknown') : t('{percent}% of context used', { percent });
-  const rows = projection && [
-    { label: t('System'), tokens: projection.breakdown.systemTokens, color: css.contextSystem },
-    { label: t('Tools'), tokens: projection.breakdown.toolsTokens, color: css.contextTools },
-    { label: t('Messages'), tokens: projection.breakdown.messageTokens, color: css.contextMessages },
+  const usedTokens = projection?.projectedTokens;
+  if (projection === undefined || capacity === undefined || usedTokens === undefined || capacity <= 0) return null;
+
+  const percent = Math.min(100, Math.round(usedTokens / capacity * 100));
+  const reading = `${percent}%`;
+  const sentence = t('{percent}% of context used', { percent: reading });
+  const [headBefore = '', headAfter = ''] = t('{percent}% of context used', { percent: READING_SLOT })
+    .split(READING_SLOT).map((part) => part.trim());
+  const rows = [
+    { key: 'system', label: t('System prompt'), tokens: projection.breakdown.systemTokens, color: css.colorSystem },
+    { key: 'tools', label: t('Tool definitions'), tokens: projection.breakdown.toolsTokens, color: css.colorTools },
+    { key: 'messages', label: t('Conversation messages'), tokens: projection.breakdown.messageTokens, color: css.colorMessages },
   ];
-  const total = rows?.reduce((sum, row) => sum + row.tokens, 0) ?? 0;
-  const format = (count: number): string => count.toLocaleString(locale);
+  const total = rows.reduce((sum, row) => sum + row.tokens, 0);
+  const segments = total > 0
+    ? rows.map((row) => ({ key: row.key, color: row.color, width: percent * row.tokens / total }))
+    : [{ key: 'total', color: '', width: percent }];
+
   return (
-    <span ref={root} className={css.contextMeterRoot}>
-      <button ref={trigger} type="button" className={css.contextMeterTrigger} aria-label={reading} aria-expanded={open}
-        aria-haspopup="dialog" onClick={() => setOpen(!open)}>
-        <span className={css.contextMeter} data-known={percent !== undefined}
-          style={{ '--context-percent': `${percent ?? 0}%` } as CSSProperties} aria-hidden="true">
-          <span className={css.contextMeterCenter}>{percent === undefined ? '?' : ''}</span>
-        </span>
-      </button>
-      {open && <div className={css.contextPanel} role="dialog" aria-label={t('Context usage')}
-        style={panelPosition}>
-        <div className={css.contextHeader}><strong>{reading}</strong>
-          {projection && capacity && <span>~{format(projection.projectedTokens)} / {format(capacity)}</span>}</div>
-        {rows && <>
-          <div className={css.contextBar} aria-hidden="true">
-            {rows.map((row) => <span key={row.label} className={row.color}
-              style={{ width: `${total ? (percent ?? 100) * row.tokens / total : 0}%` }} />)}
+    <span ref={seat.rootRef} className={css.root}>
+      <Tooltip label={sentence} side="top" delayMs={200} disabled={seat.open} portal>
+        <button type="button" className={css.trigger} aria-label={sentence} aria-haspopup="dialog"
+          aria-expanded={seat.open} onClick={() => { seat.setOpen(!seat.open); }}>
+          <svg viewBox="0 0 14 14" width="14" height="14" aria-hidden>
+            <circle className={css.track} cx="7" cy="7" r={RADIUS} />
+            <circle className={css.fill} cx="7" cy="7" r={RADIUS}
+              strokeDasharray={`${CIRCUMFERENCE * percent / 100} ${CIRCUMFERENCE}`} transform="rotate(-90 7 7)" />
+          </svg>
+          <span>{reading}</span>
+        </button>
+      </Tooltip>
+      {seat.open && createPortal(
+        <div ref={seat.panelRef} className={css.panel} style={seat.pos ?? MEASURE_STYLE} role="dialog"
+          aria-label={t('Context usage')}>
+          <div className={css.header}>
+            <span className={css.headline}>{headBefore}</span>
+            <span className={css.percent}>{reading}</span>
+            <span className={css.headline}>{headAfter}</span>
+            <span className={css.figures}>
+              {`~${formatTokens(usedTokens, t)} / ${formatTokens(capacity, t)}`}
+            </span>
           </div>
-          <dl className={css.contextRows}>{rows.map((row) => <div key={row.label}>
-            <dt><span className={`${css.contextSwatch} ${row.color}`} />{row.label}</dt><dd>~{format(row.tokens)}</dd>
-          </div>)}</dl>
-          <p>{projection.source === 'usage'
-            ? t('Projected from the last reported input ({count} tokens) plus estimated changes.', { count: format(projection.inputTokens ?? 0) })
-            : t('Estimated from system, tools and messages; no compatible input usage is available.')}</p>
-        </>}
-        {!projection && <p>{t('Context projection unavailable until the session runtime is ready.')}</p>}
-        {!capacity && <p>{t('Model context window is unknown.')}</p>}
-        {value?.window?.source === 'config' && <p>{t('Compaction budget: {count} tokens ({source})', { count: format(value.window.tokens), source: t('configuration') })}</p>}
-        <p>{t('Estimates use UTF-8 JSON bytes divided by four, exclude unsent input, and may miscount images. History after restart may differ from live compaction.')}</p>
-      </div>}
+          <div className={css.bar}>
+            {segments.filter((segment) => segment.width > 0).map((segment) => (
+              <div key={segment.key} className={segment.color === '' ? css.segment : `${css.segment} ${segment.color}`}
+                style={{ width: `${segment.width}%` }} />
+            ))}
+          </div>
+          <dl className={css.rows}>
+            {rows.map((row) => (
+              <div key={row.key} className={css.row}>
+                <dt><span className={`${css.swatch} ${row.color}`} aria-hidden />{row.label}</dt>
+                <dd>{`~${formatTokens(row.tokens, t)}`}</dd>
+              </div>
+            ))}
+          </dl>
+        </div>,
+        document.body,
+      )}
     </span>
   );
 }
