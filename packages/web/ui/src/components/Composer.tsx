@@ -22,22 +22,16 @@ import {
   IconClockOutlineRegular,
   IconCloseOutlineRegular,
   IconCompactOutlineRegular,
-  IconDownloadOutlineRegular,
   IconFolderCloseRegular,
   IconFolderOpenRegular,
   IconGoalOutlineRegular,
-  IconNewChatOutlineRegular,
   IconPaperclipOutlineRegular,
   IconPlanOutlineRegular,
   IconPlusOutlineMedium,
   IconQueueOutlineRegular,
   IconSendOutlineRegular,
-  IconSettingsOutlineRegular,
   IconSkillOutlineRegular,
-  IconSparkleRegular,
   IconStopFillRegular,
-  IconTrashOutlineRegular,
-  IconUsersOutlineRegular,
   RiskConfirmation,
   StateDot,
   type MenuEntry,
@@ -71,7 +65,7 @@ import { rankLike } from '../lib/matcher.ts';
 import { relativeDate } from '../lib/trajectory.ts';
 import { translator, type Translate } from '../lib/i18n.ts';
 import { SelectMenu } from './SelectMenu.tsx';
-import { concreteModelBinding, ModelPicker } from './ModelPicker.tsx';
+import { ModelPicker } from './ModelPicker.tsx';
 import { ContextMeter } from './ContextMeter.tsx';
 import { SessionStats } from './SessionStats.tsx';
 import { permissionIcon } from './permission-icon.tsx';
@@ -97,14 +91,13 @@ interface Option {
   current?: boolean;
   run: () => void;
 }
-type Picker = 'permission' | 'agent' | 'model' | 'export';
+type MenuMode = 'file' | 'command' | 'session' | 'skill' | 'plus';
 interface Command {
   id: string;
   label: string;
   description: string;
   icon: ReactNode;
   available: boolean;
-  picker?: Picker;
   /** Text inserted instead of removing the /token, for commands that need an argument. */
   insert?: string;
   run?: () => void | Promise<void>;
@@ -221,7 +214,6 @@ export function Composer({ hero = false, onOpenPlanPreview }: { hero?: boolean; 
   const [readingFiles, setReadingFiles] = useState(false);
   const readingFilesRef = useRef(false);
   const [plusOpen, setPlusOpen] = useState(false);
-  const [picker, setPicker] = useState<Picker | null>(null);
   const [files, setFiles] = useState<WorkspaceFileEntry[]>([]);
   const [filesLoading, setFilesLoading] = useState(false);
   const [filesError, setFilesError] = useState('');
@@ -242,9 +234,9 @@ export function Composer({ hero = false, onOpenPlanPreview }: { hero?: boolean; 
   const trigger = detectTrigger(draft, caret);
   const triggerKey = trigger === null ? '' : `${trigger.kind}:${trigger.start}:${trigger.end}:${trigger.query}`;
   const triggerVisible = trigger !== null && triggerKey !== dismissed;
-  const mode: Picker | 'file' | 'command' | 'session' | 'skill' | 'plus' | null = picker ?? (triggerVisible && trigger !== null ? trigger.kind : plusOpen ? 'plus' : null);
+  const mode: MenuMode | null = triggerVisible && trigger !== null ? trigger.kind : plusOpen ? 'plus' : null;
   const menuOpen = mode !== null;
-  const menuKey = `${mode ?? 'none'}:${picker === null && triggerVisible ? triggerKey : ''}`;
+  const menuKey = `${mode ?? 'none'}:${triggerVisible ? triggerKey : ''}`;
 
   useEffect(() => {
     setDraft(drafts.current.get(key) ?? '');
@@ -266,14 +258,8 @@ export function Composer({ hero = false, onOpenPlanPreview }: { hero?: boolean; 
   }, [draft, key]);
 
   useEffect(() => {
-    if (mode === 'model') {
-      const resolved = entry?.resolvedModel;
-      setActive(Math.max(0, app.models.findIndex((model) =>
-        model.provider === resolved?.provider && model.model === resolved.model)));
-    } else {
-      setActive(0);
-    }
-  }, [menuKey, mode, app.models, entry?.resolvedModel]);
+    setActive(0);
+  }, [menuKey]);
 
   useEffect(() => {
     if (mode === 'skill' && draftSession && app.modeOptions.skills.length === 0) void store.loadModeOptions();
@@ -374,7 +360,6 @@ export function Composer({ hero = false, onOpenPlanPreview }: { hero?: boolean; 
       const menu = card.current?.querySelector('#composer-menu');
       if (menu?.contains(target) === true) return;
       setPlusOpen(false);
-      setPicker(null);
       if (trigger !== null) setDismissed(triggerKey);
     };
     document.addEventListener('pointerdown', close);
@@ -435,8 +420,9 @@ export function Composer({ hero = false, onOpenPlanPreview }: { hero?: boolean; 
     void store.saveSessionPermission(value);
   };
 
+  // Every session control the web workbench offers has a button in the composer,
+  // so the slash menu only keeps the commands that have no button equivalent.
   const commands = useMemo<Command[]>(() => [
-    { id: 'new', label: t('New session'), description: t('Create a new session in this workspace.'), icon: <IconNewChatOutlineRegular />, available: app.workspaceId !== null, run: () => { void store.startDraftSession(); } },
     { id: 'plan', label: t('Toggle plan mode'), description: t('Toggle plan mode for this session.'), icon: <IconPlanOutlineRegular />, available: app.sessionId !== null && entry?.plan.active !== undefined, run: () => store.togglePlan() },
     { id: 'init', label: t('Initialize workspace instructions'), description: t('Create or update AGENTS.md for this workspace.'), icon: <IconBrowseOutlineRegular />, available: app.sessionId !== null && app.workspaceId !== null, insert: '/init ' },
     {
@@ -455,14 +441,7 @@ export function Composer({ hero = false, onOpenPlanPreview }: { hero?: boolean; 
       available: app.sessionId !== null && entry?.draft !== true,
       run: () => void store.compactSession(),
     },
-    { id: 'permission', label: t('Choose permission'), description: t('Choose the permission preset for this session.'), icon: permissionIcon(selectedPermission), available: app.sessionId !== null, picker: 'permission' },
-    { id: 'agent', label: t('Choose agent'), description: t('Choose the agent for this session.'), icon: <IconUsersOutlineRegular />, available: app.sessionId !== null && entry?.mode == null, picker: 'agent' },
-    { id: 'model', label: t('Choose model'), description: t('Choose the model source for this session.'), icon: <IconSparkleRegular />, available: app.sessionId !== null, picker: 'model' },
-    { id: 'settings', label: t('Settings'), description: t('Open the settings page.'), icon: <IconSettingsOutlineRegular />, available: true, run: () => store.openSettings() },
-    { id: 'export', label: t('Export session'), description: t('Copy the session transcript as Markdown.'), icon: <IconDownloadOutlineRegular />, available: app.sessionId !== null, picker: 'export' },
-    { id: 'clear', label: t('Clear draft'), description: t('Clear the composer draft.'), icon: <IconTrashOutlineRegular />, available: true, run: () => { setDraftValue(''); setAttachments([]); setAttachmentError(''); } },
-    { id: 'help', label: t('Show commands'), description: t('Available commands: /new, /plan, /init, /goal, /compact, /permission, /agent, /model, /settings, /export, /clear'), icon: <IconBrowseOutlineRegular />, available: true, run: () => store.showAlert(t('Available commands: /new, /plan, /init, /goal, /compact, /permission, /agent, /model, /settings, /export, /clear')) },
-  ], [app.workspaceId, app.sessionId, entry?.mode, entry?.plan.active, entry?.draft, selectedPermission, t]);
+  ], [app.workspaceId, app.sessionId, entry?.plan.active, entry?.draft, t]);
 
   const selectCommand = (command: Command): void => {
     if (trigger !== null) {
@@ -474,9 +453,8 @@ export function Composer({ hero = false, onOpenPlanPreview }: { hero?: boolean; 
       focusCaret(next.length);
     }
     setPlusOpen(false);
-    setPicker(command.picker ?? null);
     setDismissed(triggerKey);
-    if (command.picker === undefined && command.insert === undefined) void command.run?.();
+    if (command.insert === undefined) void command.run?.();
   };
 
   const selectFile = (item: WorkspaceFileEntry): void => {
@@ -573,67 +551,15 @@ export function Composer({ hero = false, onOpenPlanPreview }: { hero?: boolean; 
           run: () => selectSkill(skill),
         }));
     }
-    if (mode === 'permission') {
-      return Object.entries(permissionPresets).map(([value, preset]) => ({
-        id: `permission:${value}`,
-        label: t(preset.label),
-        description: t(preset.description),
-        group: t('Permissions'),
-        icon: permissionIcon(value as PermissionPreset),
-        run: () => choosePermission(value),
-      }));
-    }
-    if (mode === 'agent') {
-      return app.agents.filter((agent) => agent.usage !== 'subagent').map((agent) => ({
-        id: `agent:${agent.id}`,
-        label: agent.name,
-        description: agent.role,
-        group: t('Agent'),
-        icon: <IconUsersOutlineRegular />,
-        disabled: !agent.valid,
-        run: () => {
-          if (app.sessionId === null) store.setCreationAgent(agent.id);
-          else void store.saveSessionAgent(agent.id);
-        },
-      }));
-    }
-    if (mode === 'model') {
-      const items: Option[] = [];
-      for (const model of app.models) {
-        const resolved = entry?.resolvedModel ?? null;
-        const binding = concreteModelBinding(model, resolved);
-        const effort = binding.kind === 'model' ? binding.reasoningEffort : undefined;
-        items.push({
-          id: `model:${model.provider}/${model.model}`,
-          current: resolved?.provider === model.provider && resolved.model === model.model,
-          label: model.name,
-          description: `${model.provider}/${model.model}${effort === undefined ? '' : ` · ${effort}`}`,
-          group: t('Models'),
-          icon: <IconSparkleRegular />,
-          run: () => {
-            if (app.sessionId === null) store.setCreationBinding(binding);
-            else void store.saveSessionModel(binding);
-          },
-        });
-      }
-      return items;
-    }
-    if (mode === 'export') {
-      return [
-        { id: 'export:markdown', label: t('Export as Markdown'), description: t('Copy the session transcript as Markdown.'), group: t('Export session'), icon: <IconDownloadOutlineRegular />, run: () => void store.exportSession('markdown') },
-        { id: 'export:json', label: t('Export as JSON'), description: t('Download the session transcript as JSON.'), group: t('Export session'), icon: <IconDownloadOutlineRegular />, run: () => void store.exportSession('json') },
-      ];
-    }
     return [];
   }, [mode, files, commands, trigger?.query, trigger?.start, trigger?.end, recentSessions, availableSkills,
-    app.agents, app.models, app.sessionId, app.workspaceId, app.locale, entry?.resolvedModel, selectedPermission, t]);
+    app.workspaceId, app.locale, t]);
 
   const bounded = Math.min(active, Math.max(0, options.length - 1));
   const choose = (option: Option): void => {
     if (option.disabled) return;
     if (!option.keepOpen) {
       setPlusOpen(false);
-      setPicker(null);
       if (trigger !== null) setDismissed(triggerKey);
       setActive(0);
     }
@@ -678,7 +604,6 @@ export function Composer({ hero = false, onOpenPlanPreview }: { hero?: boolean; 
       if (event.key === 'Escape') {
         event.preventDefault();
         setPlusOpen(false);
-        setPicker(null);
         if (trigger !== null) setDismissed(triggerKey);
         return;
       }
@@ -780,9 +705,7 @@ export function Composer({ hero = false, onOpenPlanPreview }: { hero?: boolean; 
   const permissionLabel = selectedPermission === null ? t('Select permission') : t(permissionPresets[selectedPermission].label);
   const menuLabel = mode === 'file' ? t('File reference')
     : mode === 'session' ? t('Recent sessions') : mode === 'skill' ? t('Skills')
-      : mode === 'permission' ? t('Choose permission') : mode === 'agent' ? t('Choose agent')
-        : mode === 'model' ? t('Choose model') : mode === 'export' ? t('Export session')
-          : mode === 'plus' ? t('Add files or run commands') : t('Command menu');
+      : mode === 'plus' ? t('Add files or run commands') : t('Command menu');
 
   // A waiting plan review replaces the draft controls but keeps this component
   // mounted, so a draft typed before the review survives the detour.
@@ -869,7 +792,6 @@ export function Composer({ hero = false, onOpenPlanPreview }: { hero?: boolean; 
               {mode === 'session' && !recentLoading && recentError === '' && options.length === 0 && <div className={menuCss.empty}>{t('No matching sessions')}</div>}
               {mode === 'skill' && options.length === 0 && <div className={menuCss.empty}>{availableSkills.length === 0 ? t('No skills are available to this agent') : t('No matching skills')}</div>}
               {mode === 'command' && options.length === 0 && <div className={menuCss.empty}>{t('No matching commands')}</div>}
-              {mode !== null && mode !== 'file' && mode !== 'session' && mode !== 'skill' && mode !== 'command' && options.length === 0 && <div className={menuCss.empty}>{t('No results')}</div>}
               {options.map((option, index) => {
                 const previous = options[index - 1];
                 return (
@@ -942,7 +864,6 @@ export function Composer({ hero = false, onOpenPlanPreview }: { hero?: boolean; 
               onMouseDown={(event) => { event.preventDefault(); }}
               onClick={() => {
                 setPlusOpen((current) => !current);
-                setPicker(null);
                 setDismissed(triggerKey);
               }}>
               <IconPlusOutlineMedium size={14} />
@@ -966,15 +887,17 @@ export function Composer({ hero = false, onOpenPlanPreview }: { hero?: boolean; 
                   {permissionLabel}
                 </SelectMenu>
               )}
-              {app.sessionId !== null && (
-                <button type="button" className={entry?.plan.active === true ? planCss.chip : appCss.modeChip}
-                  aria-pressed={entry?.plan.active === true} disabled={locked}
-                  title={entry?.plan.active === true
-                    ? t('Plan mode is on: the agent researches and submits a plan before editing.')
-                    : t('Turn on plan mode: research first, then submit a plan for approval.')}
+              {/* Plan mode has no standing toggle: the chip only appears once the
+                  user turned it on with /plan, and hovering swaps the glyph for a
+                  close mark so the click reads as "turn plan mode off". */}
+              {app.sessionId !== null && entry?.plan.active === true && (
+                <button type="button" className={planCss.chip} disabled={locked}
+                  aria-label={t('Turn off plan mode')}
+                  title={t('Plan mode is on: the agent researches and submits a plan before editing.')}
                   onClick={() => { void store.togglePlan(); }}>
-                  <span className={planCss.glyph} aria-hidden><IconPlanOutlineRegular /></span>
-                  {entry?.plan.active === true ? t('Planning') : t('Plan')}
+                  <span className={clsx(planCss.glyph, planCss.restGlyph)} aria-hidden><IconPlanOutlineRegular /></span>
+                  <span className={clsx(planCss.glyph, planCss.hoverGlyph)} aria-hidden><IconCloseOutlineRegular /></span>
+                  {t('Planning')}
                 </button>
               )}
             </div>

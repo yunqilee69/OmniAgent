@@ -308,7 +308,6 @@ const zh: Record<string, string> = {
   'Enable full access by default?': '默认开启完全权限？',
   'Full access lets new sessions modify files without file sandbox restrictions or approval prompts, including sensitive files and external commands. Only use it when you trust subsequent tasks.':
     '完全权限允许新会话在不受文件沙箱限制、无需审批的情况下修改文件，包括敏感文件和外部命令。请仅在信任后续任务时使用。',
-  'Choose the permission preset for this session.': '选择当前会话的权限预设。',
 
   // Composer.
   'Task list': '任务列表',
@@ -329,10 +328,8 @@ const zh: Record<string, string> = {
   'Models': '模型',
   'Plan mode is on: the agent researches and submits a plan before editing.':
     '计划模式已开启：智能体先研究并提交计划，再进行编辑。',
-  'Turn on plan mode: research first, then submit a plan for approval.':
-    '开启计划模式：先研究，再提交计划等待批准。',
+  'Turn off plan mode': '关闭计划模式',
   'Planning': '计划中',
-  'Plan': '计划',
   'Agent': '智能体',
   'Model source': '模型来源',
   'Model source for this session': '当前会话的模型来源',
@@ -406,23 +403,7 @@ const zh: Record<string, string> = {
   'Compact older conversation before the next reply.': '在下一次回复前压缩较早的对话内容。',
   'Older context will be compacted before your next message.': '较早的上下文将在下一条消息前压缩。',
   'Could not compact context: {message}': '无法压缩上下文：{message}',
-  'Choose permission': '选择权限',
-  'Choose agent': '选择智能体',
-  'Choose model': '选择模型',
-  'Clear draft': '清空输入',
-  'Show commands': '显示指令',
-  'Export as Markdown': '导出为 Markdown',
-  'Export as JSON': '导出为 JSON',
-  'Create a new session in this workspace.': '在当前工作区创建新会话。',
   'Toggle plan mode for this session.': '切换当前会话的计划模式。',
-  'Choose the agent for this session.': '选择当前会话的智能体。',
-  'Choose the model source for this session.': '选择当前会话的模型来源。',
-  'Clear the composer draft.': '清空输入框内容。',
-  'Open the settings page.': '打开设置页面。',
-  'Copy the session transcript as Markdown.': '将会话记录复制为 Markdown。',
-  'Download the session transcript as JSON.': '将会话记录下载为 JSON。',
-  'Available commands: /new, /plan, /init, /goal, /compact, /permission, /agent, /model, /settings, /export, /clear':
-    '可用指令：/new、/plan、/init、/goal、/compact、/permission、/agent、/model、/settings、/export、/clear',
   'Use ↑↓ to navigate, Enter to choose, Esc to close.': '使用 ↑↓ 选择，Enter 确认，Esc 关闭。',
   'Insert a workspace file reference.': '插入工作区文件引用。',
   'Open the command menu.': '打开指令菜单。',

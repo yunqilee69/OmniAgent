@@ -557,15 +557,16 @@ AuthGate
 
 命令表：
 
-`new`、`plan`、`goal`、`compact`、`permission`、`agent`、`model`、`settings`、`export`、`clear`、`help`。
+`plan`、`init`、`goal`、`compact`。会话控制类指令（新建会话、权限、智能体、模型、设置、导出、清空、帮助）在 Web 端都有对应按钮，不再进入指令菜单。
+
+plan 模式没有常驻开关：只有输入 `/plan` 开启后，输入框才出现计划标签，鼠标悬浮时标签图标切换为关闭叉，点击即退出计划模式。
 
 二级选择器：
 
-`file`、`session`、`skill`、`permission`、`agent`、`model`、`export`。
+`file`、`session`、`skill`。
 
-- permission 选择 `danger-full-access` 前弹出风险确认；
-- agent 过滤 `usage !== 'subagent'`；
-- model 支持「跟随智能体」和具体模型 + 默认 effort；
+- 输入框内的权限下拉选择 `danger-full-access` 前仍弹出风险确认；
+- 智能体下拉过滤 `usage !== 'subagent'`；模型下拉只列具体模型 + 默认 effort；
 - 忙碌发送模式：`queue` 或 `steer`。
 
 附件：
