@@ -390,7 +390,7 @@ goal 轮中完成或阻塞后，Session 通过 `deferGoalContext()` 注入 `<goa
 | 状态 | 写入方 | 读取方 |
 | --- | --- | --- |
 | `message/user` | `Session.send` / `deliverUserMessage` / goal 续轮 | `projectMessages`、UI |
-| `message/assistant` | `runTurn` | `projectMessages`、UI；含 `usage`、`requestDurationMs`、`contextSample` |
+| `message/assistant` | `runTurn` | `projectMessages`、UI；含 `usage`、`requestDurationMs`、`firstTokenDurationMs`、`contextSample` |
 | `message/tool-result` | `runTurn` | `projectMessages`、UI |
 | `todo/write` | `todo_write` 工具 | `projectTodos`、TUI/Web |
 | `plan/mode` | `/plan` 或 Web plan 路由 | `projectPlanMode`、Session |

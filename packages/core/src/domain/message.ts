@@ -176,6 +176,8 @@ export const AssistantMessageSchema = z.object({
   usage: UsageSchema.optional(),
   /** Elapsed time for this model request, including streaming, in milliseconds. */
   requestDurationMs: z.number().nonnegative().optional(),
+  /** Time from request start to the first streamed content delta, in milliseconds. */
+  firstTokenDurationMs: z.number().nonnegative().optional(),
   contextSample: z.object({
     provider: z.string(), model: z.string(), historyHash: z.string(),
     systemTokens: z.number().int().nonnegative(), toolsTokens: z.number().int().nonnegative(),

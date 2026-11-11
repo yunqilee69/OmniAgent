@@ -156,7 +156,7 @@ describe('model replay persistence', () => {
       const disk = await readFile(sessionPath(root, root, 'agent'), 'utf8');
       const events = disk.trim().split('\n').slice(1).map((line) => JSON.parse(line));
       const storedMessage = { ...liveMessage, usage: { inputTokens: 10, outputTokens: 2, cachedInputTokens: 4 }, requestDurationMs,
-        contextSample: expect.any(Object) };
+        firstTokenDurationMs: expect.any(Number), contextSample: expect.any(Object) };
       expect(events.find((event) => event.type === 'message/assistant')?.data).toEqual(storedMessage);
 
       const reopened = await new SessionStore(root).open(root, 'agent');

@@ -89,6 +89,11 @@ describe('AgentLoop', () => {
       expect(messages.at(-1)?.requestDurationMs).toBe(25);
       expect(events.filter((event) => event.type === 'assistant.message').map((event) =>
         event.type === 'assistant.message' && event.message.requestDurationMs)).toEqual([25, 25]);
+      // Only a streamed request has an observable first packet; the blocking
+      // path must not invent a TTFT.
+      expect(events.filter((event) => event.type === 'assistant.message').map((event) =>
+        event.type === 'assistant.message' && event.message.firstTokenDurationMs))
+        .toEqual(streaming ? [10, 10] : [undefined, undefined]);
     } finally {
       now.mockRestore();
     }

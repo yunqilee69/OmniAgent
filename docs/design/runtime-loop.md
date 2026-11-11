@@ -197,11 +197,12 @@ tool call 的分片在 provider 内部累积，循环只有在流结束拿到完
 每次模型调用结束后，循环把以下信息写入 assistant 消息：
 
 - `requestDurationMs`：从发起请求到流结束的耗时，包含流式输出；
+- `firstTokenDurationMs`：仅流式请求写入，从发起请求到第一个内容增量（文本或思考）的耗时；非流式请求没有可观测的首包时刻，不写该字段；
 - `usage.inputTokens` / `outputTokens`：provider 报告的真实用量；如果 provider 用 `contextInputTokens` 区分「prompt 占用」和「未缓存输入」（DeepSeek / pi-ai），则优先使用 `contextInputTokens`；
 - `usage.cachedInputTokens`：仅当 provider 报告且不超过 input 时保留；
 - `contextSample`：仅当 input > 0 时写入，包含 provider / model、请求历史哈希和 system / tools / messages 三段估算。
 
-如果 provider 没有报告可用 usage（例如兼容端点合成 0），消息不写 `usage`，也不写 `contextSample`，避免把哨兵值当成真实计量。`contextSample` 只在内部历史中用于下一次 `projectContext()`；公开会话响应会返回 `usage` 和 `requestDurationMs`，但不返回采样字段。会话指标（runs / steps / requests / cache / throughput）由 trace + usage 投影得到，不新增 `AgentEvent`。
+如果 provider 没有报告可用 usage（例如兼容端点合成 0），消息不写 `usage`，也不写 `contextSample`，避免把哨兵值当成真实计量。`contextSample` 只在内部历史中用于下一次 `projectContext()`；公开会话响应会返回 `usage`、`requestDurationMs` 和 `firstTokenDurationMs`，但不返回采样字段。会话指标（runs / steps / requests / tools / ttft / cache / throughput）由 trace + usage + tool 结果投影得到，不新增 `AgentEvent`；`throughput` 是解码速度，用 `requestDurationMs` 扣掉 `firstTokenDurationMs` 后计算，只有首包延迟无法自洽（缺失或大于总时长）时才退回整个请求窗口。
 
 ### 5.2 输入投影
 

@@ -136,8 +136,13 @@ export class AgentLoop {
 
         let response: ModelResponse;
         const requestStartedAt = performance.now();
+        // 首 token 延迟只能从流式 delta 里量：非流式请求没有可观测的首包时刻。
+        let firstTokenAt: number | null = null;
+        const markFirstToken = (): void => {
+          if (firstTokenAt === null) firstTokenAt = performance.now();
+        };
         if (this.deps.model.stream) {
-          response = yield* this.forwardStream(this.deps.model.stream(request));
+          response = yield* this.forwardStream(this.deps.model.stream(request), markFirstToken);
         } else {
           response = await this.deps.model.complete(request);
         }
@@ -149,6 +154,11 @@ export class AgentLoop {
         const usage = response.usage;
         const inputTokens = response.contextInputTokens ?? usage?.inputTokens;
         assistant = { ...response.message, requestDurationMs };
+        if (firstTokenAt !== null) {
+          const elapsed: number = firstTokenAt - requestStartedAt;
+          const firstTokenDurationMs = Math.min(requestDurationMs, Math.max(0, elapsed));
+          if (firstTokenDurationMs > 0) assistant.firstTokenDurationMs = firstTokenDurationMs;
+        }
         if (Number.isSafeInteger(inputTokens) && inputTokens >= 0
           && Number.isSafeInteger(usage.outputTokens) && usage.outputTokens >= 0) {
           const cachedInputTokens = usage.cachedInputTokens;
@@ -262,9 +272,15 @@ export class AgentLoop {
    */
   private async *forwardStream(
     stream: AsyncGenerator<ModelStreamDelta, ModelResponse>,
+    onFirstDelta: () => void,
   ): AsyncGenerator<AgentEvent, ModelResponse> {
     let next = await stream.next();
+    let announced = false;
     while (!next.done) {
+      if (!announced) {
+        announced = true;
+        onFirstDelta();
+      }
       if (next.value.type === 'text') {
         yield { type: 'assistant.delta', text: next.value.text };
       } else {

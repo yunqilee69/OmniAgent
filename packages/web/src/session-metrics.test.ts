@@ -24,6 +24,8 @@ describe('projectSessionMetrics', () => {
       runs: { started: 2, completed: 2, durationMs: 250, knownDurationCount: 2 },
       steps: { started: 3 },
       requests: { count: 3, durationMs: 25, knownDurationCount: 3 },
+      tools: { count: 0, durationMs: 0, knownDurationCount: 0 },
+      ttft: { durationMs: 0, count: 0 },
       usage: { inputTokens: 12, outputTokens: 4, inputKnownCount: 3, outputKnownCount: 2 },
       throughput: { outputTokens: 4, durationMs: 20, count: 1 },
       cache: { inputTokens: 12, cachedInputTokens: 3, count: 2 },
@@ -37,6 +39,8 @@ describe('projectSessionMetrics', () => {
       runs: { started: 0, completed: 0, durationMs: null, knownDurationCount: 0 },
       steps: { started: 0 },
       requests: { count: 0, durationMs: null, knownDurationCount: 0 },
+      tools: { count: 0, durationMs: 0, knownDurationCount: 0 },
+      ttft: { durationMs: 0, count: 0 },
       usage: { inputTokens: null, outputTokens: null, inputKnownCount: 0, outputKnownCount: 0 },
       throughput: { outputTokens: 0, durationMs: 0, count: 0 },
       cache: { inputTokens: 0, cachedInputTokens: 0, count: 0 },
@@ -61,6 +65,28 @@ describe('projectSessionMetrics', () => {
     expect(metrics.requests).toEqual({ count: 3, durationMs: 0, knownDurationCount: 1 });
     expect(metrics.usage).toEqual({ inputTokens: 0, outputTokens: 2, inputKnownCount: 1, outputKnownCount: 2 });
     expect(metrics.throughput).toEqual({ outputTokens: 0, durationMs: 0, count: 0 });
+  });
+
+  it('sums tool wall time and reads decode speed past the first token', () => {
+    const metrics = projectSessionMetrics([
+      event(0, 'trace/turn.start', { step: 0 }, 100),
+      event(1, 'message/assistant', {
+        requestDurationMs: 1000, firstTokenDurationMs: 400, usage: { inputTokens: 8, outputTokens: 30 },
+      }, 1100),
+      event(2, 'message/assistant', {
+        requestDurationMs: 200, firstTokenDurationMs: 500, usage: { inputTokens: 8, outputTokens: 10 },
+      }, 1300),
+      event(3, 'message/assistant', { requestDurationMs: 300, firstTokenDurationMs: -1, usage: { outputTokens: 5 } }, 1600),
+      event(4, 'message/tool-result', { result: { callId: 'a', name: 'bash', ok: true, content: '', durationMs: 120 } }, 1700),
+      event(5, 'tool/result', { result: { callId: 'b', name: 'bash', ok: true, content: '', durationMs: 80 } }, 1800),
+      event(6, 'trace/tool.result', { callId: 'c', durationMs: 999 }, 1900),
+      event(7, 'message/tool-result', { result: { callId: 'd', name: 'bash', ok: true, content: '' } }, 2000),
+    ]);
+    expect(metrics.tools).toEqual({ count: 2, durationMs: 200, knownDurationCount: 2 });
+    // Only the request whose TTFT fits inside its own duration contributes; the
+    // 200ms request keeps its whole window because the 500ms TTFT is incoherent.
+    expect(metrics.ttft).toEqual({ durationMs: 400, count: 1 });
+    expect(metrics.throughput).toEqual({ outputTokens: 45, durationMs: 1100, count: 3 });
   });
 
   it('excludes missing, invalid, and unpaired cache data without hiding known zero', () => {

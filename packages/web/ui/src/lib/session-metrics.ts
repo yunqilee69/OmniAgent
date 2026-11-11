@@ -3,6 +3,8 @@ export interface SessionMetrics {
   runs: { started: number; completed: number; durationMs: number | null; knownDurationCount: number };
   steps: { started: number };
   requests: { count: number; durationMs: number | null; knownDurationCount: number };
+  tools: { count: number; durationMs: number; knownDurationCount: number };
+  ttft: { durationMs: number; count: number };
   usage: { inputTokens: number | null; outputTokens: number | null; inputKnownCount: number; outputKnownCount: number };
   throughput: { outputTokens: number; durationMs: number; count: number };
   cache: { inputTokens: number; cachedInputTokens: number; count: number };
@@ -14,6 +16,8 @@ export function emptyMetrics(): SessionMetrics {
     runs: { started: 0, completed: 0, durationMs: null, knownDurationCount: 0 },
     steps: { started: 0 },
     requests: { count: 0, durationMs: null, knownDurationCount: 0 },
+    tools: { count: 0, durationMs: 0, knownDurationCount: 0 },
+    ttft: { durationMs: 0, count: 0 },
     usage: { inputTokens: null, outputTokens: null, inputKnownCount: 0, outputKnownCount: 0 },
     throughput: { outputTokens: 0, durationMs: 0, count: 0 },
     cache: { inputTokens: 0, cachedInputTokens: 0, count: 0 },
@@ -38,7 +42,18 @@ export function validateSessionMetrics(value: unknown): SessionMetrics | null {
   if (![m.runs.durationMs, m.requests.durationMs].every((v) => v === null || duration(v))
     || !duration(m.throughput.durationMs)
     || ![m.usage.inputTokens, m.usage.outputTokens].every((v) => v === null || count(v))) return null;
-  return structuredClone(m);
+  const normalized = structuredClone(m);
+  // Sessions recorded before tool timing and TTFT existed report neither; read
+  // them as empty readings instead of rejecting the whole projection.
+  if (normalized.tools === undefined || normalized.tools === null
+    || ![normalized.tools.count, normalized.tools.durationMs, normalized.tools.knownDurationCount].every(count)) {
+    normalized.tools = { count: 0, durationMs: 0, knownDurationCount: 0 };
+  }
+  if (normalized.ttft === undefined || normalized.ttft === null
+    || ![normalized.ttft.count, normalized.ttft.durationMs].every(count)) {
+    normalized.ttft = { durationMs: 0, count: 0 };
+  }
+  return normalized;
 }
 
 export function applyMetricsEvent(metrics: SessionMetrics, event: Record<string, unknown>, newRun: boolean): void {
@@ -46,7 +61,11 @@ export function applyMetricsEvent(metrics: SessionMetrics, event: Record<string,
     if (newRun) metrics.runs.started += 1;
     metrics.steps.started += 1;
   } else if (event.type === 'assistant.message' && typeof event.message === 'object' && event.message !== null) {
-    const message = event.message as { usage?: { inputTokens?: unknown; outputTokens?: unknown; cachedInputTokens?: unknown }; requestDurationMs?: unknown };
+    const message = event.message as {
+      usage?: { inputTokens?: unknown; outputTokens?: unknown; cachedInputTokens?: unknown };
+      requestDurationMs?: unknown;
+      firstTokenDurationMs?: unknown;
+    };
     metrics.requests.count += 1;
     const input = message.usage?.inputTokens;
     const output = message.usage?.outputTokens;
@@ -68,11 +87,27 @@ export function applyMetricsEvent(metrics: SessionMetrics, event: Record<string,
     if (duration(elapsed)) {
       metrics.requests.durationMs = (metrics.requests.durationMs ?? 0) + elapsed;
       metrics.requests.knownDurationCount += 1;
-      if (elapsed > 0 && count(output)) {
-        metrics.throughput.durationMs += elapsed;
+      const ttft = message.firstTokenDurationMs;
+      let decodeDuration = elapsed;
+      if (duration(ttft) && ttft <= elapsed) {
+        metrics.ttft.durationMs += ttft;
+        metrics.ttft.count += 1;
+        decodeDuration = elapsed - ttft;
+      }
+      if (decodeDuration > 0 && count(output)) {
+        metrics.throughput.durationMs += decodeDuration;
         metrics.throughput.outputTokens += output;
         metrics.throughput.count += 1;
       }
+    }
+  } else if (event.type === 'tool.result') {
+    const result = typeof event.result === 'object' && event.result !== null
+      ? event.result as { durationMs?: unknown } : null;
+    const elapsed = result?.durationMs;
+    if (duration(elapsed)) {
+      metrics.tools.count += 1;
+      metrics.tools.durationMs += elapsed;
+      metrics.tools.knownDurationCount += 1;
     }
   } else if (event.type === 'turn.end') {
     metrics.runs.completed += 1;

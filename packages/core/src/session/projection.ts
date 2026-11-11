@@ -79,6 +79,7 @@ export function safePublicMessages(messages: readonly Message[]): Message[] {
               ...(message.usage.cachedInputTokens === undefined ? {} : { cachedInputTokens: message.usage.cachedInputTokens }) },
           }),
           ...(message.requestDurationMs === undefined ? {} : { requestDurationMs: message.requestDurationMs }),
+          ...(message.firstTokenDurationMs === undefined ? {} : { firstTokenDurationMs: message.firstTokenDurationMs }),
         };
       case 'tool':
         return {
@@ -114,6 +115,7 @@ function readAssistantMessage(data: unknown): AssistantMessage | undefined {
   const providerReplay = ProviderReplaySchema.safeParse(record.providerReplay);
   const contextSample = AssistantMessageSchema.shape.contextSample.safeParse(record.contextSample);
   const requestDurationMs = AssistantMessageSchema.shape.requestDurationMs.safeParse(record.requestDurationMs);
+  const firstTokenDurationMs = AssistantMessageSchema.shape.firstTokenDurationMs.safeParse(record.firstTokenDurationMs);
   const usage = typeof record.usage === 'object' && record.usage !== null && !Array.isArray(record.usage)
     ? { ...record.usage as Record<string, unknown> } : undefined;
   if (usage !== undefined) {
@@ -127,6 +129,7 @@ function readAssistantMessage(data: unknown): AssistantMessage | undefined {
     ...record,
     ...(usage === undefined ? {} : { usage }),
     requestDurationMs: requestDurationMs.success ? requestDurationMs.data : undefined,
+    firstTokenDurationMs: firstTokenDurationMs.success ? firstTokenDurationMs.data : undefined,
     contextSample: contextSample.success ? contextSample.data : undefined,
     dshReplay: dshReplay.success ? dshReplay.data : undefined,
     providerReplay: providerReplay.success ? providerReplay.data : undefined,
@@ -134,6 +137,7 @@ function readAssistantMessage(data: unknown): AssistantMessage | undefined {
   if (!parsed.success) return undefined;
   // Avoid adding absent optional properties to legacy messages.
   if (parsed.data.requestDurationMs === undefined) delete parsed.data.requestDurationMs;
+  if (parsed.data.firstTokenDurationMs === undefined) delete parsed.data.firstTokenDurationMs;
   if (parsed.data.contextSample === undefined) delete parsed.data.contextSample;
   if (parsed.data.dshReplay === undefined) delete parsed.data.dshReplay;
   if (parsed.data.providerReplay === undefined) delete parsed.data.providerReplay;

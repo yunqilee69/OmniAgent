@@ -251,7 +251,7 @@ barrel 只放在包边界；模块之间不要 `export *` 满天飞。
 type Message =
   | { role: 'user'; content: UserContent[]; initCommand?: true }
   | { role: 'assistant'; content: AssistantContent[]; toolCalls: ToolCall[]; usage?: Usage;
-      requestDurationMs?: number; contextSample?: ContextSample; dshReplay?; providerReplay? }
+      requestDurationMs?: number; firstTokenDurationMs?: number; contextSample?: ContextSample; dshReplay?; providerReplay? }
   | { role: 'tool'; results: ToolResult[] };
 ```
 

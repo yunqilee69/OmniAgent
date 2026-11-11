@@ -48,6 +48,8 @@ describe('session trajectory projection', () => {
       runs: { started: 1, completed: 1, durationMs: 600, knownDurationCount: 1 },
       steps: { started: 1 },
       requests: { count: 1, durationMs: 75, knownDurationCount: 1 },
+      tools: { count: 1, durationMs: 17, knownDurationCount: 1 },
+      ttft: { durationMs: 0, count: 0 },
       usage: { inputTokens: 12, outputTokens: 5, inputKnownCount: 1, outputKnownCount: 1 },
       throughput: { outputTokens: 5, durationMs: 75, count: 1 },
       cache: { inputTokens: 12, cachedInputTokens: 4, count: 1 },
