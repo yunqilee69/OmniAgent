@@ -23,7 +23,7 @@
 - 工具表、skill allowlist、system prompt；
 - 消息历史、todo、plan、goal、标题。
 
-它出现在普通会话列表中，可以通过正常会话接口读取。父会话只保存 `subagent/start`、`subagent/end`、`subagent/notice` 等关联事件。
+它可以通过正常会话接口读取，工作区会话列表也会返回它（带 `parentSessionId`、`depth`、`description`）。Web 侧边栏只列用户自己发起的会话，子智能体不占其中一行，而是从标题栏的「N 个子智能体」卡片进入。父会话只保存 `subagent/start`、`subagent/end`、`subagent/notice` 等关联事件。
 
 ### 1.2 限制
 

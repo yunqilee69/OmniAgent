@@ -37,6 +37,17 @@ describe('workspace sidebar', () => {
     expect(html.indexOf('>Tasks<')).toBeGreaterThan(html.indexOf('title="/b">Beta'));
   });
 
+  it('lists the conversations the user started, not their subagents', () => {
+    const html = renderSidebar({
+      sessions: [
+        { id: 'root-session', title: 'Ship the parser' },
+        { id: 'child-session', parentSessionId: 'root-session', description: 'Parse the payload' },
+      ],
+    });
+    expect(html).toContain('Ship the parser');
+    expect(html).not.toContain('Parse the payload');
+  });
+
   it.each([
     { sessionsLoading: true },
     { sessionError: 'Session list failed' },

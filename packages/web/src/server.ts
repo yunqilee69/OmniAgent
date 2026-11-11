@@ -85,6 +85,7 @@ import { AttachmentError, parseSendAttachments, storeAttachments } from './attac
 import { browseDirectories, DirectoryBrowseError } from './fs-browse';
 import { exportSession } from './session-export';
 import { projectSessionMetrics } from './session-metrics';
+import { projectSubagentActivities } from './subagent-summaries';
 import { projectTraceEvents } from './trace-projection';
 import { projectTrajectory } from './trajectory';
 import {
@@ -965,17 +966,31 @@ async function route(
   }
   if (parts[3] !== 'sessions') throw new HttpError(404, 'Not found');
   if (request.method === 'GET' && parts.length === 4) {
-    const summaries = await Promise.all((await options.store.list())
-      .filter((item) => item.workspace === workspace.path)
-      .map(async (item) => {
-        try {
-          const handle = await options.store.open(item.workspace, item.id);
-          const agent = projectAgentSelection(handle.events);
-          return { ...item, ...(agent.status === 'selected' ? { agent: agent.agent } : {}) };
-        } catch {
-          return item;
-        }
-      }));
+    const listed = (await options.store.list()).filter((item) => item.workspace === workspace.path);
+    const opened = await Promise.all(listed.map(async (item) => {
+      try {
+        return { item, events: (await options.store.open(item.workspace, item.id)).events };
+      } catch {
+        return { item, events: undefined };
+      }
+    }));
+    const eventsById = new Map(opened.map((entry) => [entry.item.id, entry.events]));
+    // A child's status and token total are read from its parent's start/end
+    // events and its own transcript, so one pass over the workspace answers
+    // both without a second listing per child.
+    const activities = projectSubagentActivities({
+      summaries: listed,
+      events: (sessionId) => eventsById.get(sessionId),
+    });
+    const summaries = opened.map(({ item, events }) => {
+      const agent = events === undefined ? undefined : projectAgentSelection(events);
+      const activity = activities.get(item.id);
+      return {
+        ...item,
+        ...(agent?.status === 'selected' ? { agent: agent.agent } : {}),
+        ...(activity === undefined ? {} : activity),
+      };
+    });
     return json(response, 200, {
       sessions: summaries.sort((left, right) =>
         Number(right.pinned === true) - Number(left.pinned === true)

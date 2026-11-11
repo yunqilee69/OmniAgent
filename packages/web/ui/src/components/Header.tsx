@@ -1,4 +1,4 @@
-import { useState, useSyncExternalStore, type ReactNode } from 'react';
+import { Fragment, useState, useSyncExternalStore, type ReactNode } from 'react';
 import clsx from 'clsx';
 import {
   IconAgentPresetOutlineRegular,
@@ -12,6 +12,8 @@ import {
 import { auth } from '../lib/auth.ts';
 import { store, useApp, useSessionEntry } from '../lib/store.ts';
 import { translator } from '../lib/i18n.ts';
+import { sessionLabel, sessionTrail, subagentRows } from '../lib/subagents.ts';
+import { SubagentTeam } from './SubagentTeam.tsx';
 import css from '../styles/app.module.css';
 
 export function Header({ sidebarOpen, onToggleSidebar, rightOpen, onToggleRight }: {
@@ -41,6 +43,11 @@ export function Header({ sidebarOpen, onToggleSidebar, rightOpen, onToggleRight 
           : t('Untitled');
   const hasSession = app.sessionId !== null && entry?.draft !== true && !onAutomation && !onSettings;
   const draftSession = app.sessionId !== null && entry?.draft === true && !onAutomation && !onSettings;
+  // A child session is titled by its path: root first, the task it is doing last.
+  const trail = hasSession && app.sessionId !== null ? sessionTrail(app.sessions, app.sessionId) : [];
+  const trailRoot = trail[0] ?? null;
+  const viewingChild = trail.length > 1;
+  const teamRows = trailRoot === null ? [] : subagentRows(app.sessions, trailRoot.id);
   const agentName = entry?.agent?.name?.trim();
   const sessionMode = entry?.mode ?? null;
   const modeName = sessionMode === null
@@ -70,13 +77,53 @@ export function Header({ sidebarOpen, onToggleSidebar, rightOpen, onToggleRight 
         <div className={css.titleCluster}>
           <nav className={css.crumbs} aria-label={t('Session view')}>
             {hasSession ? (
-              <span className={clsx(css.crumb, css.crumbCurrent)} title={sessionTitle}>{sessionTitle}</span>
+              trail.length > 0 ? trail.map((item, index) => {
+                const current = index === trail.length - 1;
+                // The list is the same source the sidebar reads, and it is the
+                // only place a title minted after the turn ends shows up.
+                const label = sessionLabel(item)
+                  || (current ? sessionTitle : item.blank === true ? t('New Session') : t('Untitled'));
+                return (
+                  <Fragment key={item.id}>
+                    {index > 0 && <span className={css.crumbSep} aria-hidden="true">/</span>}
+                    {current ? (
+                      viewingChild && teamRows.length > 0 ? (
+                        <SubagentTeam
+                          variant="crumb"
+                          rows={teamRows}
+                          currentId={app.sessionId}
+                          workspaceId={app.workspaceId}
+                          label={label}
+                        />
+                      ) : (
+                        <span className={clsx(css.crumb, css.crumbCurrent)} title={label}>{label}</span>
+                      )
+                    ) : (
+                      <button
+                        type="button"
+                        className={clsx(css.crumb, css.crumbLink)}
+                        title={t('Back to {name}', { name: label })}
+                        onClick={() => {
+                          if (app.workspaceId !== null) store.selectSession(item.id, app.workspaceId);
+                        }}
+                      >
+                        {label}
+                      </button>
+                    )}
+                  </Fragment>
+                );
+              }) : (
+                <span className={clsx(css.crumb, css.crumbCurrent)} title={sessionTitle}>{sessionTitle}</span>
+              )
             ) : (
               <span className={css.crumbCurrent}>
                 {draftSession ? t('New Session') : onSettings ? t('Settings') : onAutomation ? t('Automation tasks') : t('No session selected')}
               </span>
             )}
           </nav>
+          {!viewingChild && teamRows.length > 0 && (
+            <SubagentTeam rows={teamRows} currentId={app.sessionId} workspaceId={app.workspaceId} />
+          )}
           {hasSession && (
             <span className={css.modeLabel} title={modeTitle}>
               <IconAgentPresetOutlineRegular size={14} />

@@ -325,10 +325,6 @@
   width: 100%;
 }
 
-.childRow {
-  padding-inline-start: calc(var(--dsh-sidebar-row-padding) - var(--dsh-sidebar-paint-inset) + var(--dsh-workspace-indent, 0px) + 18px);
-}
-
 .footerRow {
   display: flex;
   align-items: center;

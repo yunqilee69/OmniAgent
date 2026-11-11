@@ -249,6 +249,25 @@
   color: var(--dsw-alias-label-primary);
 }
 
+/* Ancestors in a subagent trail: the crumb geometry, but it navigates. */
+.crumbLink {
+  flex: 0 1 auto;
+  cursor: pointer;
+}
+
+@media (hover: hover) {
+  .crumbLink:hover {
+    color: var(--dsw-alias-label-secondary);
+    text-decoration: underline;
+    text-underline-offset: 2px;
+  }
+}
+
+.crumbLink:focus-visible {
+  outline: var(--dsw-focus-ring-width) solid var(--dsw-focus-ring-color, var(--dsw-alias-label-secondary));
+  outline-offset: 1px;
+}
+
 .crumbSep {
   flex: none;
   color: var(--dsw-alias-label-caption);

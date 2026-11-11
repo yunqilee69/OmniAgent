@@ -29,6 +29,18 @@ export interface SessionSummary {
   titleSource?: unknown;
   pinned?: boolean;
   blank?: boolean;
+  /** Child sessions only: folded from the parent's subagent start/end events. */
+  subagentStatus?: SubagentStatus;
+  /** Child sessions only: token totals their own assistant messages reported. */
+  usage?: SessionUsage;
+}
+
+export type SubagentStatus = 'running' | 'completed' | 'failed' | 'interrupted' | 'idle';
+
+export interface SessionUsage {
+  inputTokens: number | null;
+  outputTokens: number | null;
+  totalTokens: number | null;
 }
 
 export interface AgentSummary {

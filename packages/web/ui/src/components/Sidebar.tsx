@@ -1,4 +1,4 @@
-import { useEffect, useMemo, useState, type CSSProperties, type ReactNode } from 'react';
+import { useEffect, useMemo, useState, type ReactNode } from 'react';
 import clsx from 'clsx';
 import {
   Button,
@@ -431,8 +431,11 @@ export function Sidebar({ drawer, onClose, onBrowseWorkspace }: { drawer: boolea
                     ? { sessions: app.sessions, loading: app.sessionsLoading, error: app.sessionError, loaded: true }
                     : { sessions: [], loading: false, error: '', loaded: false });
                   const needle = query.trim().toLowerCase();
-                  const sessions = needle === '' ? list.sessions : list.sessions.filter((session) =>
-                    [session.id, session.title, session.agent, session.agentId, session.cwd, session.description, session.parentSessionId]
+                  // Child sessions are reached from the header team card, not
+                  // from the task list: one row per conversation the user started.
+                  const roots = list.sessions.filter((session) => String(session.parentSessionId ?? '') === '');
+                  const sessions = needle === '' ? roots : roots.filter((session) =>
+                    [session.id, session.title, session.agent, session.agentId, session.cwd, session.description]
                       .some((value) => String(value ?? '').toLowerCase().includes(needle)));
                   const menuOpen = workspaceMenuOpen === item.id;
                   const workspaceLabel = item.name || item.path || item.id;
@@ -529,7 +532,6 @@ export function Sidebar({ drawer, onClose, onBrowseWorkspace }: { drawer: boolea
                       </div>
                     )}
                     {expanded && !list.loading && list.error === '' && sessions.map((session) => {
-                      const child = typeof session.parentSessionId === 'string' && session.parentSessionId !== '';
                       const description = typeof session.description === 'string' ? session.description.trim() : '';
                       const title = typeof session.title === 'string' ? session.title.trim() : '';
                       const name = description !== ''
@@ -550,12 +552,10 @@ export function Sidebar({ drawer, onClose, onBrowseWorkspace }: { drawer: boolea
                             browserCss.sessionRow,
                             selected && browserCss.selected,
                             menuOpen && browserCss.rowMenuOpen,
-                            child && browserCss.childRow,
                           )}
                           role="treeitem"
                           aria-selected={selected}
                           tabIndex={0}
-                          style={child ? { '--dsh-workspace-indent': '14px' } as CSSProperties : undefined}
                           title={session.id}
                           onClick={() => { select(item.id, session.id); }}
                           onKeyDown={(event) => {

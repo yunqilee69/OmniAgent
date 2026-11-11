@@ -2006,4 +2006,47 @@ describe('workspace web host', () => {
 
     expect((await fetch(`${url}/missing/compact`, jsonRequest({}))).status).toBe(404);
   });
+
+  it('reports subagent status and token totals on child session summaries only', async () => {
+    const { base, first, store } = await setup();
+    const parent = await store.create({ id: 'parent-session', workspace: first.path, cwd: first.path });
+    await parent.append({ type: 'message/user', data: { text: 'split the work' } });
+    const finished = await store.create({
+      id: 'child-finished', workspace: first.path, cwd: first.path,
+      parentSessionId: 'parent-session', depth: 1, description: 'Parse the payload',
+    });
+    await finished.append({ type: 'trace/turn.start', data: { step: 0 } });
+    await finished.append({
+      type: 'message/assistant',
+      data: { role: 'assistant', text: 'done', usage: { inputTokens: 1_200, outputTokens: 300 } },
+    });
+    await finished.append({ type: 'trace/turn.end', data: { reason: 'end_turn' } });
+    const working = await store.create({
+      id: 'child-working', workspace: first.path, cwd: first.path,
+      parentSessionId: 'parent-session', depth: 1, description: 'Check the API mock',
+    });
+    await working.append({ type: 'trace/turn.start', data: { step: 0 } });
+    await parent.append({ type: 'subagent/start', data: { id: 'child-finished', depth: 1, status: 'running' } });
+    await parent.append({ type: 'subagent/start', data: { id: 'child-working', depth: 1, status: 'running' } });
+    await parent.append({ type: 'subagent/end', data: { childId: 'child-finished', status: 'completed', depth: 1 } });
+
+    type Summary = {
+      id: string;
+      description?: string;
+      parentSessionId?: string;
+      subagentStatus?: string;
+      usage?: { inputTokens: number | null; outputTokens: number | null; totalTokens: number | null } | null;
+    };
+    const body = await jsonResponse<{ sessions: Summary[] }>(await fetch(sessionsUrl(base, first.id)));
+    const byId = (id: string) => body.sessions.find((session) => session.id === id)!;
+    expect(byId('child-finished')).toMatchObject({
+      parentSessionId: 'parent-session',
+      description: 'Parse the payload',
+      subagentStatus: 'completed',
+      usage: { inputTokens: 1_200, outputTokens: 300, totalTokens: 1_500 },
+    });
+    expect(byId('child-working')).toMatchObject({ subagentStatus: 'running', usage: null });
+    expect(byId('parent-session').subagentStatus).toBeUndefined();
+    expect(byId('parent-session').usage).toBeUndefined();
+  });
 });
