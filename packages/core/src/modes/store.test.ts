@@ -113,6 +113,24 @@ describe('ModeStore', () => {
     expect(await store.defaultId()).toBe('standard');
   });
 
+  it('keeps built-in modes usable before any model is configured', async () => {
+    const root = await mkdtemp(join(tmpdir(), 'omniagent-modes-'));
+    roots.push(root);
+    const agentsDir = join(root, 'agents');
+    await mkdir(agentsDir);
+    const store = new ModeStore({
+      path: join(root, 'modes.json'),
+      configStore: await ConfigStore.open(join(root, 'config.json')),
+      agents: new AgentCatalog(agentsDir),
+    });
+    const modes = await store.list();
+    expect(modes.map((mode) => [mode.id, mode.valid, mode.warnings])).toEqual([
+      ['standard', true, []],
+      ['creator', true, []],
+    ]);
+    expect((await store.resolveDefault()).id).toBe('standard');
+  });
+
   it('reports invalid modes loaded from disk instead of throwing', async () => {
     const { modesPath, store } = await fixture();
     await writeFile(modesPath, JSON.stringify({

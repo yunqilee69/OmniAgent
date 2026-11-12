@@ -135,15 +135,9 @@ export class RuntimeResolver {
     }
 
     const binding = input.binding ?? defaultModelBinding();
-    let resolvedModel;
-    try {
-      resolvedModel = resolveModelBinding(catalog, agent.role, binding);
-    } catch (error) {
-      const demoDefault = binding.kind === 'agent' && agent.role === 'default' &&
-        !catalog.roles.has('default') && !catalog.roleErrors.has('default');
-      if (!demoDefault) throw error;
-      resolvedModel = { binding };
-    }
+    // An install with no model configured resolves to no model on purpose; the
+    // caller then runs the demo client and the workbench asks for a model.
+    const resolvedModel = resolveModelBinding(catalog, agent.role, binding);
 
     let model: ModelClient | undefined;
     if (resolvedModel.model) {

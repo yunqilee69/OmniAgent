@@ -45,6 +45,14 @@ describe('model bindings', () => {
     });
   });
 
+  it('resolves to no model when nothing configures the default role', () => {
+    const empty = buildConfigCatalog(ConfigSchema.parse({}));
+    expect(resolveModelBinding(empty, 'default', defaultModelBinding())).toEqual({ binding: defaultModelBinding() });
+    // An explicit role reference stays strict even in an unconfigured install.
+    expect(() => resolveModelBinding(empty, 'default', { version: 2, kind: 'role', role: 'default' }))
+      .toThrow(/unknown role/i);
+  });
+
   it('rejects unknown agents/roles/models and unsupported efforts', () => {
     expect(() => resolveModelBinding(catalog, 'missing', defaultModelBinding())).toThrow(/unknown role/i);
     expect(() => resolveModelBinding(catalog, 'default', { version: 2, kind: 'role', role: 'missing' })).toThrow(/unknown role/i);

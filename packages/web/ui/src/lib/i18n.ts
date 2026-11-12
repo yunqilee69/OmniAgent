@@ -841,6 +841,8 @@ const zh: Record<string, string> = {
   'Search models': '搜索模型',
   'No matching models.': '没有匹配的模型。',
   'No matching models': '没有匹配的模型',
+  'No models are configured yet. Add one in Settings → Model configuration.':
+    '还没有配置模型。请前往「设置 → 模型配置」添加。',
   'Select all': '全选',
   'Deselect all': '取消全选',
   'Move model up': '上移模型',

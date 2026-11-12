@@ -812,6 +812,37 @@ export function Composer({ hero = false, onOpenPlanPreview }: { hero?: boolean; 
         </div>
       )}
       <TodoDock entry={entry} t={t} />
+      {/* Queued messages stack above the input, like the task dock, so the
+          input keeps its place while a turn is running. */}
+      {entry !== null && entry.queued.length > 0 && (
+        <div className={appCss.queueDock} aria-label={t('Queued messages')}>
+          <div className={appCss.queueHeader}>
+            <IconQueueOutlineRegular />
+            <span>{t('{count} queued', { count: entry.queued.length })}</span>
+          </div>
+          <ul className={appCss.queueList}>
+            {entry.queued.map((item) => (
+              <li key={item.id} className={appCss.queueItem}>
+                <span className={appCss.queueText} title={item.delivery === 'uncertain' ? t('Delivery status unknown. Check the conversation before removing this message.') : item.text}>
+                  {item.text.trim() === '' ? item.attachments.map((attachment) => attachment.name).join(', ') : item.text}
+                  {item.delivery === 'uncertain' ? ` (${t('Delivery status unknown')})` : ''}
+                </span>
+                <button type="button" className={appCss.queueRemove}
+                  aria-label={t('Steer queued message')} title={t('Steer queued message')}
+                  disabled={item.delivery === 'uncertain' || !busy || run?.stopping === true || run?.finishing === true}
+                  onClick={() => { void store.steerQueuedMessage(item.id); }}>
+                  <IconSendOutlineRegular size={12} />
+                </button>
+                <button type="button" className={appCss.queueRemove}
+                  aria-label={t('Remove queued message')}
+                  onClick={() => { store.removeQueuedMessage(item.id); }}>
+                  <IconCloseOutlineRegular size={12} />
+                </button>
+              </li>
+            ))}
+          </ul>
+        </div>
+      )}
       <div className={css.card} ref={card}>
         <div className={css.overlayAnchor} aria-hidden />
         {menuOpen && (
@@ -1048,35 +1079,6 @@ export function Composer({ hero = false, onOpenPlanPreview }: { hero?: boolean; 
           ) : null}
       </div>
       <div className={clsx(css.dock, appCss.composerDock)}>
-        {entry !== null && entry.queued.length > 0 && (
-          <div className={appCss.queueDock} aria-label={t('Queued messages')}>
-            <div className={appCss.queueHeader}>
-              <IconQueueOutlineRegular />
-              <span>{t('{count} queued', { count: entry.queued.length })}</span>
-            </div>
-            <ul className={appCss.queueList}>
-              {entry.queued.map((item) => (
-                <li key={item.id} className={appCss.queueItem}>
-                  <span className={appCss.queueText} title={item.delivery === 'uncertain' ? t('Delivery status unknown. Check the conversation before removing this message.') : item.text}>
-                    {item.text.trim() === '' ? item.attachments.map((attachment) => attachment.name).join(', ') : item.text}
-                    {item.delivery === 'uncertain' ? ` (${t('Delivery status unknown')})` : ''}
-                  </span>
-                  <button type="button" className={appCss.queueRemove}
-                    aria-label={t('Steer queued message')} title={t('Steer queued message')}
-                    disabled={item.delivery === 'uncertain' || !busy || run?.stopping === true || run?.finishing === true}
-                    onClick={() => { void store.steerQueuedMessage(item.id); }}>
-                    <IconSendOutlineRegular size={12} />
-                  </button>
-                  <button type="button" className={appCss.queueRemove}
-                    aria-label={t('Remove queued message')}
-                    onClick={() => { store.removeQueuedMessage(item.id); }}>
-                    <IconCloseOutlineRegular size={12} />
-                  </button>
-                </li>
-              ))}
-            </ul>
-          </div>
-        )}
         <div className={appCss.composerReadings}>
           <SessionStats entry={entry} />
           <ContextMeter workspaceId={app.workspaceId} sessionId={app.sessionId}

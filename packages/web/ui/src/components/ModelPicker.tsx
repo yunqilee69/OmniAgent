@@ -404,7 +404,13 @@ export function ModelPicker({
                     })}
                   </section>
                 ))}
-                {!hasResults && <div className={css.empty} role="status">{t('No matching models')}</div>}
+                {!hasResults && (
+                  <div className={css.empty} role="status">
+                    {models.length === 0 && roles.length === 0
+                      ? t('No models are configured yet. Add one in Settings → Model configuration.')
+                      : t('No matching models')}
+                  </div>
+                )}
               </div>
             </>
           )}

@@ -466,11 +466,14 @@
   display: none;
 }
 
+/* Queued messages sit above the input card, stacked like the task dock, so the
+   conversation keeps its bottom edge and the input never shifts when a message
+   joins the queue. */
 .queueDock {
   box-sizing: border-box;
   width: 100%;
   max-width: var(--dsh-composer-card-max-width);
-  margin: 0 auto;
+  margin: 0 auto 8px;
   padding: 8px 12px;
   border: 1px solid var(--dsw-alias-border-l1);
   border-radius: var(--dsw-radius-lg);

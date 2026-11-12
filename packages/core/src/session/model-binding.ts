@@ -68,10 +68,25 @@ export function createModelSwitch(
 }
 
 /**
+ * True when nothing defines the `default` role, i.e. the install has no model
+ * configured yet. Sessions then run on the demo model instead of failing, so
+ * the workbench can simply offer an empty model seat and let the user pick one.
+ */
+export function isUnconfiguredDefaultRole(
+  catalog: ConfigCatalog,
+  agentRole: string,
+  binding: ModelBinding,
+): boolean {
+  return binding.kind === 'agent' && agentRole === 'default'
+    && !catalog.roles.has('default') && !catalog.roleErrors.has('default');
+}
+
+/**
  * Resolve a persisted binding against the current config catalog.
  *
  * `kind: "agent"` follows the session agent's role. The returned model is
- * undefined only when the default role is intentionally unconfigured (demo).
+ * undefined only when the default role is intentionally unconfigured (demo);
+ * every other missing or broken role is an error.
  */
 export function resolveModelBinding(
   catalog: ConfigCatalog,
@@ -87,6 +102,7 @@ export function resolveModelBinding(
   const roleId = binding.kind === 'agent' ? agentRole : binding.role;
   const role = catalog.roles.get(roleId);
   if (!role) {
+    if (isUnconfiguredDefaultRole(catalog, agentRole, binding)) return { binding };
     const error = catalog.roleErrors.get(roleId);
     throw new Error(error ?? `Unknown role "${roleId}"`);
   }

@@ -197,6 +197,8 @@ type AgentProfile = {
 
 非法角色不进入 `roles`，但错误保留在 `roleErrors`。`resolveModelBinding()` 会抛出具体错误，而不是静默跳过。
 
+唯一的例外是第 4 条 demo 情况：`default` 角色既不在 `roles` 也不在 `roleErrors` 时，跟随 agent 角色的绑定（`kind: "agent"`）会解析成「没有模型」而不是报错。这样全新安装（还没有配置任何模型）时，内置模式的 `valid` 保持为 `true`，Web 端可以直接新建会话、模型槽位显示为空并提示用户去「设置 → 模型配置」添加模型，而不是抛出 `Unknown role "default"` 的告警。显式引用 `role: "default"` 的绑定仍然报错。
+
 ## 5. Provider 适配
 
 ### 5.1 路由选择
