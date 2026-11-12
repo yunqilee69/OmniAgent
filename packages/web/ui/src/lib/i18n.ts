@@ -22,7 +22,7 @@ const zh: Record<string, string> = {
   'File is too large to preview.': '文件过大，无法预览。',
   'Binary files cannot be previewed.': '无法预览二进制文件。',
   'Context usage': '上下文用量',
-  '{percent}% of context used': '上下文已用 {percent}%',
+  '{percent} of context used': '上下文已用 {percent}',
   'Context usage is counted when a turn finishes': '上下文用量在一轮结束后结算',
   'The first reading appears when this turn finishes.': '本轮结束后出现首个读数。',
   'This model has no known context window.': '该模型没有已知的上下文窗口。',

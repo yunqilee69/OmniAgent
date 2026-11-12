@@ -3,7 +3,10 @@ import { createElement } from 'react';
 import { renderToStaticMarkup } from 'react-dom/server';
 import { describe, expect, it } from 'vitest';
 import { ContextMeter } from '../ui/src/components/ContextMeter.tsx';
-import { carryProjection, contextCapacity, contextOccupancy } from '../ui/src/lib/context-reading.ts';
+import {
+  carryProjection, contextCapacity, contextOccupancy, READING_SLOT, splitReadingSentence,
+} from '../ui/src/lib/context-reading.ts';
+import { translate } from '../ui/src/lib/i18n.ts';
 import type { ContextEstimate } from '../ui/src/lib/wire.ts';
 
 const props = {
@@ -28,6 +31,14 @@ describe('context meter', () => {
     const markup = renderToStaticMarkup(createElement(ContextMeter, { ...props, workspaceId: 'w', sessionId: 's', busy: true }));
     expect(markup).toContain('0%');
     expect(markup).toContain('aria-haspopup="dialog"');
+  });
+
+  it('names the reading once, without doubling the percent sign', () => {
+    const reading = '7%';
+    expect(translate('en', '{percent} of context used', { percent: reading })).toBe('7% of context used');
+    expect(translate('zh', '{percent} of context used', { percent: reading })).toBe('上下文已用 7%');
+    expect(splitReadingSentence(translate('zh', '{percent} of context used', { percent: READING_SLOT })))
+      .toEqual(['上下文已用', '']);
   });
 
   it('draws a ring with the percentage beside it in a quiet pill', () => {

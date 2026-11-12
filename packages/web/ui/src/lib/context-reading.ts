@@ -31,6 +31,24 @@ export function carryProjection(previous: ContextEstimate | undefined, next: Con
   return { ...next, projection: previous.projection };
 }
 
+/**
+ * Marker the localized occupancy sentence is split on, so the panel headline
+ * keeps the reading in its own tone while each locale still owns the word order
+ * (`45% of context used` / `上下文已用 45%`).
+ */
+export const READING_SLOT = '\0';
+
+/**
+ * Split a localized occupancy sentence around the reading. The placeholder
+ * stands for the whole reading — unit included — so a template that appends its
+ * own `%` would render a doubled sign (`7%%`); the sentence template carries no
+ * literal percent.
+ */
+export function splitReadingSentence(sentence: string): [before: string, after: string] {
+  const [before = '', after = ''] = sentence.split(READING_SLOT).map((part) => part.trim());
+  return [before, after];
+}
+
 export interface ContextOccupancy {
   /** Share of the budget in use; `0` until a settled projection with a known budget lands. */
   percent: number;

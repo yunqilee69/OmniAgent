@@ -3,7 +3,7 @@ import { createPortal } from 'react-dom';
 import { Tooltip } from '../../vendor/primitives/index.ts';
 import { authFetch } from '../lib/auth.ts';
 import { sessionApiPath, validateContextEstimate, type ContextEstimate } from '../lib/wire.ts';
-import { carryProjection, contextOccupancy } from '../lib/context-reading.ts';
+import { carryProjection, contextOccupancy, READING_SLOT, splitReadingSentence } from '../lib/context-reading.ts';
 import { formatTokens } from '../lib/session-readings.ts';
 import { translator, type Locale } from '../lib/i18n.ts';
 import { MEASURE_STYLE, useStatDialog } from './stat-dialog.tsx';
@@ -26,13 +26,6 @@ const CIRCUMFERENCE = 2 * Math.PI * RADIUS;
 
 /** Poll cadence for a live session; the projection moves only when a turn settles. */
 const POLL_MS = 5000;
-
-/**
- * Marker the localized occupancy sentence is split on, so the panel headline
- * keeps the reading in its own tone while each locale still owns the word order
- * (`45% of context used` / `上下文已用 45%`).
- */
-const READING_SLOT = '\0';
 
 /**
  * Composer context-occupancy meter: a ring and percentage below the card, with a
@@ -108,12 +101,15 @@ export function ContextMeter({ workspaceId, sessionId, draft, busy, modelSaving,
   if (!pollable && value === null) return null;
 
   const { percent, settled, projection, capacity } = contextOccupancy(value);
+  // The reading carries its own sign, so the sentence template never appends
+  // one — otherwise the placeholder would render as `7%%`.
   const reading = `${percent}%`;
   const sentence = settled
-    ? t('{percent}% of context used', { percent: reading })
+    ? t('{percent} of context used', { percent: reading })
     : t('Context usage is counted when a turn finishes');
-  const [headBefore = '', headAfter = ''] = t('{percent}% of context used', { percent: READING_SLOT })
-    .split(READING_SLOT).map((part) => part.trim());
+  const [headBefore, headAfter] = splitReadingSentence(
+    t('{percent} of context used', { percent: READING_SLOT }),
+  );
   const rows = projection === undefined ? [] : [
     { key: 'system', label: t('System prompt'), tokens: projection.breakdown.systemTokens, color: css.colorSystem },
     { key: 'tools', label: t('Tool definitions'), tokens: projection.breakdown.toolsTokens, color: css.colorTools },
