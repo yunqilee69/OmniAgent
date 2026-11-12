@@ -356,18 +356,9 @@
   }
 }
 
-/* Archived sessions dialog: one row per archived transcript plus a restore
-   action; archived rows never come back into the sidebar list itself. */
-.archivedContext {
-  margin: 0 0 6px;
-  overflow: hidden;
-  color: var(--dsw-alias-label-tertiary);
-  font-size: 12px;
-  line-height: 18px;
-  text-overflow: ellipsis;
-  white-space: nowrap;
-}
-
+/* Archived sessions dialog: one row per archived transcript across every
+   workspace, with the owning workspace named on the row and a restore action;
+   archived rows never come back into the sidebar list itself. */
 .archivedList {
   display: flex;
   flex-direction: column;
@@ -399,6 +390,20 @@
   color: var(--dsw-alias-label-primary);
   font-size: 14px;
   line-height: 20px;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.archivedWorkspace {
+  flex: 0 1 auto;
+  max-width: 40%;
+  overflow: hidden;
+  padding: 0 6px;
+  border-radius: var(--dsw-radius-xs);
+  background-color: var(--dsw-alias-interactive-bg-hover);
+  color: var(--dsw-alias-label-tertiary);
+  font-size: 10px;
+  line-height: 16px;
   text-overflow: ellipsis;
   white-space: nowrap;
 }

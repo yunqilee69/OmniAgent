@@ -179,6 +179,20 @@ export interface RecentSessionSummary {
   mode?: string;
 }
 
+/** One archived session, listed across every registered workspace. */
+export interface ArchivedSessionSummary {
+  id: string;
+  title: string | null;
+  workspaceId: string;
+  workspaceName: string;
+  updatedAt: number;
+  createdAt?: number;
+  blank: boolean;
+  description?: string;
+  agent?: string;
+  mode?: string;
+}
+
 export interface ModelSummary {
   provider: string;
   model: string;
@@ -1212,6 +1226,28 @@ export function validateRecentSessions(value: unknown): RecentSessionSummary[] {
       workspaceName: item.workspaceName as string,
       updatedAt: item.updatedAt as number,
       blank: item.blank === true,
+      ...(typeof item.agent === 'string' ? { agent: item.agent } : {}),
+      ...(typeof item.mode === 'string' ? { mode: item.mode } : {}),
+    }));
+}
+
+export function validateArchivedSessions(value: unknown): ArchivedSessionSummary[] {
+  if (!Array.isArray(value)) return [];
+  return value
+    .filter((item): item is Record<string, unknown> => typeof item === 'object' && item !== null)
+    .filter((item) => typeof item.id === 'string' && item.id !== ''
+      && typeof item.workspaceId === 'string' && item.workspaceId !== ''
+      && typeof item.workspaceName === 'string'
+      && typeof item.updatedAt === 'number' && Number.isFinite(item.updatedAt))
+    .map((item) => ({
+      id: item.id as string,
+      title: typeof item.title === 'string' && item.title.trim() !== '' ? item.title.trim() : null,
+      workspaceId: item.workspaceId as string,
+      workspaceName: item.workspaceName as string,
+      updatedAt: item.updatedAt as number,
+      ...(typeof item.createdAt === 'number' && Number.isFinite(item.createdAt) ? { createdAt: item.createdAt } : {}),
+      blank: item.blank === true,
+      ...(typeof item.description === 'string' && item.description.trim() !== '' ? { description: item.description.trim() } : {}),
       ...(typeof item.agent === 'string' ? { agent: item.agent } : {}),
       ...(typeof item.mode === 'string' ? { mode: item.mode } : {}),
     }));

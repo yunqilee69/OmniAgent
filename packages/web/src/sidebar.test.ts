@@ -296,6 +296,70 @@ describe('workspace sidebar', () => {
     }
   });
 
+  it('opens one archive view for every workspace instead of the active one', async () => {
+    vi.resetModules();
+    const hooks: unknown[] = [];
+    let cursor = 0;
+    vi.doMock('react', async (importOriginal) => {
+      const react = await importOriginal<typeof import('react')>();
+      return {
+        ...react,
+        useState: (initial: unknown) => {
+          const index = cursor++;
+          if (!(index in hooks)) hooks[index] = typeof initial === 'function' ? (initial as () => unknown)() : initial;
+          return [hooks[index], (next: unknown) => { hooks[index] = typeof next === 'function' ? (next as (value: unknown) => unknown)(hooks[index]) : next; }];
+        },
+        useMemo: (factory: () => unknown) => factory(),
+        useEffect: (effect: () => void) => effect(),
+        useSyncExternalStore: (_subscribe: unknown, getSnapshot: () => unknown) => getSnapshot(),
+      };
+    });
+    try {
+      const { Sidebar: TestSidebar } = await import('../ui/src/components/Sidebar.tsx');
+      const { store: testStore, AppStore: TestStore } = await import('../ui/src/lib/store.ts');
+      type Tree = {
+        type?: unknown;
+        props?: { children?: unknown; 'aria-label'?: string; disabled?: boolean; onClick?: () => void };
+      };
+      const nodes = (value: unknown): Tree[] => {
+        if (Array.isArray(value)) return value.flatMap(nodes);
+        if (typeof value !== 'object' || value === null) return [];
+        const node = value as Tree;
+        return [node, ...nodes(node.props?.children)];
+      };
+      const render = (state: Record<string, unknown>): Tree[] => {
+        vi.spyOn(testStore, 'getSnapshot').mockReturnValue(state as never);
+        cursor = 0;
+        return nodes(TestSidebar({ drawer: false, onClose: () => {} }));
+      };
+      const dialogProps = (tree: Tree[]): string[] | undefined => {
+        const dialog = tree.find((node) => typeof node.type === 'function'
+          && (node.type as { name?: string }).name === 'ArchivedSessionsDialog');
+        return dialog === undefined ? undefined : Object.keys(dialog.props ?? {});
+      };
+      const state = {
+        ...new TestStore().getSnapshot(), locale: 'en' as const, workspaces, workspaceId: 'a',
+        workspacesLoading: false, sessionsLoading: false,
+        sessions: [{ id: 'shared', title: 'Alpha session' }],
+      };
+      // Closed until the user asks for it, then rendered without a workspace
+      // argument: the dialog reads every workspace's archived rows itself.
+      expect(dialogProps(render(state))).toBeUndefined();
+      const open = render(state).find((node) => node.props?.['aria-label'] === 'Archived sessions')!;
+      expect(open.props?.disabled).not.toBe(true);
+      open.props?.onClick?.();
+      expect(dialogProps(render(state))).toEqual(['onClose']);
+      // The trigger is not tied to a selected workspace any more, so the archive
+      // list stays reachable before one is chosen.
+      const noWorkspace = render({ ...state, workspaceId: null, sessions: [] });
+      expect(noWorkspace.find((node) => node.props?.['aria-label'] === 'Archived sessions')?.props?.disabled)
+        .not.toBe(true);
+    } finally {
+      vi.doUnmock('react');
+      vi.resetModules();
+    }
+  });
+
   it('shows the newly active workspace sessions after a switch', () => {
     const html = renderSidebar({
       workspaceId: 'b',

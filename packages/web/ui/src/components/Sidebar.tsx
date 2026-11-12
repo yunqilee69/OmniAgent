@@ -31,7 +31,7 @@ import {
 } from '../../vendor/primitives/index.ts';
 import { DirectoryPicker } from './DirectoryPicker.tsx';
 import { store, sessionKey, useApp } from '../lib/store.ts';
-import type { SessionSummary } from '../lib/wire.ts';
+import type { ArchivedSessionSummary } from '../lib/wire.ts';
 import { relativeDate } from '../lib/trajectory.ts';
 import { runningSubagentCounts, sessionRowStatuses, showsRowDot } from '../lib/session-status.ts';
 import { translator } from '../lib/i18n.ts';
@@ -231,26 +231,25 @@ function DeleteSessionDialog({ workspaceId, id, name, onClose }: { workspaceId: 
 }
 
 /**
- * Archived sessions for one workspace, with a restore action per row.
+ * Archived sessions from every workspace, with a restore action per row.
  *
  * Archived sessions keep their transcript on disk but leave the sidebar and
  * session search, so this dialog is the only place they can be found and
- * brought back. The list is read on open and after every restore instead of
- * being folded into the sidebar list.
+ * brought back. Filing a session away is a housekeeping action, not a
+ * workspace-local one: the list therefore spans all registered workspaces and
+ * names the owner on each row, instead of only showing the active workspace.
+ * The list is read on open and after every restore instead of being folded into
+ * the sidebar list.
  */
-function ArchivedSessionsDialog({ workspaceId, workspaceName, onClose }: {
-  workspaceId: string;
-  workspaceName: string;
-  onClose: () => void;
-}): ReactNode {
+function ArchivedSessionsDialog({ onClose }: { onClose: () => void }): ReactNode {
   const app = useApp();
   const t = translator(app.locale);
-  const [sessions, setSessions] = useState<SessionSummary[] | null>(null);
+  const [sessions, setSessions] = useState<ArchivedSessionSummary[] | null>(null);
   const [error, setError] = useState('');
   const [restoring, setRestoring] = useState<string | null>(null);
   useEffect(() => {
     let cancelled = false;
-    void store.listArchivedSessions(workspaceId).then((items) => {
+    void store.listArchivedSessions().then((items) => {
       if (cancelled) return;
       setSessions(items);
       setError('');
@@ -260,14 +259,16 @@ function ArchivedSessionsDialog({ workspaceId, workspaceName, onClose }: {
       setError(t('Could not load archived sessions: {message}', { message: cause.message }));
     });
     return () => { cancelled = true; };
-  }, [workspaceId]);
-  const restore = (id: string): void => {
+  }, []);
+  const restore = (workspaceId: string, id: string): void => {
     if (restoring !== null) return;
-    setRestoring(id);
+    const key = sessionKey(workspaceId, id);
+    setRestoring(key);
     void store.setSessionArchived(id, false, workspaceId).then((ok) => {
       setRestoring(null);
       if (!ok) return;
-      setSessions((current) => (current ?? []).filter((session) => session.id !== id));
+      setSessions((current) => (current ?? []).filter((session) =>
+        sessionKey(session.workspaceId, session.id) !== key));
     });
   };
   return (
@@ -275,13 +276,12 @@ function ArchivedSessionsDialog({ workspaceId, workspaceName, onClose }: {
       open
       onClose={onClose}
       title={t('Archived sessions')}
-      description={t('Archived sessions are hidden from the sidebar and from session search. Their transcripts stay on disk.')}
+      description={t('Archived sessions from every workspace are listed here. They are hidden from the sidebar and from session search; their transcripts stay on disk.')}
       closeLabel={t('Close')}
       className={pickerCss.dialog}
       contentClassName={pickerCss.scrollContent}
       footer={<Button variant="outline" onClick={onClose}>{t('Close')}</Button>}
     >
-      {workspaceName !== '' && <p className={browserCss.archivedContext}>{workspaceName}</p>}
       <div className={browserCss.archivedList} role="list" aria-label={t('Archived sessions')}>
         {sessions === null && <div className={browserCss.emptyRow}>{t('Loading archived sessions…')}</div>}
         {error !== '' && <div className={browserCss.emptyRow}>{error}</div>}
@@ -289,21 +289,25 @@ function ArchivedSessionsDialog({ workspaceId, workspaceName, onClose }: {
           <div className={browserCss.emptyRow}>{t('No archived sessions.')}</div>
         )}
         {(sessions ?? []).map((session) => {
+          const key = sessionKey(session.workspaceId, session.id);
           const title = typeof session.title === 'string' ? session.title.trim() : '';
           const description = typeof session.description === 'string' ? session.description.trim() : '';
           const label = description !== '' ? description : title !== '' ? title : t('Untitled');
           return (
-            <div key={session.id} className={browserCss.archivedRow} role="listitem" title={session.id}>
+            <div key={key} className={browserCss.archivedRow} role="listitem" title={session.id}>
               <IconArchiveOutlineRegular size={14} />
               <span className={browserCss.archivedTitle}>{label}</span>
+              <span className={browserCss.archivedWorkspace} aria-label={t('Workspace: {name}', { name: session.workspaceName })}>
+                {session.workspaceName}
+              </span>
               <span className={browserCss.archivedTime}>{relativeDate(session.updatedAt ?? session.createdAt, app.locale)}</span>
               <Tooltip label={t('Restore session')} delayMs={400}>
                 <button
                   type="button"
                   className={browserCss.restoreButton}
-                  aria-label={t('Restore session')}
+                  aria-label={t('Restore “{name}”', { name: label })}
                   disabled={restoring !== null}
-                  onClick={() => { restore(session.id); }}
+                  onClick={() => { restore(session.workspaceId, session.id); }}
                 >
                   <IconArchiveOffOutlineRegular size={14} />
                 </button>
@@ -462,12 +466,13 @@ export function Sidebar({ drawer, onClose, onBrowseWorkspace }: { drawer: boolea
                   <>
                     <span className={browserCss.sectionLabel}>{t('Workspace')}</span>
                     <div className={browserCss.headerActions}>
+                      {/* The archive list spans every workspace, so it stays
+                          available even before one is selected. */}
                       <Tooltip label={t('Archived sessions')} delayMs={400}>
                         <button
                           type="button"
                           className={browserCss.iconButton}
                           aria-label={t('Archived sessions')}
-                          disabled={app.workspaceId === null}
                           onClick={() => { setArchiveOpen(true); }}
                         >
                           <IconArchiveOutlineRegular size={14} />
@@ -804,13 +809,8 @@ export function Sidebar({ drawer, onClose, onBrowseWorkspace }: { drawer: boolea
       </div>
 
       <WorkspaceDialog open={addOpen} onClose={() => { setAddOpen(false); }} />
-      {archiveOpen && app.workspaceId !== null && (
-        <ArchivedSessionsDialog
-          key={`archived:${app.workspaceId}`}
-          workspaceId={app.workspaceId}
-          workspaceName={workspace?.name || workspace?.path || ''}
-          onClose={() => { setArchiveOpen(false); }}
-        />
+      {archiveOpen && (
+        <ArchivedSessionsDialog onClose={() => { setArchiveOpen(false); }} />
       )}
       <RemoveWorkspaceDialog
         id={removeTarget?.id ?? null}
