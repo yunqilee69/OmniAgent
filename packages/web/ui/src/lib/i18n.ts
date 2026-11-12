@@ -125,11 +125,13 @@ const zh: Record<string, string> = {
   'Archive session': '归档会话',
   'Archived sessions': '归档会话',
   'Restore session': '恢复会话',
+  'Restore “{name}”': '恢复“{name}”',
+  'Workspace: {name}': '工作区：{name}',
   'No archived sessions.': '没有归档的会话。',
   'Loading archived sessions…': '正在加载归档会话…',
   'Could not load archived sessions: {message}': '无法加载归档会话：{message}',
-  'Archived sessions are hidden from the sidebar and from session search. Their transcripts stay on disk.':
-    '归档的会话不再显示在侧边栏，也不会出现在会话搜索结果中。对话记录仍保存在数据目录里。',
+  'Archived sessions from every workspace are listed here. They are hidden from the sidebar and from session search; their transcripts stay on disk.':
+    '这里列出所有工作区的归档会话。归档的会话不再显示在侧边栏，也不会出现在会话搜索结果中；对话记录仍保存在数据目录里。',
   'The server returned a different archive state.': '服务端返回了不同的归档状态。',
   'Could not update session archive: {message}': '无法更新会话归档状态：{message}',
   'Show more ({count})': '显示更多（{count}）',
@@ -434,6 +436,7 @@ const zh: Record<string, string> = {
   'Turn failed': '回合失败',
   'Worked': '已完成',
   'Worked for {duration}': '已完成，用时 {duration}',
+  'Took {duration}': '耗时 {duration}',
   'Working': '正在工作',
   'Thinking': '思考中',
   'Context compacted': '上下文已压缩',

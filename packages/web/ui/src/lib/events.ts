@@ -288,11 +288,19 @@ export function applyAgentEvent(turn: LiveTurnState, event: AgentEvent | Record<
       return;
     }
     case 'turn.start': {
-      if (turn.turns.length === 0) {
-        turn.turns.push({ index: 0, startedAt: now });
+      // A followed run replays its start after the page reloads. The open turn
+      // may already exist from the user message that precedes this event, so
+      // the server's start replaces the moment this replay arrived.
+      const recordedStart = eventTimestamp({ ts: data.startedAt });
+      const open = turn.turns[turn.turns.length - 1];
+      if (recordedStart !== undefined && open !== undefined && open.endedAt === undefined
+        && (open.startedAt === undefined || recordedStart < open.startedAt)) {
+        open.startedAt = recordedStart;
+      } else if (turn.turns.length === 0) {
+        turn.turns.push({ index: 0, startedAt: recordedStart ?? now });
       } else {
         const latest = turn.turns[turn.turns.length - 1]!;
-        if (latest.endedAt !== undefined) turn.turns.push({ index: latest.index + 1, startedAt: now });
+        if (latest.endedAt !== undefined) turn.turns.push({ index: latest.index + 1, startedAt: recordedStart ?? now });
       }
       turn.streamText = '';
       turn.streamReasoning = '';
@@ -498,13 +506,103 @@ export function applyAgentEvent(turn: LiveTurnState, event: AgentEvent | Record<
 }
 
 /** Build the historical transcript from the public message projection. */
+function eventTimestamp(value: unknown): number | undefined {
+  if (typeof value !== 'object' || value === null) return undefined;
+  const timestamp = (value as { ts?: unknown }).ts;
+  return typeof timestamp === 'number' && Number.isSafeInteger(timestamp) && timestamp >= 0 ? timestamp : undefined;
+}
+
+function isHumanTraceEvent(event: object): boolean {
+  const data = (event as { data?: unknown }).data;
+  if (typeof data !== 'object' || data === null) return true;
+  const source = (data as { source?: unknown }).source;
+  if (typeof source !== 'object' || source === null) return true;
+  const kind = (source as { kind?: unknown }).kind;
+  return typeof kind !== 'string' || kind === 'user';
+}
+
+interface TraceSpan {
+  startedAt?: number;
+  endedAt?: number;
+  reason?: StopReason;
+}
+
+/**
+ * One span per model reply, in the order the replies were persisted.
+ *
+ * A reply contains every step from its first `trace/turn.start` until the
+ * `trace/turn.end` that follows the last one. Pairing them this way keeps a
+ * multi-step reply together: treating step 0 as the only boundary drops the
+ * duration of every reply whose first recorded step is not zero.
+ */
+function replySpans(events: readonly unknown[]): TraceSpan[] {
+  const spans: TraceSpan[] = [];
+  let open: TraceSpan | undefined;
+  for (const event of events) {
+    if (typeof event !== 'object' || event === null) continue;
+    const record = event as { type?: unknown; data?: unknown };
+    const timestamp = eventTimestamp(event);
+    if (record.type === 'trace/turn.start') {
+      if (open?.endedAt !== undefined || open === undefined) {
+        open = {};
+        spans.push(open);
+      }
+      if (open.startedAt === undefined && timestamp !== undefined) open.startedAt = timestamp;
+    } else if (record.type === 'trace/turn.end' && open !== undefined && open.endedAt === undefined) {
+      if (timestamp !== undefined) open.endedAt = timestamp;
+      const reason = typeof record.data === 'object' && record.data !== null
+        ? (record.data as { reason?: unknown }).reason : undefined;
+      if (typeof reason === 'string') open.reason = reason as StopReason;
+    }
+  }
+  return spans;
+}
+
+/**
+ * Recover the wall-clock bounds of each human turn from the durable trace.
+ *
+ * A turn's span is the model reply that produced it. A reply that has not
+ * reached `trace/turn.end` stays open, so reloading continues its elapsed clock
+ * instead of starting one at page load.
+ */
+export function turnTiming(events: readonly unknown[]): TurnMeta[] {
+  const turns: TurnMeta[] = [];
+  const spans = replySpans(events);
+  let turnIndex = -1;
+  let spanIndex = 0;
+  const ensure = (index: number): TurnMeta => {
+    let turn = turns[index];
+    if (turn === undefined) {
+      turn = { index };
+      turns[index] = turn;
+    }
+    return turn;
+  };
+  for (const event of events) {
+    if (typeof event !== 'object' || event === null) continue;
+    const type = (event as { type?: unknown }).type;
+    if ((type === 'message/user' || type === 'user/message') && isHumanTraceEvent(event)) {
+      turnIndex += 1;
+      const span = spans[spanIndex];
+      if (span !== undefined) {
+        const turn = ensure(Math.max(0, turnIndex));
+        if (span.startedAt !== undefined) turn.startedAt = span.startedAt;
+        if (span.endedAt !== undefined) turn.endedAt = span.endedAt;
+        if (span.reason !== undefined) turn.reason = span.reason;
+        spanIndex += 1;
+      }
+    }
+  }
+  return turns.filter((turn): turn is TurnMeta => turn !== undefined);
+}
+
 export function hydrateTranscript(messages: readonly PublicMessage[], events: readonly unknown[] = []): {
   transcript: TranscriptItem[];
   turns: TurnMeta[];
 } {
   const source = messages.length > 0 ? messages : messagesFromEvents(events);
   const transcript: TranscriptItem[] = [];
-  const turns: TurnMeta[] = [];
+  const turns = turnTiming(events);
   let turnIndex = 0;
   let started = false;
   const startTurn = (): number => {

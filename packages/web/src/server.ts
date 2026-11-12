@@ -277,6 +277,12 @@ interface RunningTurn {
   ready?: Promise<void>;
   baselineReady: Promise<void>;
   baseline?: { messages: ReturnType<typeof projectPublicHistory>; metrics: ReturnType<typeof projectSessionMetrics> };
+  /**
+   * Wall-clock start of the reply this tab is following, captured when the run
+   * is admitted. A reloaded page has no local start of its own, so the snapshot
+   * carries this instead of letting the client count from the moment it connects.
+   */
+  startedAt: number;
   deliveries: Set<Promise<void>>;
   events: unknown[];
   replayBytes: number;
@@ -710,6 +716,41 @@ async function route(
       });
     return json(response, 200, { sessions: sessions.slice(0, limit) });
   }
+  if (request.method === 'GET' && url.pathname === '/api/sessions/archived') {
+    // The archive view is a workspace-management surface, not a workspace-local
+    // one: archived transcripts from every registered workspace are listed
+    // together with the workspace each row belongs to, so a user does not have
+    // to switch workspaces to find what they filed away.
+    const workspaces = await options.workspaces.list();
+    const byPath = new Map(workspaces.map((workspace) => [workspace.path, workspace]));
+    const sessions = (await options.store.list())
+      .filter((session) => session.archived === true)
+      // Child sessions are reached from the parent team card, the same rule the
+      // sidebar uses, so restoring one here would not put a row back anywhere.
+      .filter((session) => session.parentSessionId === undefined && session.depth === undefined)
+      .flatMap((session) => {
+        const workspace = byPath.get(session.workspace);
+        // An unregistered workspace has no id to restore through, so its rows
+        // are unreachable from the client and would only be dead entries.
+        if (workspace === undefined) return [];
+        return [{
+          id: session.id,
+          title: session.title ?? null,
+          workspaceId: workspace.id,
+          workspaceName: workspace.name,
+          updatedAt: session.updatedAt,
+          createdAt: session.createdAt,
+          blank: session.blank,
+          ...(session.description === undefined ? {} : { description: session.description }),
+          ...(session.agent === undefined ? {} : { agent: session.agent }),
+          ...(session.mode === undefined ? {} : { mode: session.mode }),
+        }];
+      })
+      .sort((left, right) => right.updatedAt - left.updatedAt
+        || (left.title ?? '').localeCompare(right.title ?? '')
+        || left.id.localeCompare(right.id));
+    return json(response, 200, { sessions });
+  }
   if (request.method === 'GET' && url.pathname === '/api/agents') {
     return json(response, 200, { agents: await options.listAgents?.() ?? [] });
   }
@@ -1081,7 +1122,8 @@ async function route(
   if (parts[3] !== 'sessions') throw new HttpError(404, 'Not found');
   if (request.method === 'GET' && parts.length === 4) {
     // Archived sessions keep their transcripts but leave the default listing.
-    // The archived view asks for them explicitly with `?archived=1`.
+    // `?archived=1` is the workspace-local lookup; the dialog itself reads
+    // `GET /api/sessions/archived`, which spans every registered workspace.
     const archivedOnly = url.searchParams.get('archived') === '1';
     const listed = (await options.store.list())
       .filter((item) => item.workspace === workspace.path)
@@ -1608,7 +1650,7 @@ async function route(
       return event.type !== 'permission.requested' && event.type !== 'plan.review.requested';
     });
     events.push(...(turn.approval?.pendingPrompts() ?? []));
-    response.write(`data: ${JSON.stringify({ type: 'run.snapshot', baseline: turn.baseline, events, ...(turn.replayOverflow ? { truncated: true } : {}) })}\n\n`);
+    response.write(`data: ${JSON.stringify({ type: 'run.snapshot', baseline: turn.baseline, startedAt: turn.startedAt, events, ...(turn.replayOverflow ? { truncated: true } : {}) })}\n\n`);
     return;
   }
   if (request.method === 'POST' && parts.length === 6 && parts[5] === 'messages') {
@@ -1669,7 +1711,7 @@ async function route(
     let markBaselineReady!: () => void;
     const baselineReady = new Promise<void>((resolve) => { markBaselineReady = resolve; });
     const turn: RunningTurn = {
-      cancelled: false, ready, baselineReady, deliveries: new Set(), events: [], replayBytes: 0, replayOverflow: false,
+      cancelled: false, ready, baselineReady, startedAt: Date.now(), deliveries: new Set(), events: [], replayBytes: 0, replayOverflow: false,
       followers: new Set(), sessionId,
       publishStatus: (running: boolean) => {
         statusHub.publish(workspace.id, {
@@ -1793,7 +1835,7 @@ async function route(
               turn.closing = true;
               await Promise.all(turn.deliveries);
             }
-            publishTurnEvent(turn, publicAgentEvent(first.value));
+            publishTurnEvent(turn, publicAgentEvent(first.value, turn.startedAt));
           }
           for await (const event of stream) {
             if (event.type === 'turn.start') turn.closing = false;
@@ -1802,7 +1844,7 @@ async function route(
               await Promise.all(turn.deliveries);
             }
             ended = event.type === 'turn.end';
-            publishTurnEvent(turn, publicAgentEvent(event));
+            publishTurnEvent(turn, publicAgentEvent(event, turn.startedAt));
           }
           if (!ended) {
             turn.closing = true;
@@ -2071,7 +2113,8 @@ function publicAgentError(error: AgentError): unknown {
   };
 }
 
-function publicAgentEvent(event: AgentEvent): unknown {
+function publicAgentEvent(event: AgentEvent, startedAt?: number): unknown {
+  if (event.type === 'turn.start' && startedAt !== undefined) return { ...event, startedAt };
   if (event.type === 'error') return publicAgentError(event.error);
   if (event.type === 'assistant.message') {
     return { ...event, message: safePublicMessages([event.message])[0] };

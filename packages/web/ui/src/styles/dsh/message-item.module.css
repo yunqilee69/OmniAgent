@@ -1,5 +1,9 @@
 /* User messages align their bubble and action row to the right. */
 
+.duration {
+  font-variant-numeric: tabular-nums;
+}
+
 .actions {
   display: flex;
   align-items: center;

@@ -276,7 +276,7 @@ server 维护：
 `GET .../follow` 用于加入正在运行的回合：
 
 - 没有活动回合 → `204`；
-- 等待 baseline 就绪后返回 SSE，第一帧是 `run.snapshot`：`{ baseline: { messages, metrics }, events, truncated? }`；
+- 等待 baseline 就绪后返回 SSE，第一帧是 `run.snapshot`：`{ baseline: { messages, metrics }, events, truncated? }`；重放的 `turn.start` 带本次回复被服务端接收时的 `startedAt`，刷新后的运行计时从它继续，而不是从重连时刻重算；
 - baseline 在权限 / 运行时校验之后、写入用户消息之前捕获，因此 follower 可以从同一基线重放；
 - snapshot 里的 `events` 是已经发生的 live 事件（过滤掉 live-only 的审批请求，再补上当前未决的审批 / 计划请求）；超过 replay 上限时 `truncated: true`，回合继续；
 - 之后 follower 收到与主 SSE 相同的实时事件；所有 follower 在 `turn.end` 后关闭；
@@ -491,7 +491,7 @@ AuthGate
 
 等待计划审阅时不再弹出遮挡式对话框：会话末尾显示计划卡片，点击卡片或输入区里的「查看计划」把完整计划以 Markdown 形式放到右栏 `plan` 视图；输入区同时切换为计划审阅模式，可直接批准，或输入反馈后继续规划。右栏保留最后一次审阅的计划，审阅结束后仍可查看。
 
-侧边栏每个工作区组默认只渲染最新的 5 条会话，底部「显示更多（N）」按钮一次再放出 5 条（`SESSIONS_PER_PAGE`，按工作区记窗口大小）；当前选中的会话即使落在窗口之外也会强制显示，搜索态不做分页，命中的会话全部列出。会话行菜单的「归档会话」写入 `session/archived` 事件：行立即从列表消失，但对话记录、标题和子智能体都留在数据目录里，仍可按键入的会话 id 打开；工作区标题右侧的归档按钮打开「归档会话」弹窗，那里按工作区拉取归档列表（`?archived=1`），每行可以「恢复会话」，恢复后重新拉一次侧边栏列表。
+侧边栏每个工作区组默认只渲染最新的 5 条会话，底部「显示更多（N）」按钮一次再放出 5 条（`SESSIONS_PER_PAGE`，按工作区记窗口大小）；当前选中的会话即使落在窗口之外也会强制显示，搜索态不做分页，命中的会话全部列出。会话行菜单的「归档会话」写入 `session/archived` 事件：行立即从列表消失，但对话记录、标题和子智能体都留在数据目录里，仍可按键入的会话 id 打开；侧边栏标题栏的归档按钮打开「归档会话」弹窗，那里拉取的是跨工作区的归档列表（`GET /api/sessions/archived`，只列主会话，子会话仍从父会话的团队卡片进入），每行标注所属工作区并可以「恢复会话」——恢复时按该行的工作区 id 调归档接口，成功后重新拉一次对应工作区的侧边栏列表。归档弹窗不再依赖当前选中的工作区，因此未选工作区时入口也可用。
 
 子智能体在标题栏呈现为一棵可导航的路径：打开子会话时，标题变成「主会话标题 / 子任务名」，主会话那一段是可点击按钮，点击即切回主会话（多层嵌套则逐段可点）。团队入口只出现一次：主会话视图是标题右侧的「N 个子智能体」文字按钮；子会话视图不再显示这个按钮，改成当前子任务名本身可以点开——在这个位置选其他子智能体。两种入口打开的是同一张卡片，每行给出状态点、任务名、任务说明、可继续 / 状态、耗时和 token 总量，点击某行切到该子会话。侧边栏只列用户自己发起的会话，子智能体不再占用任务列表的一行，全部从这张卡片进入。标题文字统一取自工作区会话列表（与侧边栏同源），因为标题可能在回合一结束之后才生成，只有列表里有；列表数据里的 `subagentStatus` 与 `usage` 投影提供状态与 token，展开卡片时重新拉一次列表，因此子智能体结束后状态不会停在「运行中」。
 
@@ -536,7 +536,7 @@ AuthGate
 - `consumeStream()`：逐事件 `applyAgentEvent`，同时用 `applyMetricsEvent` 增量维护 metrics；
 - `stopTurn()`：先置 stopping，再 `POST interrupt`；
 - `resolveApproval()` / `resolvePlanReview()`：HTTP 回填；
-- `compactSession()`、`queueMessage()`、`steerMessage()`、`renameSession()`、`setSessionPinned()`、`setSessionArchived()`、`listArchivedSessions()`、`forkSession()`、`deleteSession()`、`exportSession()`；归档后行从 `sessionsByWorkspace` 移除，恢复时重新拉列表，归档列表只存在于归档弹窗自己的状态里；
+- `compactSession()`、`queueMessage()`、`steerMessage()`、`renameSession()`、`setSessionPinned()`、`setSessionArchived()`、`listArchivedSessions()`、`forkSession()`、`deleteSession()`、`exportSession()`；归档后行从 `sessionsByWorkspace` 移除，恢复时重新拉该工作区列表；`listArchivedSessions()` 读 `GET /api/sessions/archived`，覆盖全部已登记工作区，结果只存在于归档弹窗自己的状态里；
 - `ensureStatusStream()` / `consumeStatusStream()`：订阅 `GET /api/workspaces/:id/events`，把宿主推送的 `session.status` 合并进 `statusBySession`；流不可用或断开时退回列表基线，只有曾经连通过才在 2 秒后重连；
 - `reconcileSessionStatuses()`：用列表基线补齐每个会话的现状（含 `lastTurn` 失败标记），与推送走同一套迁移规则；
 - `observeSessionStatus()`：处理单条推送；`running` 真→假时若该会话不是当前会话，置 `completionUnread`，并在 400 毫秒后调用 `refreshSessions()` 一次性刷新排序与结果；
@@ -574,7 +574,7 @@ AuthGate
 - `error`：写 error + Notice，清 approval / planReview；
 - `turn.end`：填结束时间、reason、outcome，清流式状态。
 
-`hydrateTranscript()` 从 `PublicMessage[]` 重建 transcript / turns；`groupTurns()` 把扁平消息折叠成显示 turn：
+`hydrateTranscript()` 从 `PublicMessage[]` 重建 transcript，并把每次模型回复的首个 `trace/turn.start` 到其后的 `trace/turn.end` 配成该回复的起止时间；一次回复里的后续 step 仍属于同一次回复。`groupTurns()` 把扁平消息折叠成显示 turn：
 
 - 每个 turn 最后一个非空 assistant 且其后无 tool 的文本作为 `final`；
 - 其余进入 `process`；
@@ -585,7 +585,8 @@ AuthGate
 
 - 回复消耗的 token 来自 `assistant.message` 上的 `usage`（历史消息从 `hydrateTranscript()` 的 `PublicMessage.usage` 取得），`messageUsage()` 只接受一对完整的非负计数——只报了一半的用量会被整条丢弃，避免读成「更便宜的回答」；读数带一个 token 图标（与 `UsagePill` 同源的数据库图标）和 `formatTokens()` 缩略总量，悬停给出精确的「输入 token / 输出 token」拆分；它和时间、复制按钮同在 `MessageActions` 这一行里，随整行在悬停 / 聚焦时才显现，不额外占用正文下方的高度。`0 tok` 不渲染（本地命中的调用没有真实用量）。
 - 这一行的时间只显示月日与时分，不显示年份；`<time>` 的 `dateTime` 仍保留完整 ISO 时间供无障碍与复制使用。
-- 状态行（`RunningStatus`）在「智能体正在工作 / 等待审批」后面追加已用时长，按 `{秒}秒` 或 `{分}分{秒}秒` 递增；起点取当前回合的 `startedAt`，跟随其他标签页已在运行的回合时该回合可能没有起始时间，就用本视图第一次看到运行状态的时间代替。计时器只存在于状态行自己的组件里，整秒重渲染不会重算整个会话的 turn 列表；`stopping` / `finishing` 时不再计时（此时显示的是收尾文案）。
+- 状态行（`RunningStatus`）在「智能体正在工作 / 等待审批」后面追加已用时长，按 `{秒}秒` 或 `{分}分{秒}秒` 递增；起点取当前回合的 `startedAt`。刷新后跟随 `run.snapshot` 时，重放的 `turn.start` 自带回复被服务端接收时的 `startedAt`，客户端用它覆盖重连时刻；只有事件没有带出起始时间时，才用本视图第一次看到运行状态的时间代替。计时器只存在于状态行自己的组件里，整秒重渲染不会重算整个会话的 turn 列表；`stopping` / `finishing` 时不再计时（此时显示的是收尾文案）。
+- 已完成回复的操作行在时间旁显示「耗时 xx分xx秒」，取该回合持久化的起止时间。没有过程折叠条的回复也显示这一耗时；中断或失败的回合不把耗时标成完成。
 
 ### 9.4 SSE 解析
 

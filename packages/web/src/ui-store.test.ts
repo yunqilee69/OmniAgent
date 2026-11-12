@@ -179,13 +179,14 @@ describe('independent run observation', () => {
     await waitFor(() => controllers.length === 1);
     const events = [
       { type: 'run.user.message', message: { role: 'user', content: [{ type: 'text', text: 'question' }] } },
-      { type: 'turn.start', step: 0 },
+      { type: 'turn.start', step: 0, startedAt: 1_000 },
       { type: 'assistant.message', message: { content: [{ type: 'text', text: 'answer' }] } },
       { type: 'run.user.message', message: { role: 'user', content: [{ type: 'text', text: 'follow up' }] } },
     ];
     const snapshot = { type: 'run.snapshot', baseline: { messages: [] }, events };
     controllers[0]!.enqueue(encoder.encode(`data: ${JSON.stringify(snapshot)}\n\n`));
     await waitFor(() => store.currentEntry()?.run?.transcript.length === 3);
+    expect(store.currentEntry()!.run!.turns.at(-1)?.startedAt).toBe(1_000);
     expect(store.currentEntry()!.run!.transcript.map((item) => [item.kind, 'text' in item ? item.text : ''])).toEqual([
       ['user', 'question'], ['assistant', 'answer'], ['user', 'follow up'],
     ]);
@@ -1745,7 +1746,7 @@ describe('workbench store', () => {
     expect(store.getSnapshot().sessions.map((session) => session.id)).toEqual(['shared', 'older']);
   });
 
-  it('archives a session out of the list and restores it from the host list', async () => {
+  it('archives a session out of the list and restores it from the archive list', async () => {
     let archived = false;
     const store = await boot(sessionFetcher(async (url, init) => {
       if (url === '/api/workspaces/a/sessions' && (init?.method ?? 'GET') === 'GET') {
@@ -1754,8 +1755,13 @@ describe('workbench store', () => {
           ...(archived ? [] : [{ id: 'older', updatedAt: 5 }]),
         ] });
       }
-      if (url === '/api/workspaces/a/sessions?archived=1') {
-        return json({ sessions: archived ? [{ id: 'older', updatedAt: 5, archived: true }] : [] });
+      // The archive dialog is a workspace-management surface: it reads one
+      // cross-workspace list instead of the active workspace's `?archived=1`.
+      if (url === '/api/sessions/archived') {
+        return json({ sessions: [
+          ...(archived ? [{ id: 'older', workspaceId: 'a', workspaceName: 'Alpha', updatedAt: 5 }] : []),
+          { id: 'beta-filed', workspaceId: 'b', workspaceName: 'Beta', updatedAt: 7, title: 'Beta filed' },
+        ] });
       }
       if (url === '/api/workspaces/a/sessions/older/archive' && init?.method === 'POST') {
         archived = (JSON.parse(String(init.body)) as { archived: boolean }).archived;
@@ -1766,18 +1772,25 @@ describe('workbench store', () => {
     }));
 
     expect(store.getSnapshot().sessions.map((session) => session.id)).toEqual(['shared', 'older']);
-    await expect(store.listArchivedSessions()).resolves.toEqual([]);
+    // Another workspace's archived session is visible without switching workspace.
+    await expect(store.listArchivedSessions()).resolves.toEqual([
+      expect.objectContaining({ id: 'beta-filed', workspaceId: 'b', workspaceName: 'Beta' }),
+    ]);
 
     await expect(store.setSessionArchived('older', true)).resolves.toBe(true);
     expect(store.getSnapshot().sessions.map((session) => session.id)).toEqual(['shared']);
     await expect(store.listArchivedSessions()).resolves.toEqual([
-      expect.objectContaining({ id: 'older', archived: true }),
+      expect.objectContaining({ id: 'beta-filed', workspaceId: 'b' }),
+      expect.objectContaining({ id: 'older', workspaceId: 'a', workspaceName: 'Alpha' }),
     ]);
 
-    // Restoring re-reads the host list, so the row returns in activity order.
-    await expect(store.setSessionArchived('older', false)).resolves.toBe(true);
+    // Restoring targets the workspace that owns the row and re-reads its list,
+    // so the session returns in activity order.
+    await expect(store.setSessionArchived('older', false, 'a')).resolves.toBe(true);
     expect(store.getSnapshot().sessions.map((session) => session.id)).toEqual(['shared', 'older']);
-    await expect(store.listArchivedSessions()).resolves.toEqual([]);
+    await expect(store.listArchivedSessions()).resolves.toEqual([
+      expect.objectContaining({ id: 'beta-filed', workspaceId: 'b' }),
+    ]);
   });
 
   it('renames the selected session in both the list and the open entry', async () => {

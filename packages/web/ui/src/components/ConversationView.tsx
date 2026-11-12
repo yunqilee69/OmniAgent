@@ -46,18 +46,18 @@ function firstLine(text: string): string {
   return line.replaceAll('**', '');
 }
 
-function durationText(t: Translate, turn: DisplayTurn, locale: Locale): string {
+/** Whole seconds of a recorded span, never inventing a start the log did not keep. */
+export function recordedSeconds(startedAt: number | undefined, endedAt: number | undefined): number | undefined {
+  if (startedAt === undefined || endedAt === undefined || endedAt < startedAt) return undefined;
+  return Math.max(1, Math.round((endedAt - startedAt) / 1000));
+}
+
+function durationText(t: Translate, turn: DisplayTurn): string {
   if (turn.reason === 'interrupted') return t('Stopped');
   if (turn.reason === 'error') return t('Turn failed');
-  if (turn.startedAt === undefined) return t('Worked');
-  const end = turn.endedAt ?? Date.now();
-  const seconds = Math.max(1, Math.round((end - turn.startedAt) / 1000));
-  const minutes = Math.floor(seconds / 60);
-  const rest = seconds % 60;
-  const duration = locale === 'zh'
-    ? `${minutes > 0 ? `${minutes} 分 ` : ''}${rest} 秒`
-    : `${minutes > 0 ? `${minutes}m ` : ''}${rest}s`;
-  return t('Worked for {duration}', { duration: duration });
+  const seconds = recordedSeconds(turn.startedAt, turn.endedAt);
+  if (seconds === undefined) return t('Worked');
+  return t('Worked for {duration}', { duration: elapsedClock(t, seconds) });
 }
 
 /** A message timestamp reads as day and time; the year is never shown. */
@@ -97,10 +97,12 @@ function UsageChip({ usage, locale, t }: { usage: MessageUsage; locale: Locale; 
   );
 }
 
-export function MessageActions({ text, timestamp, usage, locale, t }: {
+export function MessageActions({ text, timestamp, usage, durationSeconds, locale, t }: {
   text: string;
   timestamp?: number;
   usage?: MessageUsage;
+  /** Whole seconds a finished reply took, from its persisted turn bounds. */
+  durationSeconds?: number;
   locale: Locale;
   t: Translate;
 }): ReactNode {
@@ -111,6 +113,9 @@ export function MessageActions({ text, timestamp, usage, locale, t }: {
   return (
     <div className={messageCss.actions}>
       {usage !== undefined && <UsageChip usage={usage} locale={locale} t={t} />}
+      {durationSeconds !== undefined && (
+        <span className={messageCss.duration} data-reply-duration>{t('Took {duration}', { duration: elapsedClock(t, durationSeconds) })}</span>
+      )}
       {validDate !== null && <time dateTime={validDate.toISOString()}>{messageTime(validDate, locale)}</time>}
       {text !== '' && <Tooltip label={label} side="top" delayMs={400}>
         <button type="button" className={messageCss.action} aria-label={label} onClick={onCopy}>
@@ -313,7 +318,8 @@ function TurnView({ turn, processDisplay, locale, t }: { turn: DisplayTurn; proc
   const open = override ?? (turn.live || processDisplay === 'expanded');
   const hasProcess = turn.process.length > 0;
   const toolLabel = turn.toolCount === 1 ? t('1 tool') : t('{count} tools', { count: turn.toolCount });
-  const label = turn.live ? t('Working') : durationText(t, turn, locale);
+  const label = turn.live ? t('Working') : durationText(t, turn);
+  const duration = !turn.live && turn.final !== undefined ? recordedSeconds(turn.startedAt, turn.endedAt) : undefined;
   return (
     <div className={css.turn} data-live={turn.live || undefined}>
       {turn.user !== undefined && (
@@ -359,7 +365,14 @@ function TurnView({ turn, processDisplay, locale, t }: { turn: DisplayTurn; proc
             />
             {turn.reason === 'interrupted' && !turn.live && <span className={assistantCss.stopped}>{t('Stopped')}</span>}
           </div>
-          <MessageActions text={turn.final.text} timestamp={turn.final.timestamp} usage={turn.final.usage} locale={locale} t={t} />
+          <MessageActions
+            text={turn.final.text}
+            timestamp={turn.final.timestamp}
+            usage={turn.final.usage}
+            durationSeconds={duration}
+            locale={locale}
+            t={t}
+          />
         </div>
       )}
       {turn.extras.map((item) => item.kind === 'notice' ? <NoticeView key={item.id} item={item} t={t} /> : null)}

@@ -215,7 +215,8 @@ describe('workspace web host', () => {
     gate.resolve();
     const text = await second.text();
     const events = text.split('\n\n').filter(Boolean).map((frame) => JSON.parse(frame.slice(6)));
-    expect(events[0]).toMatchObject({ type: 'run.snapshot', baseline: { messages: [] }, events: [{ type: 'run.user.message' }, { type: 'turn.start' }] });
+    expect(events[0]).toMatchObject({ type: 'run.snapshot', baseline: { messages: [] }, events: [{ type: 'run.user.message' }, { type: 'turn.start', startedAt: expect.any(Number) }] });
+    expect(events[0].events[1].startedAt).toBeLessThanOrEqual(Date.now());
     expect(events.slice(1).map((event) => event.type)).toEqual(['assistant.delta', 'turn.end']);
     expect((await fetch(`${path}/follow`)).status).toBe(204);
   });
@@ -590,6 +591,53 @@ describe('workspace web host', () => {
       expect((await fetch(`${url}/archived/archive`, jsonRequest(body))).status).toBe(400);
     }
     expect((await fetch(`${url}/missing/archive`, jsonRequest({ archived: true }))).status).toBe(404);
+  });
+
+  it('lists archived sessions from every workspace in one cross-workspace view', async () => {
+    const { base, first, second, store } = await setup();
+    const alphaFiled = await store.create({ id: 'alpha-filed', workspace: first.path, cwd: first.path });
+    await alphaFiled.append({ type: 'message/user', data: { text: 'alpha' }, ts: 10 });
+    const alphaOpen = await store.create({ id: 'alpha-open', workspace: first.path, cwd: first.path });
+    await alphaOpen.append({ type: 'message/user', data: { text: 'still here' }, ts: 15 });
+    const betaFiled = await store.create({ id: 'beta-filed', workspace: second.path, cwd: second.path });
+    await betaFiled.append({ type: 'message/user', data: { text: 'beta' }, ts: 20 });
+    // A filed-away child stays out of this view: restoring it would not put a
+    // sidebar row back, since children are reached from the parent team card.
+    const child = await store.create({
+      id: 'alpha-child', workspace: first.path, cwd: first.path,
+      parentSessionId: 'alpha-filed', depth: 1,
+    });
+    await child.append({ type: 'message/user', data: { text: 'child' }, ts: 30 });
+    await fetch(`${sessionsUrl(base, first.id)}/alpha-child/archive`, jsonRequest({ archived: true }));
+    for (const [workspace, id] of [[first, 'alpha-filed'], [second, 'beta-filed']] as const) {
+      const response = await fetch(
+        `${sessionsUrl(base, workspace.id)}/${id}/archive`,
+        jsonRequest({ archived: true }),
+      );
+      expect(response.status).toBe(200);
+    }
+
+    type Listed = { sessions: Array<Record<string, unknown>> };
+    const listed = (await jsonResponse<Listed>(await fetch(`${base}/api/sessions/archived`))).sessions;
+    // Cross-workspace: the archived view of one workspace is not the whole view.
+    expect(listed).toEqual([
+      expect.objectContaining({ id: 'beta-filed', workspaceId: second.id, workspaceName: second.name, updatedAt: 20 }),
+      expect.objectContaining({ id: 'alpha-filed', workspaceId: first.id, workspaceName: first.name, updatedAt: 10 }),
+    ]);
+    // Every row carries the workspace id a restore has to post to.
+    for (const session of listed) expect(typeof session.workspaceId).toBe('string');
+
+    // The per-workspace listings and search keep their own narrower scope.
+    // `?archived=1` still includes children; only the cross-workspace view drops them.
+    expect((await jsonResponse<Listed>(await fetch(`${sessionsUrl(base, first.id)}?archived=1`))).sessions
+      .map((session) => session.id).sort())
+      .toEqual(['alpha-child', 'alpha-filed']);
+    expect((await jsonResponse<Listed>(await fetch(`${base}/api/sessions/recent`))).sessions)
+      .toEqual([expect.objectContaining({ id: 'alpha-open' })]);
+
+    await fetch(`${sessionsUrl(base, second.id)}/beta-filed/archive`, jsonRequest({ archived: false }));
+    expect((await jsonResponse<Listed>(await fetch(`${base}/api/sessions/archived`))).sessions)
+      .toEqual([expect.objectContaining({ id: 'alpha-filed' })]);
   });
 
   it('deletes one session without touching its siblings', async () => {

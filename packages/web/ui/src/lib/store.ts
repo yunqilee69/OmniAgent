@@ -16,6 +16,7 @@ import {
   validateAgentDefinition,
   validateAgentProfiles,
   validateAgentSkills,
+  validateArchivedSessions,
   validateBinding,
   validateModeOptions,
   validateModeSelection,
@@ -33,6 +34,7 @@ import {
   validateScheduleHistory,
   responseError,
   type AgentDefinitionDetail,
+  type ArchivedSessionSummary,
   type AgentDefinitionWrite,
   type AgentSkill,
   type AgentSummary,
@@ -1541,19 +1543,23 @@ export class AppStore {
   }
 
   /**
-   * List the workspace's archived sessions for the archive dialog.
+   * List archived sessions for the archive dialog.
    *
+   * The dialog is a workspace-management surface, so it lists the archived
+   * sessions of every registered workspace instead of only the active one, and
+   * keeps the owning workspace on each row so a restore targets the right one.
    * This deliberately bypasses `sessionsByWorkspace`: archived rows must not
    * re-enter the sidebar list, so the dialog keeps its own copy.
-   * @param workspaceId - workspace to read archived sessions from.
-   * @returns archived summaries, newest first.
+   * @returns archived summaries across all workspaces, newest first.
    * @throws when the host rejects the request.
    */
-  async listArchivedSessions(workspaceId = this.state.workspaceId): Promise<SessionSummary[]> {
-    if (workspaceId === null) return [];
-    const body = await this.api<{ sessions?: SessionSummary[] }>(`${sessionApiPath(workspaceId)}?archived=1`);
+  async listArchivedSessions(): Promise<ArchivedSessionSummary[]> {
+    const body = await this.api<{ sessions?: unknown }>('/api/sessions/archived');
     if (!Array.isArray(body.sessions)) throw new Error(translator(this.state.locale)('The server did not return a session list.'));
-    return sortSessions(body.sessions.filter((session) => session.archived === true));
+    return validateArchivedSessions(body.sessions)
+      .sort((left, right) => right.updatedAt - left.updatedAt
+        || (left.title ?? '').localeCompare(right.title ?? '')
+        || left.id.localeCompare(right.id));
   }
 
   async forkSession(id: string, workspaceId = this.state.workspaceId): Promise<string | null> {
@@ -2306,7 +2312,9 @@ export class AppStore {
             const hydrated = baseline === undefined ? undefined : hydrateTranscript(baseline.messages as never);
             fresh.transcript = hydrated?.transcript ?? snapshotBase.transcript.slice();
             fresh.turns = hydrated?.turns ?? snapshotBase.turns.map((turn) => ({ ...turn }));
-            if (hydrated !== undefined && fresh.turns.length > 0) fresh.turns[fresh.turns.length - 1]!.endedAt = 0;
+            if (hydrated !== undefined && fresh.turns.length > 0 && fresh.turns[fresh.turns.length - 1]!.endedAt === undefined) {
+              fresh.turns[fresh.turns.length - 1]!.endedAt = 0;
+            }
             const metrics = baseline === undefined ? snapshotBase.metrics : validateSessionMetrics(baseline.metrics) ?? undefined;
             fresh.metrics = metrics === undefined ? undefined : structuredClone(metrics);
             fresh.stopping = stopping;

@@ -1,7 +1,7 @@
 import { describe, expect, it, vi } from 'vitest';
 import { createElement } from 'react';
 import { renderToStaticMarkup } from 'react-dom/server';
-import { ConversationView, elapsedClock, MessageActions, usageDetail, UserContent } from '../ui/src/components/ConversationView.tsx';
+import { ConversationView, elapsedClock, MessageActions, recordedSeconds, usageDetail, UserContent } from '../ui/src/components/ConversationView.tsx';
 import { translator } from '../ui/src/lib/i18n.ts';
 import {
   applyAgentEvent,
@@ -189,12 +189,68 @@ describe('web client protocol', () => {
     expect(none).not.toContain('data-message-usage');
   });
 
+  it('recovers persisted turn timing so a reload continues the same elapsed clock', () => {
+    const { turns } = hydrateTranscript([
+      { role: 'user', content: [{ type: 'text', text: 'Question' }], timestamp: 1_000 },
+      { role: 'assistant', content: [{ type: 'text', text: 'Answer' }], toolCalls: [], timestamp: 4_000 },
+      { role: 'user', content: [{ type: 'text', text: 'Again' }], timestamp: 10_000 },
+    ], [
+      { type: 'message/user', ts: 1_000, data: { text: 'Question' } },
+      { type: 'trace/turn.start', ts: 1_100, data: { step: 0 } },
+      { type: 'trace/turn.end', ts: 4_500, data: { reason: 'end_turn' } },
+      { type: 'message/user', ts: 10_000, data: { text: 'Again', source: { kind: 'user' } } },
+      { type: 'trace/turn.start', ts: 10_200, data: { step: 1 } },
+      { type: 'trace/turn.start', ts: 12_000, data: { step: 2 } },
+      { type: 'trace/turn.end', ts: 14_000, data: { reason: 'end_turn' } },
+    ]);
+    expect(turns[0]).toMatchObject({ startedAt: 1_100, endedAt: 4_500, reason: 'end_turn' });
+    expect(turns[1]).toMatchObject({ startedAt: 10_200, endedAt: 14_000 });
+    expect(recordedSeconds(turns[0]?.startedAt, turns[0]?.endedAt)).toBe(3);
+  });
+
+  it('keeps a replayed turn on the server start instead of the reload time', () => {
+    const turn = createLiveState();
+    applyAgentEvent(turn, { type: 'run.user.message', message: { role: 'user', content: [{ type: 'text', text: 'Question' }] } }, 5_000);
+    applyAgentEvent(turn, { type: 'turn.start', step: 0, startedAt: 1_000 }, 5_000);
+    applyAgentEvent(turn, { type: 'turn.start', step: 1, startedAt: 1_000 }, 8_000);
+    expect(turn.turns).toEqual([{ index: 0, startedAt: 1_000 }]);
+  });
+
   it('counts the running status in seconds and minutes', () => {
     const zh = translator('zh');
     expect(elapsedClock(zh, 0)).toBe('0秒');
     expect(elapsedClock(zh, 45)).toBe('45秒');
     expect(elapsedClock(zh, 162)).toBe('2分42秒');
     expect(elapsedClock(translator('en'), 162)).toBe('2m42s');
+  });
+
+  it('shows the persisted duration beside a finished reply', () => {
+    const { transcript, turns } = hydrateTranscript([
+      { role: 'user', content: [{ type: 'text', text: 'Question' }], timestamp: 1_000 },
+      { role: 'assistant', content: [{ type: 'text', text: 'Answer' }], toolCalls: [], timestamp: 4_000 },
+    ], [
+      { type: 'message/user', ts: 1_000, data: { text: 'Question' } },
+      { type: 'trace/turn.start', ts: 1_000, data: { step: 0 } },
+      { type: 'trace/turn.end', ts: 163_000, data: { reason: 'end_turn' } },
+    ]);
+    const entry = { agent: null, transcript, turns, running: false } as unknown as SessionEntry;
+    const snapshot = store.getSnapshot();
+    const getSnapshot = vi.spyOn(store, 'getSnapshot').mockReturnValue({ ...snapshot, locale: 'zh' });
+    const originalConsoleError = console.error;
+    const consoleError = vi.spyOn(console, 'error').mockImplementation((message, ...args) => {
+      if (typeof message !== 'string' || !message.includes('useLayoutEffect does nothing on the server')) {
+        originalConsoleError(message, ...args);
+      }
+    });
+    try {
+      const markup = renderToStaticMarkup(createElement(ConversationView, { entry, processDisplay: 'collapsed' }));
+      expect(markup).toContain('已完成');
+      expect(markup).toContain('data-reply-duration');
+      expect(markup).toContain('耗时 2分42秒');
+    } finally {
+      getSnapshot.mockRestore();
+      consoleError.mockRestore();
+    }
   });
 
 
