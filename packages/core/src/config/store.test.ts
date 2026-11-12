@@ -19,7 +19,7 @@ describe('ConfigStore', () => {
   it('loads defaults when config.json is absent', async () => {
     const { root, path } = await fixture();
     const store = await ConfigStore.open(path);
-    expect(store.snapshot).toMatchObject({ path, configDir: root, config: { model: 'fake', maxSteps: 25 } });
+    expect(store.snapshot).toMatchObject({ path, configDir: root, config: { model: 'fake', maxSteps: 300 } });
     expect(store.snapshot.revision).toBeTruthy();
   });
 

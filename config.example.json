@@ -108,7 +108,7 @@
       "defaultPreset": "workspace-write"
     }
   },
-  "maxSteps": 25,
+  "maxSteps": 300,
   "subagents": {
     "maxDepth": 1,
     "maxActive": 8

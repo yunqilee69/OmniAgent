@@ -147,7 +147,7 @@ export const ConfigSchema = z.object({
   retainContextTokens: positiveInteger.optional(),
   // Invalid stored permission values must remain available for explicit repair.
   dsh: z.unknown().optional(),
-  maxSteps: z.number().int().positive().default(25),
+  maxSteps: z.number().int().positive().default(300),
   /** Subagent delegation limits. Depth counts root as 0. */
   subagents: z.object({
     maxDepth: z.number().int().nonnegative().default(1),

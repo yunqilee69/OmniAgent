@@ -124,7 +124,7 @@ describe('permission settings API', () => {
 
   it('returns parsed defaults from the trusted config snapshot when the file is missing', async () => {
     const { settings } = await setup();
-    expect(settings.configSnapshot()).toEqual({ model: 'fake', maxSteps: 25, web: { host: '127.0.0.1', port: 4317, auth: { enabled: false } } });
+    expect(settings.configSnapshot()).toEqual({ model: 'fake', maxSteps: 300, web: { host: '127.0.0.1', port: 4317, auth: { enabled: false } } });
   });
 
   it('updates the trusted full snapshot after a successful permissions write', async () => {
@@ -132,7 +132,7 @@ describe('permission settings API', () => {
     const { settings } = await setup(original);
     await settings.update(preset('read-only'));
     expect(settings.configSnapshot()).toEqual({
-      model: 'configured', maxSteps: 25,
+      model: 'configured', maxSteps: 300,
       web: { host: '127.0.0.1', port: 4317, auth: { enabled: false } },
       provider: { type: 'openai', apiKey: 'SECRET', apiKeyEnv: 'OPENAI_API_KEY' },
       dsh: { permission: { defaultPreset: 'read-only' } },

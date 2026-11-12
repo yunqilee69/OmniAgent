@@ -68,7 +68,13 @@ export function projectCommandInput(messages: readonly Message[]): Message[] {
   });
 }
 
-export const DEFAULT_MAX_STEPS = 25;
+/**
+ * Step cap for one turn. It is a last-resort guard against a model that never
+ * stops calling tools, not a task budget: real work (long refactors, multi-file
+ * edits, research) legitimately needs hundreds of steps, so the default stays
+ * far above normal usage and only ends pathological loops.
+ */
+export const DEFAULT_MAX_STEPS = 300;
 
 export class AgentLoop {
   constructor(private readonly deps: AgentLoopDeps) {}

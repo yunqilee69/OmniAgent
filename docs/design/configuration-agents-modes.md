@@ -54,7 +54,7 @@ modes.json          →  Web 新会话的 agent + 模型 + tools + skills 组合
 | `reasoningEffort` | canonical effort |
 | `maxTokens` / `contextWindowTokens` / `retainContextTokens` | 正整数 |
 | `dsh` | 保留给显式权限默认值修复 |
-| `maxSteps` | 默认 25 |
+| `maxSteps` | 默认 300（仅作无限循环兜底） |
 | `subagents.maxDepth` | 默认 1 |
 | `subagents.maxActive` | 默认 8 |
 | `todo.allowParallelInProgress` | 默认 `false` |

@@ -79,7 +79,7 @@ turn.start ... turn.end     ← goal round 2
 | `end_turn` | 模型不再调工具，正常结束 |
 | `tool_use` | 保留值；M1 不会用它作为终止原因 |
 | `max_tokens` | 模型输出被截断 |
-| `max_steps` | 达到步数上限（默认 25） |
+| `max_steps` | 达到步数上限（默认 300，仅作无限循环兜底） |
 | `interrupted` | 被 `AbortSignal` 中断 |
 | `error` | 模型调用抛错，前面已经发过 `error` 事件 |
 
