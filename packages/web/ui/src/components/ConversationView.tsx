@@ -460,7 +460,7 @@ export function ConversationView({ entry, processDisplay, onOpenPlan, onOpenFile
   return (
     <MarkdownDelegateProvider openFile={onOpenFile}>
     <div className={chatCss.root} data-chat-following-tail={awayFromBottom ? undefined : ''}>
-      <div className={chatCss.scroll} ref={scroll}>
+      <div className={chatCss.scroll} ref={scroll} data-conversation-scroll="">
         <div className={chatCss.column} ref={column}>
           {turns.length === 0 && (
             <div className={css.conversationEmpty}>

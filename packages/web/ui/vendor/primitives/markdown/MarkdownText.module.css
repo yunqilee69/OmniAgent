@@ -260,8 +260,11 @@
   border-bottom: 0.5px solid var(--dsw-alias-border-l3);
   border-top: none;
   font: var(--dsw-font-markdown-table-head);
-  max-width: 320px;
-  max-width: min(30vw, 320px);
+  /* A length, not a percentage: on a table cell a percentage resolves against
+     the table, and the table is sized by these cells. The conversation column
+     publishes the length (one quarter of its width, at least 320px); mounts
+     outside the chat keep the 320px measure. */
+  max-width: var(--dsh-chat-table-cell-max, 320px);
   min-width: 100px;
 }
 
@@ -269,8 +272,7 @@
   padding: 10px 16px;
   border-bottom: 0.5px solid var(--dsw-alias-border-l2);
   font: var(--dsw-font-markdown-table);
-  max-width: 320px;
-  max-width: min(30vw, 320px);
+  max-width: var(--dsh-chat-table-cell-max, 320px);
   min-width: 100px;
 }
 

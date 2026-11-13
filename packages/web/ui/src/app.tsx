@@ -7,6 +7,7 @@ import { Header } from './components/Header.tsx';
 import { Sidebar } from './components/Sidebar.tsx';
 import { ConversationView } from './components/ConversationView.tsx';
 import { Composer } from './components/Composer.tsx';
+import { ConversationWidth } from './components/ConversationWidth.tsx';
 import { ApprovalView } from './components/ApprovalView.tsx';
 import { AutomationPage } from './components/AutomationPage.tsx';
 import { SettingsPage } from './components/SettingsPage.tsx';
@@ -275,6 +276,7 @@ export function App(): ReactNode {
           <div className={css.conversationArea}>
             {!hasSession || draft ? (
               <div className={css.heroArea}>
+                <ConversationWidth />
                 {app.workspacesLoading ? (
                   <SessionPlaceholder>{t('Loading workspaces…')}</SessionPlaceholder>
                 ) : app.workspaceError !== '' ? (
@@ -316,6 +318,7 @@ export function App(): ReactNode {
               </SessionPlaceholder>
             ) : (
               <div className={css.chatArea}>
+                <ConversationWidth />
                 <ConversationView
                   key={app.sessionId ?? 'session'}
                   entry={entry}

@@ -3,8 +3,11 @@
    draw their base styling from the vendored DSH styles. */
 
 .app {
-  --dsh-chat-content-width: min(calc(100% - 64px), 860px);
-  --dsh-composer-card-max-width: min(calc(100% - 32px), 892px);
+  /* Fallback before the conversation column is measured. The live axis is
+     published on `.chatArea` / `.heroArea` (see ConversationWidth). */
+  --dsh-chat-content-width: min(calc(100% - 64px), 920px);
+  --dsh-chat-table-cell-max: 320px;
+  --dsh-composer-card-max-width: calc(var(--dsh-chat-content-width) + 32px);
   --dsh-composer-side-clearance: 16px;
   --dsh-composer-text-max-height: 336px;
   --dsh-composer-dock-inset: 8px;
@@ -408,12 +411,71 @@
   overflow: hidden;
 }
 
+.chatArea,
+.heroArea {
+  /* Adaptive axis, measured by ConversationWidth. A dragged preference
+     overrides the clamp; both stay lengths so table cells can read them.
+     The composer card stays 32px wider than the message column. */
+  --dsh-chat-content-width: var(
+    --dsh-chat-user-width,
+    clamp(680px, calc(var(--dsh-conversation-column-width, 0px) * 0.64), 920px)
+  );
+  --dsh-composer-card-max-width: calc(var(--dsh-chat-content-width) + 32px);
+}
+
 .chatArea {
+  position: relative;
   flex: 1;
   min-width: 0;
   min-height: 0;
   display: flex;
   flex-direction: column;
+}
+
+/* 10px col-resize strips, 24px outside the message column. The width goes to
+   zero when the margin cannot hold the strip plus its 24px edge clearance, so
+   a narrow column grows no hit target. */
+.widthHandle {
+  position: absolute;
+  top: 0;
+  bottom: 0;
+  z-index: 0;
+  width: min(10px, calc((100% - var(--dsh-chat-content-width)) / 2 - 48px));
+  cursor: col-resize;
+}
+
+.widthHandle[data-side='left'] {
+  right: calc(50% + var(--dsh-chat-content-width) / 2 + 24px);
+}
+
+.widthHandle[data-side='right'] {
+  left: calc(50% + var(--dsh-chat-content-width) / 2 + 24px);
+}
+
+.widthHandle::after {
+  content: '';
+  position: absolute;
+  top: 0;
+  bottom: 0;
+  width: 2px;
+  border-radius: 2px;
+  background: linear-gradient(
+    to bottom,
+    transparent calc(var(--dsh-width-handle-pointer-y, 50%) - 36px),
+    var(--dsw-alias-scrollbar-bg-l1) calc(var(--dsh-width-handle-pointer-y, 50%) - 8px),
+    var(--dsw-alias-scrollbar-bg-l1) calc(var(--dsh-width-handle-pointer-y, 50%) + 8px),
+    transparent calc(var(--dsh-width-handle-pointer-y, 50%) + 36px)
+  );
+  opacity: 0;
+  pointer-events: none;
+}
+
+.widthHandle[data-side='left']::after { right: 4px; }
+.widthHandle[data-side='right']::after { left: 4px; }
+.widthHandle[data-dragging]::after { opacity: 1; }
+
+@media (hover: hover) {
+  .widthHandle:hover::after { opacity: 1; }
 }
 
 .chatArea > :first-child {
@@ -588,6 +650,7 @@
 }
 
 .heroArea {
+  position: relative;
   flex: 1;
   min-height: 0;
   display: flex;
@@ -1136,8 +1199,7 @@
 
 @media (max-width: 980px) {
   .app {
-    --dsh-chat-content-width: min(calc(100% - 32px), 860px);
-    --dsh-composer-card-max-width: min(calc(100% - 16px), 892px);
+    --dsh-chat-content-width: min(calc(100% - 32px), 920px);
     --dsh-composer-side-clearance: 8px;
   }
 
