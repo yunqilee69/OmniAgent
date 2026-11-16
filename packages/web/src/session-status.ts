@@ -6,6 +6,7 @@
  */
 
 import type { TrajectoryEndReason } from './trajectory';
+import { projectPendingPermission, projectPendingPlanReview } from '../../core/src/session/plan';
 
 /** The user-facing interaction a running turn is blocked on. */
 export type SessionPendingKind = 'approval' | 'plan-review';
@@ -53,13 +54,28 @@ export function projectLastTurn(events: readonly unknown[]): SessionLastTurn | n
 }
 
 /**
- * Classify the interaction a turn currently blocks on. A plan review outranks a
- * tool approval because the turn cannot continue past the plan either way.
+ * Classify the interaction a session blocks on.
+ *
+ * A live turn answers from the prompts it is holding. A session whose turn
+ * already ended answers from its log: a persisted plan review is still waiting
+ * for the user, and a persisted tool escalation is only a record of the wait
+ * that ended with the process. A plan review outranks a tool approval.
  * @param prompts - prompts still awaiting an answer, in emit order.
+ * @param events - persisted session events, used when no turn is running.
  */
-export function sessionPendingKind(prompts: readonly { type?: unknown }[]): SessionPendingKind | null {
+export function sessionPendingKind(
+  prompts: readonly { type?: unknown }[],
+  events?: readonly unknown[],
+): SessionPendingKind | null {
   const types = new Set(prompts.map((prompt) => prompt.type));
   if (types.has('plan.review.requested')) return 'plan-review';
   if (types.has('permission.requested')) return 'approval';
+  if (events === undefined) return null;
+  const log = events.flatMap((event) => {
+    const data = record(event);
+    return typeof data?.type === 'string' ? [{ type: data.type, data: data.data }] : [];
+  });
+  if (projectPendingPlanReview(log) !== null) return 'plan-review';
+  if (projectPendingPermission(log) !== null) return 'approval';
   return null;
 }

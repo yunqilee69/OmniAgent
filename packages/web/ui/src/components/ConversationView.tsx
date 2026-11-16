@@ -211,10 +211,15 @@ function CompactionView({ item, t }: { item: Extract<TranscriptItem, { kind: 'co
   );
 }
 
-function ProcessItem({ item, live, t }: { item: TranscriptItem; live: boolean; t: Translate }): ReactNode {
+function ProcessItem({ item, live, reviewing, t }: {
+  item: TranscriptItem;
+  live: boolean;
+  reviewing: boolean;
+  t: Translate;
+}): ReactNode {
   switch (item.kind) {
     case 'tool':
-      return <ToolView item={item} live={live} />;
+      return <ToolView item={item} live={live} reviewing={reviewing && item.call.name === 'exit_plan_mode' && item.result === undefined} />;
     case 'reasoning':
       return <ReasoningView text={item.text} running={live && item.streaming} t={t} />;
     case 'assistant':
@@ -313,7 +318,13 @@ function RunningStatus({ run, startedAt, t }: { run: LiveTurnState; startedAt: n
   );
 }
 
-function TurnView({ turn, processDisplay, locale, t }: { turn: DisplayTurn; processDisplay: 'collapsed' | 'expanded'; locale: Locale; t: Translate }): ReactNode {
+function TurnView({ turn, processDisplay, reviewing, locale, t }: {
+  turn: DisplayTurn;
+  processDisplay: 'collapsed' | 'expanded';
+  reviewing: boolean;
+  locale: Locale;
+  t: Translate;
+}): ReactNode {
   const [override, setOverride] = useState<boolean | null>(null);
   const open = override ?? (turn.live || processDisplay === 'expanded');
   const hasProcess = turn.process.length > 0;
@@ -351,7 +362,9 @@ function TurnView({ turn, processDisplay, locale, t }: { turn: DisplayTurn; proc
       ) : null}
       {hasProcess && open && (
         <div className={groupCss.content}>
-          {turn.process.map((item) => <ProcessItem key={item.id} item={item} live={turn.live === true} t={t} />)}
+          {turn.process.map((item) => (
+            <ProcessItem key={item.id} item={item} live={turn.live === true} reviewing={reviewing} t={t} />
+          ))}
         </div>
       )}
       {turn.final !== undefined && (
@@ -474,7 +487,14 @@ export function ConversationView({ entry, processDisplay, onOpenPlan, onOpenFile
             </div>
           )}
           {turns.map((turn) => (
-            <TurnView key={turn.index} turn={turn} processDisplay={processDisplay} locale={app.locale} t={t} />
+            <TurnView
+              key={turn.index}
+              turn={turn}
+              processDisplay={processDisplay}
+              reviewing={live?.planReview !== undefined && turn.live === true}
+              locale={app.locale}
+              t={t}
+            />
           ))}
           {live?.planReview !== undefined && (
             <PlanReviewCard review={live.planReview} onOpen={() => { onOpenPlan?.(); }} />

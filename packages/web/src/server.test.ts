@@ -2,7 +2,7 @@ import { mkdir, mkdtemp, readFile, readdir, writeFile } from 'node:fs/promises';
 import { tmpdir } from 'node:os';
 import { isAbsolute, join } from 'node:path';
 import { request as httpRequest, type ServerResponse } from 'node:http';
-import { afterEach, describe, expect, it } from 'vitest';
+import { afterEach, describe, expect, it, vi } from 'vitest';
 import {
   createAgentSelectionEvent,
   createModelSelectionEvent,
@@ -1854,6 +1854,56 @@ describe('workspace web host', () => {
     }));
     expect((await fetch(`${url}/${session.id}/plan-review`, jsonRequest({
       requestId: prompt!.requestId, approved: true,
+    }))).status).toBe(409);
+  });
+
+  it('resumes a plan review from the session log after its turn has ended', async () => {
+    const plan = '# Plan\n\n1. Inspect.\n2. Implement.';
+    const { base, first, store } = await setup(
+      (id, permissions, workspace, handle) => new Session({
+        cwd: workspace.path,
+        dshPermissions: permissions,
+        session: handle,
+        model: new FakeModel([textResponse('implemented')], { onExhausted: textResponse('done') }),
+        approve: async () => 'deny',
+        reviewPlan: async () => ({ approved: true }),
+      }),
+    );
+    const url = sessionsUrl(base, first.id);
+    const { session } = await jsonResponse<{ session: { id: string } }>(await fetch(url, jsonRequest({})));
+    const handle = await store.open(first.path, session.id);
+    await handle.append({ type: 'plan/mode', data: { active: true } });
+    await handle.append({
+      type: 'message/assistant',
+      data: {
+        role: 'assistant', content: [],
+        toolCalls: [{ id: 'exit', name: 'exit_plan_mode', arguments: { plan } }],
+      },
+    });
+    await handle.append({
+      type: 'plan/review.pending',
+      data: { requestId: 'review-1', callId: 'exit', plan },
+    });
+    await handle.append({ type: 'trace/turn.end', data: { reason: 'interrupted' } });
+
+    const detail = await jsonResponse<{ planReview: { requestId: string } | null }>(await fetch(`${url}/${session.id}`));
+    expect(detail.planReview).toMatchObject({ requestId: 'review-1', callId: 'exit' });
+    const listed = await jsonResponse<{ sessions: Array<{ id: string; pending?: string }> }>(await fetch(url));
+    expect(listed.sessions.find((item) => item.id === session.id)?.pending).toBe('plan-review');
+
+    const decided = await fetch(`${url}/${session.id}/plan-review`, jsonRequest({
+      requestId: 'review-1', approved: true,
+    }));
+    expect(decided.status).toBe(202);
+    await vi.waitFor(async () => {
+      const reopened = await store.open(first.path, session.id);
+      expect(reopened.events.some((event) => event.type === 'plan/review.decision')).toBe(true);
+      expect(reopened.events.some((event) => event.type === 'message/tool-result')).toBe(true);
+    });
+    expect((await jsonResponse<{ plan: { active: boolean }; planReview: unknown }>(await fetch(`${url}/${session.id}`))))
+      .toMatchObject({ plan: { active: false }, planReview: null });
+    expect((await fetch(`${url}/${session.id}/plan-review`, jsonRequest({
+      requestId: 'review-1', approved: true,
     }))).status).toBe(409);
   });
 

@@ -72,6 +72,8 @@ import {
   applyAgentEvent,
   createLiveState,
   hydrateTranscript,
+  pendingPlanReview,
+  type ApprovalRequest,
   type LiveTurnState,
   type TranscriptItem,
   type TurnMeta,
@@ -213,6 +215,24 @@ function storageSet(key: string, value: string): void {
   } catch {
     // Persistence is best-effort.
   }
+}
+
+/** A tool escalation whose turn ended before anyone answered. It cannot be granted. */
+function closedApprovalRequest(value: unknown): ApprovalRequest | undefined {
+  if (typeof value !== 'object' || value === null) return undefined;
+  const record = value as { requestId?: unknown; callId?: unknown; name?: unknown; reason?: unknown };
+  if (typeof record.requestId !== 'string' || record.requestId.trim() === ''
+    || typeof record.callId !== 'string' || typeof record.name !== 'string' || typeof record.reason !== 'string') {
+    return undefined;
+  }
+  return {
+    requestId: record.requestId,
+    call: { id: record.callId, name: record.name, arguments: {} },
+    reason: record.reason,
+    pending: false,
+    error: '',
+    closed: true,
+  };
 }
 
 export function sessionKey(workspaceId: string, sessionId: string): string {
@@ -1655,6 +1675,15 @@ export class AppStore {
       const messages = Array.isArray(body.messages) ? body.messages : [];
       const events = Array.isArray(body.events) ? body.events : [];
       const hydrated = hydrateTranscript(messages as never, events);
+      // A reload drops the live review prompt. A review persisted with the session
+      // comes back either way; a still-running turn can also be restored from the
+      // unanswered exit_plan_mode call until its own prompt arrives.
+      const persistedReview = typeof body.planReview === 'object' && body.planReview !== null
+        ? body.planReview as { requestId?: unknown; plan?: unknown }
+        : null;
+      const restoredReview = pendingPlanReview(hydrated.transcript, persistedReview)
+        ?? (body.running === true ? pendingPlanReview(hydrated.transcript) : undefined);
+      const closedApproval = closedApprovalRequest(body.pendingApproval);
       this.patchEntry(key, {
         header: typeof body.header === 'object' && body.header !== null ? body.header as Record<string, unknown> : null,
         title: typeof body.title === 'string' && body.title.trim() !== '' ? body.title.trim() : null,
@@ -1685,12 +1714,19 @@ export class AppStore {
         error: '',
         outcome: '',
         running: body.running === true,
+        ...(restoredReview !== undefined
+          ? { run: { ...createLiveState(), ...hydrated, planReview: restoredReview } }
+          : closedApproval !== undefined
+            ? { run: { ...createLiveState(), ...hydrated, approval: closedApproval } }
+            : reconcile && body.running !== true
+              ? { run: undefined }
+              : {}),
       });
       if (body.running === true) {
-        if (this.state.entries[key]?.run === undefined) this.followRun(workspaceId, sessionId);
+        if (this.state.entries[key]?.run === undefined || restoredReview !== undefined) this.followRun(workspaceId, sessionId);
       } else {
         this.clearRunningPoll(key);
-        void this.flushQueue(workspaceId, sessionId);
+        if (restoredReview === undefined) void this.flushQueue(workspaceId, sessionId);
       }
       return true;
     } catch (error) {
@@ -2278,8 +2314,8 @@ export class AppStore {
     const key = sessionKey(workspaceId, sessionId);
     const entry = this.state.entries[key];
     if (this.disposed || entry === undefined || this.observers.has(key)) return;
-    const run = existing ?? createLiveState();
-    if (existing === undefined) {
+    const run = existing ?? entry.run ?? createLiveState();
+    if (existing === undefined && entry.run === undefined) {
       run.transcript = entry.transcript.slice();
       run.turns = entry.turns.map((turn) => ({ ...turn }));
     }
@@ -2318,8 +2354,9 @@ export class AppStore {
             const metrics = baseline === undefined ? snapshotBase.metrics : validateSessionMetrics(baseline.metrics) ?? undefined;
             fresh.metrics = metrics === undefined ? undefined : structuredClone(metrics);
             fresh.stopping = stopping;
+            const keptReview = run.planReview?.requestId.startsWith('restored:') === true ? run.planReview : undefined;
             Object.assign(run, fresh, {
-              approval: undefined, planReview: undefined, outcome: undefined, error: undefined,
+              approval: undefined, planReview: keptReview, outcome: undefined, error: undefined,
               streamAssistantId: undefined, streamReasoningId: undefined, finishing: false,
               metricsStepsSeen: undefined, metricsLastStep: undefined, metricsRunEnded: undefined,
             });
@@ -2401,6 +2438,7 @@ export class AppStore {
             : 'Live history could not be reconciled after reconnecting.');
           throw new Error('Unrecoverable run snapshot');
         }
+        const restoredReview = run.planReview?.requestId.startsWith('restored:') === true ? run.planReview : undefined;
         if (prefixMatches) {
           for (const item of snapshot.events.slice(previous.length)) applyAgentEvent(run, item as never);
         } else {
@@ -2409,6 +2447,20 @@ export class AppStore {
             || !Array.isArray((baseline as { messages?: unknown }).messages))) throw new Error('Invalid run baseline');
           resetSnapshot(baseline as { messages: unknown[]; metrics?: unknown } | undefined);
           for (const item of snapshot.events) applyAgentEvent(run, item as never);
+        }
+        // A snapshot that already decided or ended the review must not revive the
+        // placeholder. One that is still waiting replaces it with the live prompt,
+        // which applyAgentEvent just installed. Anything else keeps the restored
+        // composer until that prompt arrives.
+        const reviewSettled = snapshotEvents.some((item) => {
+          if (typeof item !== 'object' || item === null) return false;
+          const type = (item as { type?: unknown }).type;
+          return type === 'plan.review.decided' || type === 'turn.end' || type === 'turn.interrupted';
+        });
+        if (reviewSettled) {
+          if (run.planReview?.requestId.startsWith('restored:') === true) run.planReview = undefined;
+        } else if (run.planReview === undefined && restoredReview !== undefined) {
+          run.planReview = restoredReview;
         }
         this.followEvents.set(key, snapshot.events.slice());
       } else {
@@ -2570,14 +2622,28 @@ export class AppStore {
       const live = this.liveRuns.get(key);
       if (live?.planReview?.requestId === review.requestId) live.planReview = undefined;
       if (latest?.planReview?.requestId === review.requestId) {
-        this.patchEntry(key, { run: { ...latest, planReview: undefined } });
+        this.patchEntry(key, { run: { ...latest, planReview: undefined }, running: true });
       }
+      // The decision starts a fresh turn when the original one already ended.
+      // Follow it so the reply streams here instead of waiting for a reload.
+      if (this.observers.has(key) !== true) this.followRun(workspaceId, sessionId);
       if (approved) setTimeout(() => { void this.refreshSessionBrief(workspaceId, sessionId); }, 250);
     } catch (error) {
+      const message = (error as Error).message;
+      // A replay or another tab can settle this review before this request lands.
+      // Reconcile with the host instead of leaving an actionable stale card.
+      if (message === 'Plan review is no longer active') {
+        await this.loadDetail(workspaceId, sessionId, true);
+        const refreshed = this.state.entries[key]?.run;
+        if (refreshed?.planReview?.requestId === review.requestId) {
+          this.patchEntry(key, { run: { ...refreshed, planReview: undefined } });
+        }
+        return;
+      }
       const latest = this.state.entries[key]?.run;
       if (latest?.planReview?.requestId === review.requestId) {
         this.patchEntry(key, {
-          run: { ...latest, planReview: { ...review, pending: false, error: translator(this.state.locale)('Could not submit plan review: {message}', { message: (error as Error).message }) } },
+          run: { ...latest, planReview: { ...review, pending: false, error: translator(this.state.locale)('Could not submit plan review: {message}', { message }) } },
         });
       }
     }

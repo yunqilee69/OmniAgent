@@ -168,7 +168,7 @@ async function main(): Promise<void> {
       ...(config.retainContextTokens === undefined ? {} : { retainContextTokens: config.retainContextTokens }),
       approve: interactive ? approvals.handler(workspacePath, handle.id) : async () => 'deny',
       reviewPlan: interactive
-        ? approvals.planHandler(workspacePath, handle.id)
+        ? (plan, signal, requestId) => approvals.planHandler(workspacePath, handle.id)(plan, signal, requestId)
         : async () => ({ approved: false, feedback: 'Plan review is unavailable in an unattended scheduled session.' }),
       audit: (entry) => recordWorkspaceAudit(configDir, workspacePath, entry),
       session: handle,

@@ -445,6 +445,7 @@ const zh: Record<string, string> = {
   '{count} tools': '{count} 个工具',
   'Waiting for plan review': '等待计划审阅',
   'Waiting for approval': '等待审批',
+  'Approval was not answered': '上次提权未审批',
   'Plan ready for review': '计划已准备好，等待审阅',
   'Review the plan, then approve or keep planning.': '查看计划后批准，或输入反馈继续规划。',
   'Waiting for your review': '等待你的审阅',

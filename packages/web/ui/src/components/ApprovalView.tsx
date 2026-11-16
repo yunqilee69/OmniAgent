@@ -22,6 +22,7 @@ export function ApprovalView({ approval, stopping, onResolve }: {
   const t = translator(useApp().locale);
   const [answered, setAnswered] = useState(false);
   const pending = approval.pending === true || answered;
+  const closed = approval.closed === true;
   const submit = (decision: 'allow' | 'deny'): void => {
     setAnswered(true);
     onResolve(decision);
@@ -29,7 +30,7 @@ export function ApprovalView({ approval, stopping, onResolve }: {
   return (
     <div className={css.root}>
       <div className={css.card}>
-        <div className={css.strip}><StateDot state={pending ? 'ongoing' : 'warning'} />{t('Waiting for approval')}</div>
+        <div className={css.strip}><StateDot state={closed ? 'idle' : pending ? 'ongoing' : 'warning'} />{closed ? t('Approval was not answered') : t('Waiting for approval')}</div>
         <div className={css.body} tabIndex={0} role="group" aria-label={t('Tool approval detail')}>
           <div className={css.headline}>
             {t('Allow {tool}?', { tool: typeof approval.call.name === 'string' ? approval.call.name : 'tool' })}
@@ -41,12 +42,16 @@ export function ApprovalView({ approval, stopping, onResolve }: {
           )}
         </div>
         <div className={css.actionRow}>
-          <Button variant="outline" disabled={pending || stopping} onClick={() => { submit('deny'); }}>
-            {t('Deny')}
-          </Button>
-          <Button variant="primary" disabled={pending || stopping} onClick={() => { submit('allow'); }}>
-            {t('Allow once')}
-          </Button>
+          {!closed && (
+            <>
+              <Button variant="outline" disabled={pending || stopping} onClick={() => { submit('deny'); }}>
+                {t('Deny')}
+              </Button>
+              <Button variant="primary" disabled={pending || stopping} onClick={() => { submit('allow'); }}>
+                {t('Allow once')}
+              </Button>
+            </>
+          )}
         </div>
       </div>
     </div>

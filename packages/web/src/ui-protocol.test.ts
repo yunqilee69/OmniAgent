@@ -8,6 +8,8 @@ import {
   createLiveState,
   createSSEParser,
   hydrateTranscript,
+  pendingPlanReview,
+  pendingPlanText,
   userMessageCopyText,
 } from '../ui/src/lib/events.ts';
 import {
@@ -211,8 +213,8 @@ describe('web client protocol', () => {
   it('keeps a replayed turn on the server start instead of the reload time', () => {
     const turn = createLiveState();
     applyAgentEvent(turn, { type: 'run.user.message', message: { role: 'user', content: [{ type: 'text', text: 'Question' }] } }, 5_000);
-    applyAgentEvent(turn, { type: 'turn.start', step: 0, startedAt: 1_000 }, 5_000);
-    applyAgentEvent(turn, { type: 'turn.start', step: 1, startedAt: 1_000 }, 8_000);
+    applyAgentEvent(turn, { type: 'turn.start', step: 0, startedAt: 1_000 } as Record<string, unknown>, 5_000);
+    applyAgentEvent(turn, { type: 'turn.start', step: 1, startedAt: 1_000 } as Record<string, unknown>, 8_000);
     expect(turn.turns).toEqual([{ index: 0, startedAt: 1_000 }]);
   });
 
@@ -406,6 +408,38 @@ describe('web client protocol', () => {
     const live = createLiveState();
     applyAgentEvent(live, { type: 'assistant.delta', text: 'x' }, 4567);
     expect(live.transcript[0]).toMatchObject({ timestamp: 4567 });
+  });
+
+  it('restores a waiting plan review from an unanswered exit_plan_mode call', () => {
+    const plan = '# 重试计划\n\n按配置重试。';
+    const waiting = hydrateTranscript([
+      { role: 'user', content: [{ type: 'text', text: '修一下' }] },
+      { role: 'assistant', content: [], toolCalls: [{ id: 'exit', name: 'exit_plan_mode', arguments: { plan } }] },
+    ]);
+    const tool = waiting.transcript.find((item) => item.kind === 'tool');
+    expect(tool?.kind === 'tool' ? pendingPlanText(tool.call, tool.result) : undefined).toBe(plan);
+    expect(pendingPlanReview(waiting.transcript)).toMatchObject({
+      requestId: 'restored:exit', plan, pending: false,
+    });
+
+    const settled = hydrateTranscript([
+      { role: 'assistant', content: [], toolCalls: [{ id: 'exit', name: 'exit_plan_mode', arguments: { plan } }] },
+      { role: 'tool', results: [{ callId: 'exit', name: 'exit_plan_mode', ok: true, content: 'approved', truncated: false }] },
+    ]);
+    expect(pendingPlanReview(settled.transcript)).toBeUndefined();
+
+    const stillWaiting = hydrateTranscript([
+      { role: 'assistant', content: [], toolCalls: [{ id: 'old', name: 'exit_plan_mode', arguments: { plan: '# Old\n\nFirst.' } }] },
+      { role: 'assistant', content: [], toolCalls: [{ id: 'next', name: 'read_file', arguments: {} }] },
+    ]);
+    expect(pendingPlanReview(stillWaiting.transcript)?.requestId).toBe('restored:old');
+    const replaced = hydrateTranscript([
+      { role: 'assistant', content: [], toolCalls: [{ id: 'old', name: 'exit_plan_mode', arguments: { plan: '# Old\n\nFirst.' } }] },
+      { role: 'assistant', content: [], toolCalls: [{ id: 'newer', name: 'exit_plan_mode', arguments: { plan } }] },
+    ]);
+    expect(pendingPlanReview(replaced.transcript)?.requestId).toBe('restored:newer');
+    expect(pendingPlanText({ id: 'x', name: 'exit_plan_mode', arguments: {} }, undefined)).toBeUndefined();
+    expect(pendingPlanText({ id: 'x', name: 'read_file', arguments: { plan } }, undefined)).toBeUndefined();
   });
 
   it('hydrates stored message events when projected messages are absent', () => {

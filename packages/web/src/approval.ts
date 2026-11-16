@@ -71,7 +71,7 @@ export class ApprovalBroker {
 
   planHandler(workspace: string, sessionId: string): NonNullable<SessionOptions['reviewPlan']> {
     const key = this.key(workspace, sessionId);
-    return (plan, signal) => this.turns.get(key)?.requestPlanReview(plan, signal)
+    return (plan, signal, requestId) => this.turns.get(key)?.requestPlanReview(plan, signal, requestId)
       ?? Promise.resolve({ approved: false, feedback: 'Plan review is unavailable.' });
   }
 
@@ -139,14 +139,16 @@ export class ApprovalTurn {
     });
   }
 
-  requestPlanReview(plan: string, signal: AbortSignal): Promise<PlanReviewResponse> {
+  requestPlanReview(plan: string, signal: AbortSignal, requestId?: string): Promise<PlanReviewResponse> {
     if (this.closed || this.planPending || signal.aborted) {
       return Promise.resolve({ approved: false, feedback: 'Plan review is unavailable.' });
     }
     if (typeof plan !== 'string' || plan.trim().length === 0 || plan.length > 200_000) {
       return Promise.resolve({ approved: false, feedback: 'The plan is empty or too large to review.' });
     }
-    const prompt: PlanPrompt = { type: 'plan.review.requested', requestId: randomUUID(), plan };
+    const reserved = typeof requestId === 'string' && requestId.trim() !== '' && requestId.length <= 256
+      ? requestId : randomUUID();
+    const prompt: PlanPrompt = { type: 'plan.review.requested', requestId: reserved, plan };
     return new Promise((resolve) => {
       const onAbort = () => settle({ approved: false, feedback: 'Plan review was cancelled.' });
       const timer = this.timeoutMs > 0

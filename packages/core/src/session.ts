@@ -48,6 +48,12 @@ import type { ScheduleService } from './schedule/service';
 import { createAgentAuthoringTools } from './agents/authoring';
 import type { AgentAuthoringService } from './agents/authoring';
 import { TODO_WRITE_EVENT } from './session/todo';
+import {
+  createPermissionPendingEvent,
+  createPlanReviewDecisionEvent,
+  createPlanReviewPendingEvent,
+  projectPendingPlanReview,
+} from './session/plan';
 import type { TodoItem } from './session/todo';
 import { GoalController, goalRefOf } from './session/goal-controller';
 import {
@@ -107,8 +113,12 @@ export interface SessionOptions {
   dshSandbox?: DshSandboxOptions;
   /** UI 提供：渲染一次确认提示并返回结果。 */
   approve?: (request: PermissionRequest, signal: AbortSignal) => ReturnType<ApprovalHandler>;
-  /** UI 提供：审阅计划并决定是否退出 plan 模式。 */
-  reviewPlan?: (plan: string, signal: AbortSignal) => Promise<PlanReviewResponse>;
+  /**
+   * UI 提供：审阅计划并决定是否退出 plan 模式。
+   * The third argument is the request id already persisted for this review, when
+   * the session has one; the prompt must reuse it so a later decision matches.
+   */
+  reviewPlan?: (plan: string, signal: AbortSignal, requestId?: string) => Promise<PlanReviewResponse>;
   maxSteps?: number;
   contextWindowTokens?: number;
   retainContextTokens?: number;
@@ -186,6 +196,10 @@ export class Session {
   private controller?: AbortController;
   private executing = false;
   private interruptRequested = false;
+  /** Tool escalations asked during the current turn and not yet decided. */
+  private readonly pendingPermissions = new Map<string, { requestId: string; callId: string; name: string; reason: string }>();
+  /** Request id reserved for the plan review the current turn is presenting. */
+  private pendingPlanReview?: { requestId: string; callId: string };
   private turnSource: 'human' | 'goal' | 'external' | 'notice' | 'system' = 'system';
   private currentGoalRound?: GoalRoundContext;
 
@@ -280,7 +294,7 @@ export class Session {
 
     if (allows('exit_plan_mode') && this.reviewPlanHandler) {
       const exitPlanTool = createExitPlanModeTool({
-        review: (plan, signal) => this.reviewPlanHandler!(plan, signal),
+        review: (plan, signal) => this.reviewPlanHandler!(plan, signal, this.pendingPlanReview?.requestId),
         onApproved: async () => {
           await this.applyPlanMode(false);
         },
@@ -562,6 +576,48 @@ export class Session {
   }
 
   /**
+   * Continue a plan review whose turn ended before the user answered.
+   *
+   * The decision is written first, then the matching tool result, and only then
+   * does a new turn start. Approval is what leaves plan mode; sending the plan
+   * back keeps it active and gives the model the feedback. A decision for a
+   * review that is no longer pending does nothing and starts no turn.
+   */
+  async resumePlanReview(decision: { requestId: string; approved: boolean; feedback?: string }): Promise<boolean> {
+    if (this.executing || this.session === undefined) return false;
+    const pending = projectPendingPlanReview(this.session.events);
+    if (pending === null || pending.requestId !== decision.requestId) return false;
+    if (this.history.some((message) => message.role === 'tool'
+      && message.results.some((result) => result.callId === pending.callId))) return false;
+    const feedback = decision.feedback?.trim() ?? '';
+    await this.session.append(createPlanReviewDecisionEvent({
+      requestId: pending.requestId,
+      callId: pending.callId,
+      approved: decision.approved,
+      ...(feedback === '' ? {} : { feedback }),
+    }));
+    if (decision.approved) await this.applyPlanMode(false);
+    const content = decision.approved
+      ? 'Plan approved — plan mode exited; carry out the plan starting with your next step.'
+      : feedback === ''
+        ? 'The user chose to keep planning; revise the plan and present it again.'
+        : `The user chose to keep planning; their feedback: ${feedback}`;
+    const result = {
+      callId: pending.callId,
+      name: EXIT_PLAN_MODE_TOOL_NAME,
+      ok: decision.approved,
+      content,
+      truncated: false,
+    };
+    await this.appendMessage('message/tool-result', { result });
+    const previous = this.history.at(-1);
+    if (previous?.role === 'tool') previous.results.push(result);
+    else this.history.push({ role: 'tool', results: [result] });
+    this.runBackgroundTurn('external');
+    return true;
+  }
+
+  /**
    * Deliver a direct human message into the active turn. The model sees it at
    * the next step, so the turn keeps streaming instead of being restarted.
    */
@@ -718,7 +774,7 @@ export class Session {
       generator = this.loop.run(modelHistory.messages, controller.signal);
 
       while (true) {
-        if (controller.signal.aborted && !terminal) {
+        if (controller.signal.aborted && !terminal && this.pendingPlanReview === undefined) {
           if (pendingAudit) {
             pendingAudit = false;
             try {
@@ -745,6 +801,13 @@ export class Session {
 
         const event = next.value;
         if (event.type === 'tool.result') pendingAudit = true;
+        if (event.type === 'permission.decided' || event.type === 'tool.result') {
+          const callId = event.type === 'permission.decided' ? event.callId : event.result.callId;
+          this.pendingPermissions.delete(callId);
+          if (event.type === 'tool.result' && event.result.callId === this.pendingPlanReview?.callId) {
+            this.pendingPlanReview = undefined;
+          }
+        }
         if (event.type === 'assistant.message') {
           await this.appendMessage('message/assistant', event.message);
           this.history.push(event.message);
@@ -781,7 +844,7 @@ export class Session {
       if (!recordedError) await this.appendTrace({ type: 'error', error: { message: '' } });
       throw error;
     } finally {
-      if (!terminal) controller.abort();
+      if (!terminal && this.pendingPlanReview === undefined) controller.abort();
       try {
         if (generator && pendingAudit) {
           pendingAudit = false;
@@ -805,6 +868,7 @@ export class Session {
               await this.appendTrace({ type: 'turn.end', reason: failed ? 'error' : 'interrupted' });
             }
           } finally {
+            if (!failed) await this.recordAbandonedPermissions();
             this.controller = undefined;
             // A notice or external message can arrive after the last model
             // step. Its text is already in history, so retire the step queue
@@ -841,6 +905,52 @@ export class Session {
     if (this.executing || this.controller !== undefined || this.inbox.length === 0) return;
     this.inbox.length = 0;
     this.runBackgroundTurn('external');
+  }
+
+  /**
+   * Persist a plan review before its prompt starts waiting.
+   *
+   * The request id is allocated here and reused by the prompt, so a decision
+   * made after a restart still matches the record. The call id is the plan the
+   * model just submitted.
+   */
+  private async recordPlanReview(plan: string): Promise<void> {
+    const callId = this.latestPlanCallId();
+    if (callId === undefined || this.session === undefined) return;
+    const { randomUUID } = await import('node:crypto');
+    const requestId = randomUUID();
+    this.pendingPlanReview = { requestId, callId };
+    await this.session.append(createPlanReviewPendingEvent({ requestId, callId, plan }));
+  }
+
+  /** The call the model just submitted, which the review record has to point at. */
+  private latestPlanCallId(): string | undefined {
+    for (let index = this.history.length - 1; index >= 0; index -= 1) {
+      const message = this.history[index];
+      if (message?.role !== 'assistant') continue;
+      const call = message.toolCalls.findLast((item) => item.name === EXIT_PLAN_MODE_TOOL_NAME);
+      return call?.id;
+    }
+    return undefined;
+  }
+
+  /**
+   * Remember an escalation the turn stopped before the user answered.
+   *
+   * The record is not a grant. Reopening the session shows that the call was
+   * waiting; it does not execute the call or carry the approval forward.
+   */
+  private async recordAbandonedPermissions(): Promise<void> {
+    const pending = [...this.pendingPermissions.values()];
+    this.pendingPermissions.clear();
+    if (this.session === undefined) return;
+    for (const request of pending) {
+      try {
+        await this.session.append(createPermissionPendingEvent(request));
+      } catch {
+        // A record that cannot be persisted must not block the turn from ending.
+      }
+    }
   }
 
   private visibleToolSpecs(): ToolSpec[] {
@@ -899,8 +1009,13 @@ export class Session {
       }
     }
 
-    if (tool?.name === EXIT_PLAN_MODE_TOOL_NAME && !this.planActive) {
-      return deny('exit_plan_mode is only available in plan mode');
+    if (tool?.name === EXIT_PLAN_MODE_TOOL_NAME) {
+      if (!this.planActive) return deny('exit_plan_mode is only available in plan mode');
+      const plan = typeof args === 'object' && args !== null && !Array.isArray(args)
+        ? (args as { plan?: unknown }).plan : undefined;
+      if (typeof plan !== 'string') return deny('exit_plan_mode requires a plan');
+      await this.recordPlanReview(plan);
+      signal.throwIfAborted();
     }
     if (tool?.name === SUBAGENT_TOOL_NAME && (!this.subagents || !this.subagents.canStart(this))) {
       return deny('Subagent delegation depth or capacity is exhausted');
@@ -920,12 +1035,13 @@ export class Session {
     else if (tool === this.dshShell) selected = createDshShellTool({ policy, sandbox: this.dshSandbox });
     const registry = new ToolRegistry();
     if (selected) registry.register(selected);
-    const executor = new ToolExecutor(registry, { cwd, signal });
+    const review = tool?.name === EXIT_PLAN_MODE_TOOL_NAME;
+    const executor = new ToolExecutor(registry, { cwd, signal: review ? new AbortController().signal : signal });
     return {
       decision: 'allow',
       source: `DSH ${mode}`,
       execute: async () => {
-        signal.throwIfAborted();
+        if (!review) signal.throwIfAborted();
         return executor.execute(cleanCall);
       },
     };
@@ -935,6 +1051,13 @@ export class Session {
     const signal = this.controller?.signal;
     if (!signal) return 'deny';
     signal.throwIfAborted();
+    const { randomUUID } = await import('node:crypto');
+    this.pendingPermissions.set(request.call.id, {
+      requestId: randomUUID(),
+      callId: request.call.id,
+      name: request.call.name,
+      reason: request.reason,
+    });
     let abort!: () => void;
     return new Promise<'allow' | 'deny'>((resolve, reject) => {
       abort = () => reject(signal.reason);

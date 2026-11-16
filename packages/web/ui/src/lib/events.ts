@@ -122,6 +122,8 @@ export interface ApprovalRequest {
   reason: string;
   pending?: boolean;
   error?: string;
+  /** Set when the turn ended before the user answered. The call was not run. */
+  closed?: boolean;
 }
 
 export interface PlanReviewRequest {
@@ -594,6 +596,49 @@ export function turnTiming(events: readonly unknown[]): TurnMeta[] {
     }
   }
   return turns.filter((turn): turn is TurnMeta => turn !== undefined);
+}
+
+/**
+ * Plan text of an `exit_plan_mode` call that is still waiting on the user.
+ *
+ * The review prompt itself is live-only. After a reload the durable transcript
+ * still holds the tool call, so the composer can be restored from its arguments
+ * until a tool result arrives. A call that already has a result, or whose plan
+ * is missing, is not waiting.
+ */
+export function pendingPlanText(call: ToolCall, result: ToolResult | undefined): string | undefined {
+  if (call.name !== 'exit_plan_mode' || result !== undefined) return undefined;
+  const args = call.arguments;
+  if (typeof args !== 'object' || args === null || Array.isArray(args)) return undefined;
+  const plan = (args as { plan?: unknown }).plan;
+  if (typeof plan !== 'string' || plan.trim() === '') return undefined;
+  return plan;
+}
+
+/**
+ * The review a reloaded session is still waiting on.
+ *
+ * A review the server persisted wins, because its request id is the one a later
+ * decision has to answer. Otherwise the latest unanswered `exit_plan_mode` call
+ * stands in while its turn is still running. A call that already has a result is
+ * not waiting, and an earlier call is stale once a later plan was submitted.
+ */
+export function pendingPlanReview(
+  transcript: readonly TranscriptItem[],
+  persisted?: { requestId?: unknown; plan?: unknown } | null,
+): PlanReviewRequest | undefined {
+  if (typeof persisted?.requestId === 'string' && persisted.requestId.trim() !== ''
+    && typeof persisted.plan === 'string' && persisted.plan.trim() !== '') {
+    return { requestId: persisted.requestId, plan: persisted.plan, pending: false, error: '', feedback: '' };
+  }
+  for (let index = transcript.length - 1; index >= 0; index -= 1) {
+    const item = transcript[index];
+    if (item === undefined || item.kind !== 'tool' || item.call.name !== 'exit_plan_mode') continue;
+    const plan = pendingPlanText(item.call, item.result);
+    if (plan === undefined) return undefined;
+    return { requestId: `restored:${item.call.id}`, plan, pending: false, error: '', feedback: '' };
+  }
+  return undefined;
 }
 
 export function hydrateTranscript(messages: readonly PublicMessage[], events: readonly unknown[] = []): {

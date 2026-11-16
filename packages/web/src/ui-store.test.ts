@@ -39,6 +39,7 @@ interface DetailOptions {
   todos?: unknown;
   running?: boolean;
   agentSkills?: unknown;
+  messages?: unknown[];
 }
 
 function detail(options: DetailOptions = {}) {
@@ -54,7 +55,7 @@ function detail(options: DetailOptions = {}) {
     plan: { active: options.plan ?? false },
     todos: options.todos ?? null,
     running: options.running === true,
-    messages: [{ role: 'user', content: [{ type: 'text', text: options.text ?? 'Alpha history' }] }],
+    messages: options.messages ?? [{ role: 'user', content: [{ type: 'text', text: options.text ?? 'Alpha history' }] }],
     events: [],
     audit: [],
     trajectory: null,
@@ -390,6 +391,57 @@ describe('independent run observation', () => {
     expect(posts).toEqual(['first']);
     failDetail = false;
     await waitFor(() => followCalls >= 2, 3000);
+    store.dispose();
+  });
+
+  it('restores the review composer after a reload while exit_plan_mode is still waiting', async () => {
+    const plan = '# 重试计划\n\n按配置重试。';
+    let controller!: ReadableStreamDefaultController<Uint8Array>;
+    const store = await boot(sessionFetcher((url) => {
+      if (url === '/api/workspaces/a/sessions/shared/follow') {
+        return new Response(new ReadableStream<Uint8Array>({ start(value) { controller = value; } }));
+      }
+      if (url === '/api/workspaces/a/sessions/shared') {
+        return json(detail({
+          running: true,
+          text: '修一下',
+          messages: [
+            { role: 'user', content: [{ type: 'text', text: '修一下' }] },
+            { role: 'assistant', content: [], toolCalls: [{ id: 'exit', name: 'exit_plan_mode', arguments: { plan } }] },
+          ],
+        }));
+      }
+      return undefined;
+    }));
+    await waitFor(() => store.currentEntry()?.run?.planReview?.plan === plan);
+    expect(store.currentEntry()?.run?.planReview).toMatchObject({ requestId: 'restored:exit', pending: false });
+    expect(store.currentEntry()?.running).toBe(true);
+    // The follow snapshot's live prompt replaces the history placeholder.
+    controller.enqueue(new TextEncoder().encode(
+      `data: ${JSON.stringify({ type: 'run.snapshot', events: [{ type: 'plan.review.requested', requestId: 'live-1', plan }] })}\n\n`,
+    ));
+    await waitFor(() => store.currentEntry()?.run?.planReview?.requestId === 'live-1');
+    store.dispose();
+    controller.close();
+  });
+
+  it('does not restore a review once the plan tool already has a result', async () => {
+    const plan = '# 重试计划\n\n按配置重试。';
+    const store = await boot(sessionFetcher((url) => {
+      if (url === '/api/workspaces/a/sessions/shared/follow') return new Response(new ReadableStream<Uint8Array>());
+      if (url === '/api/workspaces/a/sessions/shared') {
+        return json(detail({
+          running: true,
+          messages: [
+            { role: 'assistant', content: [], toolCalls: [{ id: 'exit', name: 'exit_plan_mode', arguments: { plan } }] },
+            { role: 'tool', results: [{ callId: 'exit', name: 'exit_plan_mode', ok: true, content: 'approved', truncated: false }] },
+          ],
+        }));
+      }
+      return undefined;
+    }));
+    await waitFor(() => store.currentEntry()?.run !== undefined);
+    expect(store.currentEntry()?.run?.planReview).toBeUndefined();
     store.dispose();
   });
 
@@ -1447,6 +1499,35 @@ describe('workbench store', () => {
     controller.enqueue(encoder.encode('data: {"type":"turn.end","reason":"end_turn"}\n\n'));
     controller.close();
     await waitFor(() => store.currentEntry()?.run === undefined);
+  });
+
+  it('reconciles a stale plan review response with the authoritative session state', async () => {
+    let controller!: ReadableStreamDefaultController<Uint8Array>;
+    const encoder = new TextEncoder();
+    const stream = new ReadableStream<Uint8Array>({ start(value) { controller = value; } });
+    let detailReads = 0;
+    const store = await boot(sessionFetcher(async (url, init) => {
+      if (url === '/api/workspaces/a/sessions/shared/messages' && init?.method === 'POST') {
+        return new Response(stream, { status: 200, headers: { 'content-type': 'text/event-stream' } });
+      }
+      if (url === '/api/workspaces/a/sessions/shared/plan-review' && init?.method === 'POST') {
+        return json({ error: 'Plan review is no longer active' }, 409);
+      }
+      if (url === '/api/workspaces/a/sessions/shared' && init?.method !== 'POST') {
+        detailReads += 1;
+        return json(detail());
+      }
+      return undefined;
+    }));
+
+    await store.sendMessage('Plan it');
+    controller.enqueue(encoder.encode('data: {"type":"plan.review.requested","requestId":"expired-review","plan":"# Plan\\n\\nDo it."}\n\n'));
+    await waitFor(() => store.currentEntry()?.run?.planReview?.requestId === 'expired-review');
+    await store.resolvePlanReview(true, '');
+
+    expect(detailReads).toBeGreaterThan(1);
+    expect(store.currentEntry()?.run?.planReview).toBeUndefined();
+    controller.close();
   });
 
   it('keeps a new session local until the first message persists its mode', async () => {

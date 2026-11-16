@@ -1,6 +1,18 @@
 import { describe, expect, it, vi } from 'vitest';
 import { createExitPlanModeTool, hasPlanHeading } from '../tools/builtin/exit-plan-mode';
-import { PLAN_MODE_EVENT, createPlanModeEvent, projectPlanMode } from './plan';
+import {
+  PERMISSION_PENDING_EVENT,
+  PLAN_MODE_EVENT,
+  PLAN_REVIEW_DECISION_EVENT,
+  PLAN_REVIEW_PENDING_EVENT,
+  createPermissionPendingEvent,
+  createPlanModeEvent,
+  createPlanReviewDecisionEvent,
+  createPlanReviewPendingEvent,
+  projectPendingPermission,
+  projectPendingPlanReview,
+  projectPlanMode,
+} from './plan';
 
 describe('plan mode projection', () => {
   it('uses the last well-formed value and folds malformed state to inactive', () => {
@@ -16,6 +28,57 @@ describe('plan mode projection', () => {
   it('creates only a strict boolean mode event', () => {
     expect(createPlanModeEvent(true)).toEqual({ type: PLAN_MODE_EVENT, data: { active: true } });
     expect(() => createPlanModeEvent('true' as never)).toThrow(TypeError);
+  });
+});
+
+describe('durable review and approval waits', () => {
+  const review = { requestId: 'review-1', callId: 'exit', plan: '# Plan\n\nDo it.' };
+
+  it('keeps the newest unanswered plan and retires it once decided or answered', () => {
+    expect(projectPendingPlanReview([])).toBeNull();
+    expect(projectPendingPlanReview([
+      { type: PLAN_REVIEW_PENDING_EVENT, data: { requestId: 'old', callId: 'old', plan: '# Old' } },
+      { type: PLAN_REVIEW_PENDING_EVENT, data: review },
+    ])).toEqual(review);
+    expect(projectPendingPlanReview([
+      { type: PLAN_REVIEW_PENDING_EVENT, data: review },
+      { type: PLAN_REVIEW_DECISION_EVENT, data: { requestId: 'someone-else', callId: 'exit', approved: false } },
+    ])).toEqual(review);
+    expect(projectPendingPlanReview([
+      { type: PLAN_REVIEW_PENDING_EVENT, data: review },
+      { type: PLAN_REVIEW_DECISION_EVENT, data: { requestId: 'review-1', callId: 'exit', approved: true } },
+    ])).toBeNull();
+    expect(projectPendingPlanReview([
+      { type: PLAN_REVIEW_PENDING_EVENT, data: review },
+      { type: 'message/tool-result', data: { result: { callId: 'exit' } } },
+    ])).toBeNull();
+    expect(projectPendingPlanReview([{ type: PLAN_REVIEW_PENDING_EVENT, data: { requestId: '', callId: 'exit', plan: '# Plan' } }])).toBeNull();
+  });
+
+  it('rejects a review record that cannot be shown or correlated', () => {
+    expect(createPlanReviewPendingEvent(review)).toEqual({ type: PLAN_REVIEW_PENDING_EVENT, data: review });
+    expect(() => createPlanReviewPendingEvent({ ...review, plan: '   ' })).toThrow(TypeError);
+    expect(createPlanReviewDecisionEvent({ requestId: 'review-1', callId: 'exit', approved: false, feedback: '  Add tests  ' }))
+      .toEqual({ type: PLAN_REVIEW_DECISION_EVENT, data: { requestId: 'review-1', callId: 'exit', approved: false, feedback: 'Add tests' } });
+    expect(() => createPlanReviewDecisionEvent({ requestId: 'review-1', callId: 'exit', approved: 'yes' as never })).toThrow(TypeError);
+  });
+
+  it('keeps an unanswered escalation as a record and retires it once the call settles', () => {
+    const pending = { requestId: 'ask-1', callId: 'bash-1', name: 'bash', reason: 'Allow one call to use workspace-write: needed' };
+    expect(projectPendingPermission([
+      { type: PERMISSION_PENDING_EVENT, data: { ...pending, requestId: 'older' } },
+      { type: PERMISSION_PENDING_EVENT, data: pending },
+    ])).toEqual(pending);
+    expect(projectPendingPermission([
+      { type: PERMISSION_PENDING_EVENT, data: pending },
+      { type: 'trace/permission.decided', data: { callId: 'bash-1', decision: 'deny' } },
+    ])).toBeNull();
+    expect(projectPendingPermission([
+      { type: PERMISSION_PENDING_EVENT, data: pending },
+      { type: 'message/tool-result', data: { result: { callId: 'bash-1' } } },
+    ])).toBeNull();
+    expect(createPermissionPendingEvent(pending)).toEqual({ type: PERMISSION_PENDING_EVENT, data: pending });
+    expect(() => createPermissionPendingEvent({ ...pending, reason: '' })).toThrow(TypeError);
   });
 });
 

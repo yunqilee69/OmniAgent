@@ -7,7 +7,8 @@ import {
   PlanReviewComposer,
   planTitle,
 } from '../ui/src/components/PlanReview.tsx';
-import type { PlanReviewRequest } from '../ui/src/lib/events.ts';
+import { ToolView } from '../ui/src/components/ToolView.tsx';
+import type { PlanReviewRequest, ToolItem } from '../ui/src/lib/events.ts';
 import { store } from '../ui/src/lib/store.ts';
 
 const review: PlanReviewRequest = {
@@ -78,5 +79,20 @@ describe('plan review surfaces', () => {
     } finally {
       consoleError.mockRestore();
     }
+  });
+
+  it('labels an unanswered plan submission as waiting for review instead of running', () => {
+    const item: ToolItem = {
+      kind: 'tool',
+      id: 'tool-1',
+      turn: 0,
+      call: { id: 'exit', name: 'exit_plan_mode', arguments: { plan: review.plan } },
+    };
+    const waiting = render('zh', createElement(ToolView, { item, live: true, reviewing: true }));
+    expect(waiting).toContain('等待计划审阅');
+    expect(waiting).not.toContain('运行中');
+    const running = render('zh', createElement(ToolView, { item, live: true }));
+    expect(running).toContain('运行中');
+    expect(running).not.toContain('等待计划审阅');
   });
 });

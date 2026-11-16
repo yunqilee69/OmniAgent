@@ -205,12 +205,20 @@ export {
 } from './session/todo';
 export type { TodoItem, TodoList, TodoStatus } from './session/todo';
 export {
+  PERMISSION_PENDING_EVENT,
   PLAN_MODE_EVENT,
   PLAN_MODE_GUIDANCE,
+  PLAN_REVIEW_DECISION_EVENT,
+  PLAN_REVIEW_PENDING_EVENT,
+  createPermissionPendingEvent,
   createPlanModeEvent,
+  createPlanReviewDecisionEvent,
+  createPlanReviewPendingEvent,
+  projectPendingPermission,
+  projectPendingPlanReview,
   projectPlanMode,
 } from './session/plan';
-export type { PlanProjection } from './session/plan';
+export type { PendingPermission, PendingPlanReview, PlanProjection } from './session/plan';
 export {
   GOAL_ACTIVATIONS,
   GOAL_CHANGE_EVENT,

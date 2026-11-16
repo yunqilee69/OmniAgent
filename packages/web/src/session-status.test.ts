@@ -21,4 +21,17 @@ describe('session status projections', () => {
     expect(sessionPendingKind([{ type: 'plan.review.requested' }])).toBe('plan-review');
     expect(sessionPendingKind([{ type: 'permission.requested' }, { type: 'plan.review.requested' }])).toBe('plan-review');
   });
+
+  it('reads a review that outlived its turn and ignores one the user already answered', () => {
+    const pending = { type: 'plan/review.pending', data: { requestId: 'review-1', callId: 'exit', plan: '# Plan' } };
+    expect(sessionPendingKind([], [pending])).toBe('plan-review');
+    expect(sessionPendingKind([], [
+      pending,
+      { type: 'plan/review.decision', data: { requestId: 'review-1', callId: 'exit', approved: true } },
+    ])).toBeNull();
+    expect(sessionPendingKind([], [
+      { type: 'permission/pending', data: { requestId: 'ask-1', callId: 'bash-1', name: 'bash', reason: 'Allow one call to use workspace-write: needed' } },
+    ])).toBe('approval');
+    expect(sessionPendingKind([{ type: 'permission.requested' }], [pending])).toBe('approval');
+  });
 });

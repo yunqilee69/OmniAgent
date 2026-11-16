@@ -297,21 +297,27 @@ function toolBody(item: ToolItem, t: Translate): ReactNode | null {
   }
 }
 
-function statusLabel(item: ToolItem, t: Translate): string {
+function statusLabel(item: ToolItem, t: Translate, reviewing = false): string {
   if (item.denied === true) return t('Denied');
+  if (reviewing) return t('Waiting for plan review');
   if (item.result === undefined) return t('Running');
   if (!item.result.ok) return t('Failed');
   return '';
 }
 
-export function ToolView({ item, live }: { item: ToolItem; live: boolean }): ReactNode {
+export function ToolView({ item, live, reviewing = false }: {
+  item: ToolItem;
+  live: boolean;
+  /** An exit_plan_mode call whose review composer is on screen is waiting, not running. */
+  reviewing?: boolean;
+}): ReactNode {
   const t = translator(useApp().locale);
   const [expanded, setExpanded] = useState(false);
   const title = t(TITLES[item.call.name] ?? item.call.name);
   const Icon = ICONS[item.call.name] ?? IconApiOutlineRegular;
   const summary = summaryFor(item, t);
-  const status = statusLabel(item, t);
-  const running = live && item.result === undefined && item.denied !== true;
+  const status = statusLabel(item, t, reviewing);
+  const running = live && item.result === undefined && item.denied !== true && !reviewing;
   const body = toolBody(item, t);
   const expandable = body !== null;
   const open = expanded && expandable;

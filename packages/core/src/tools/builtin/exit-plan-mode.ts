@@ -37,7 +37,9 @@ export function createExitPlanModeTool(options: ExitPlanModeToolOptions): Tool {
         throw new Error('exit_plan_mode requires a non-empty markdown plan starting with a # heading');
       }
       ctx.signal.throwIfAborted();
-      const response = await options.review(plan, ctx.signal);
+      // Once presented, the decision is durable and must survive interruption of
+      // the turn that asked for it.
+      const response = await options.review(plan, new AbortController().signal);
       ctx.signal.throwIfAborted();
       if (response.approved) {
         await options.onApproved();

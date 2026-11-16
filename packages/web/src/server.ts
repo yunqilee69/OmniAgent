@@ -76,7 +76,12 @@ import {
 import type { DshPermissionProjection, DshPermissionSnapshot } from '../../core/src/permissions/dsh-permissions';
 import { projectPublicHistory, safePublicMessages } from '../../core/src/session/projection';
 import { projectTodos } from '../../core/src/session/todo';
-import { createPlanModeEvent, projectPlanMode } from '../../core/src/session/plan';
+import {
+  createPlanModeEvent,
+  projectPendingPermission,
+  projectPendingPlanReview,
+  projectPlanMode,
+} from '../../core/src/session/plan';
 import type { ApprovalBroker, ApprovalTurn } from './approval';
 import { InvalidPermissionSettings } from './permissions';
 import type { PermissionSettings } from './permissions';
@@ -112,6 +117,11 @@ export interface WebSession {
   deliverUserMessage?(input: string | readonly ContentPart[]): Promise<'queued'>;
   /** Compact older history before the next model request. */
   requestCompaction?(): void;
+  /**
+   * Apply a decision to a plan review whose turn already ended, then start a
+   * turn so the model receives the result. Returns false when nothing is pending.
+   */
+  resumePlanReview?(decision: { requestId: string; approved: boolean; feedback?: string }): Promise<boolean>;
   contextMessageEstimate?(): number | undefined;
   contextProjection?(): {
     breakdown: { systemTokens: number; toolsTokens: number; messageTokens: number };
@@ -1147,7 +1157,7 @@ async function route(
       const agent = events === undefined ? undefined : projectAgentSelection(events);
       const activity = activities.get(item.id);
       const turn = running.get(`${workspace.path}\0${item.id}`);
-      const pending = sessionPendingKind(turn?.approval?.pendingPrompts() ?? []);
+      const pending = sessionPendingKind(turn?.approval?.pendingPrompts() ?? [], events);
       const lastTurn = events === undefined ? null : projectLastTurn(events);
       return {
         ...item,
@@ -1300,6 +1310,8 @@ async function route(
       permission: { preset: permissionProjection(handle, key, failedPermissions).preset },
       ...selection,
       plan: projectPlanMode(handle.events),
+      planReview: projectPendingPlanReview(handle.events),
+      pendingApproval: projectPendingPermission(handle.events),
       todos: projectTodos(handle.events),
       events: projectTraceEvents(handle.events),
       trajectory: projectTrajectory(handle.events),
@@ -1555,7 +1567,7 @@ async function route(
     retireSessionRuntime(sessions, options.liveSessions, running, key);
     return json(response, 200, { plan: { active } });
   }
-  if (request.method === 'POST' && parts.length === 6 && parts[5] === 'plan-review' && options.approvalBroker) {
+  if (request.method === 'POST' && parts.length === 6 && parts[5] === 'plan-review') {
     const body = await readJson(request);
     if (Object.keys(body).some((name) => name !== 'requestId' && name !== 'approved' && name !== 'feedback') ||
         typeof body.requestId !== 'string' || body.requestId.length === 0 || body.requestId.length > 256 ||
@@ -1563,11 +1575,49 @@ async function route(
         (body.feedback !== undefined && (typeof body.feedback !== 'string' || body.feedback.length > 4_000))) {
       throw new HttpError(400, 'A request ID, approval decision, and optional feedback are required');
     }
-    await openSession(options.store, workspace, sessionId);
-    if (!options.approvalBroker.respondPlan(workspace.path, sessionId, body.requestId, body.approved, body.feedback)) {
+    const handle = await openSession(options.store, workspace, sessionId);
+    if (options.approvalBroker?.respondPlan(workspace.path, sessionId, body.requestId, body.approved, body.feedback)) {
+      return json(response, 200, { ok: true, resumed: false });
+    }
+    const pending = projectPendingPlanReview(handle.events);
+    if (pending === null || pending.requestId !== body.requestId) {
       throw new HttpError(409, 'Plan review is no longer active');
     }
-    return json(response, 200, { ok: true });
+    if (running.has(key)) throw new HttpError(409, 'Session already has an active turn');
+    const session = await resumedSession(options, sessions, running, workspace, handle, key, permissionLocks, failedPermissions);
+    const resumed = await session.resumePlanReview?.({
+      requestId: body.requestId,
+      approved: body.approved,
+      ...(typeof body.feedback === 'string' ? { feedback: body.feedback } : {}),
+    });
+    if (resumed !== true) throw new HttpError(409, 'Plan review is no longer active');
+    const turn: RunningTurn = {
+      session, cancelled: false, ready: Promise.resolve(), baselineReady: Promise.resolve(),
+      startedAt: Date.now(), deliveries: new Set(), events: [], replayBytes: 0, replayOverflow: false,
+      followers: new Set(), sessionId,
+      baseline: { messages: projectPublicHistory(handle.header, handle.events), metrics: projectSessionMetrics(handle.events) },
+      publishStatus: (active) => {
+        statusHub.publish(workspace.id, { type: 'session.status', sessionId, running: active, pending: null });
+      },
+    };
+    running.set(key, turn);
+    turn.publishStatus(true);
+    const started = Date.now();
+    void (async () => {
+      while (Date.now() - started < 60_000 && turn.session?.activeTurn === true) {
+        await new Promise((resolve) => setTimeout(resolve, 200));
+      }
+      if (running.get(key) !== turn) return;
+      running.delete(key);
+      if (turn.staleRuntime === true) {
+        sessions.delete(key);
+        options.liveSessions?.delete(key);
+      }
+      turn.publishStatus(false);
+      for (const follower of turn.followers) follower.end();
+      turn.followers.clear();
+    })();
+    return json(response, 202, { ok: true, resumed: true });
   }
   if (request.method === 'GET' && parts.length === 6 && parts[5] === 'export') {
     const format = url.searchParams.get('format');
@@ -2111,6 +2161,44 @@ function publicAgentError(error: AgentError): unknown {
       ...(error.retryable === undefined ? {} : { retryable: error.retryable }),
     },
   };
+}
+
+async function resumedSession(
+  options: WebHostOptions,
+  sessions: Map<string, CachedSession>,
+  running: Map<string, RunningTurn>,
+  workspace: Workspace,
+  handle: SessionHandle,
+  key: string,
+  locks: Map<string, Promise<void>>,
+  failed: Set<string>,
+): Promise<WebSession> {
+  return withPermissionLock(locks, key, async () => {
+    const projection = permissionProjection(handle, key, failed);
+    if (projection.status !== 'ready') throw new HttpError(409, 'A permission preset must be selected');
+    const permissions = snapshotDshPermissions(projection);
+    let runtime: ResolvedSessionRuntime | undefined;
+    if (options.runtime) {
+      const agent = projectAgentSelection(handle.events);
+      const binding = projectModelSelection(handle.events);
+      if (agent.status !== 'selected' || binding.status !== 'selected') {
+        throw new HttpError(409, 'An agent and model must be selected before continuing');
+      }
+      try {
+        runtime = await options.runtime.resolve({
+          cwd: handle.header.cwd,
+          workspace: workspace.path,
+          agentId: agent.agent,
+          binding: binding.binding,
+          isRoot: true,
+          ...(modeRuntimeOverride(handle) === undefined ? {} : { mode: modeRuntimeOverride(handle) }),
+        });
+      } catch (error) {
+        throw new HttpError(409, error instanceof Error ? error.message : 'The selected agent is unavailable');
+      }
+    }
+    return getSession(options, sessions, running, workspace, handle, key, permissions, runtime);
+  });
 }
 
 function publicAgentEvent(event: AgentEvent, startedAt?: number): unknown {
