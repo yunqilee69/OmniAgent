@@ -35,6 +35,8 @@ export interface ModelDescriptor {
   capabilities: ModelCapabilities;
   reasoning?: ModelReasoning;
   protocol: ModelProtocol;
+  /** Extra attempts after a retryable provider failure. */
+  maxRetries?: number;
 }
 
 export interface RoleDefinition {
@@ -102,6 +104,7 @@ function descriptorForRouteModel(
   model: RouteModel,
   protocol: ModelProtocol,
   input: readonly string[] | undefined,
+  maxRetries?: number,
   name?: string,
 ): ModelDescriptor {
   const reasoning = modelReasoning(model, protocol);
@@ -111,6 +114,7 @@ function descriptorForRouteModel(
     name: model.name ?? name ?? model.id,
     ...(model.contextWindow === undefined ? {} : { contextWindow: model.contextWindow }),
     ...(model.maxTokens === undefined ? {} : { maxTokens: model.maxTokens }),
+    ...(maxRetries === undefined ? {} : { maxRetries }),
     capabilities: capabilitiesOf(model, input),
     ...(reasoning === undefined ? {} : { reasoning }),
     protocol,
@@ -135,7 +139,9 @@ function buildRoute(
       contextWindow: model.contextWindow,
       input: model.inputModalities,
     }));
-    return configured.map((model) => descriptorForRouteModel(provider, model, 'deepseek-messages', model.input));
+    return configured.map((model) => descriptorForRouteModel(
+      provider, model, 'deepseek-messages', model.input, route.maxRetries,
+    ));
   }
 
   const sanitized: PiAiRouteConfig = {
@@ -165,6 +171,7 @@ function buildRoute(
         name: source?.name ?? model.name,
         ...(model.contextWindow === undefined ? {} : { contextWindow: model.contextWindow }),
         ...(model.maxTokens === undefined ? {} : { maxTokens: model.maxTokens }),
+        ...(route.maxRetries === undefined ? {} : { maxRetries: route.maxRetries }),
         capabilities: { imageInput: model.input.includes('image') },
         ...(source === undefined ? {} : { ...(modelReasoning(source, 'pi-ai') === undefined ? {} : { reasoning: modelReasoning(source, 'pi-ai') }) }),
         protocol: 'pi-ai',
@@ -229,6 +236,7 @@ export function buildConfigCatalog(config: Config): ConfigCatalog {
         id: config.model,
         name: config.model,
         ...(config.contextWindowTokens === undefined ? {} : { contextWindow: config.contextWindowTokens }),
+        ...(config.provider.maxRetries === undefined ? {} : { maxRetries: config.provider.maxRetries }),
         capabilities: { imageInput: false },
         protocol: 'legacy-openai',
       }]);

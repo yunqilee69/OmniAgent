@@ -12,6 +12,7 @@ import type {
   ModelStreamDelta,
 } from '../providers/types';
 import { agentErrorFromUnknown } from '../providers/errors';
+import type { AgentError } from '../protocol/events';
 import type { ToolSpec } from '../domain/tool';
 import type { ToolRegistry } from '../tools/registry';
 import { ToolExecutor } from '../exec/executor';
@@ -55,6 +56,11 @@ export interface AgentLoopDeps {
   sessionId: string;
   /** 防止模型无限循环；到上限就停，并把原因告诉调用方。 */
   maxSteps?: number;
+  /**
+   * Extra attempts after a retryable model failure. The default is 2.
+   * A request that has already streamed text is never retried.
+   */
+  maxRetries?: number;
   contextWindowTokens?: number;
   retainContextTokens?: number;
   audit?: AuditSink;
@@ -75,6 +81,17 @@ export function projectCommandInput(messages: readonly Message[]): Message[] {
  * far above normal usage and only ends pathological loops.
  */
 export const DEFAULT_MAX_STEPS = 300;
+/** Extra attempts after the first model request fails for a retryable reason. */
+export const DEFAULT_MAX_RETRIES = 2;
+export const MAX_MODEL_RETRIES = 8;
+const RETRY_BASE_DELAY_MS = 500;
+const RETRY_MAX_DELAY_MS = 8_000;
+const RETRY_AFTER_CAP_MS = 30_000;
+
+export function clampMaxRetries(value: number | undefined): number {
+  if (value === undefined || !Number.isSafeInteger(value)) return DEFAULT_MAX_RETRIES;
+  return Math.min(MAX_MODEL_RETRIES, Math.max(0, value));
+}
 
 export class AgentLoop {
   constructor(private readonly deps: AgentLoopDeps) {}
@@ -148,12 +165,31 @@ export class AgentLoop {
         const markFirstToken = (): void => {
           if (firstTokenAt === null) firstTokenAt = performance.now();
         };
-        if (this.deps.model.stream) {
-          response = yield* this.forwardStream(this.deps.model.stream(request), markFirstToken);
-        } else {
-          response = await this.deps.model.complete(request);
+        const maxRetries = clampMaxRetries(this.deps.maxRetries);
+        let attempt = 0;
+        while (response === undefined) {
+          let streamed = false;
+          try {
+            if (this.deps.model.stream) {
+              response = yield* this.forwardStream(this.deps.model.stream(request), () => {
+                streamed = true;
+                markFirstToken();
+              });
+            } else {
+              response = await this.deps.model.complete(request);
+            }
+            if (response === undefined) throw new Error('model stream ended without a response');
+          } catch (error) {
+            if (signal?.aborted) throw error;
+            const agentError = agentErrorFromUnknown(error);
+            const canRetry = agentError.retryable === true && !streamed && attempt < maxRetries;
+            if (!canRetry) throw error;
+            attempt += 1;
+            const delayMs = retryDelayMs(attempt, agentError);
+            yield { type: 'model.retry', attempt, maxAttempts: maxRetries, delayMs, error: agentError };
+            await waitForRetry(delayMs, signal);
+          }
         }
-        if (response === undefined) throw new Error('model stream ended without a response');
 
         const requestDurationMs = performance.now() - requestStartedAt;
 
@@ -298,6 +334,36 @@ export class AgentLoop {
     }
     return next.value;
   }
+}
+
+function retryDelayMs(attempt: number, error: AgentError): number {
+  const advertised = error.retryAfterMs;
+  if (advertised !== undefined && Number.isFinite(advertised) && advertised > 0) {
+    return Math.min(RETRY_AFTER_CAP_MS, Math.floor(advertised));
+  }
+  const exponential = RETRY_BASE_DELAY_MS * (2 ** Math.max(0, attempt - 1));
+  const capped = Math.min(RETRY_MAX_DELAY_MS, exponential);
+  const jitter = Math.floor(Math.random() * Math.min(250, capped / 5));
+  return capped + jitter;
+}
+
+function waitForRetry(delayMs: number, signal?: AbortSignal): Promise<void> {
+  if (delayMs <= 0) return Promise.resolve();
+  return new Promise((resolve, reject) => {
+    const timer = setTimeout(finish, delayMs);
+    const onAbort = (): void => finish(signal?.reason ?? new Error('The operation was aborted'));
+    function finish(error?: unknown): void {
+      clearTimeout(timer);
+      signal?.removeEventListener('abort', onAbort);
+      if (error === undefined) resolve();
+      else reject(error instanceof Error ? error : new Error(String(error)));
+    }
+    if (signal?.aborted) {
+      finish(signal.reason);
+      return;
+    }
+    signal?.addEventListener('abort', onAbort, { once: true });
+  });
 }
 
 /** 被拒也是一种 observation：告诉模型为什么不行，它才有机会换个做法。 */

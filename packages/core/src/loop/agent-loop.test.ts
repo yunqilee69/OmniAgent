@@ -5,6 +5,7 @@ import { userMessage } from '../domain/message';
 import type { Tool } from '../domain/tool';
 import type { AgentEvent } from '../protocol/events';
 import type { PermissionGate } from '../protocol/permission';
+import { ProviderRequestError } from '../providers/errors';
 import { FakeModel, textResponse, toolCallResponse } from '../providers/fake';
 import { ToolRegistry } from '../tools/registry';
 import { AgentLoop } from './agent-loop';
@@ -154,6 +155,92 @@ describe('AgentLoop', () => {
     expect(messages.at(-1)).toHaveProperty('usage', { inputTokens: 0, outputTokens: 0 });
     expect(messages.at(-1)).not.toHaveProperty('contextSample');
   });
+  it('retries a retryable model failure before any text is streamed', async () => {
+    vi.useFakeTimers();
+    try {
+      let calls = 0;
+      const model = {
+        name: 'flaky',
+        async complete() {
+          calls += 1;
+          if (calls < 3) throw new ProviderRequestError('HTTP 503', { status: 503, code: 'overloaded' });
+          return textResponse('recovered');
+        },
+      };
+      const loop = new AgentLoop({
+        model, modelId: 'fake', system: '', tools: registryWithEcho(), permissions: allowAll,
+        cwd: process.cwd(), sessionId: 'test', maxRetries: 2,
+      });
+      const pending = collect(loop.run([userMessage('hello')]));
+      await vi.runAllTimersAsync();
+      const { events, messages } = await pending;
+      expect(calls).toBe(3);
+      expect(events.filter((event) => event.type === 'model.retry')).toHaveLength(2);
+      expect(events.some((event) => event.type === 'error')).toBe(false);
+      expect(messages.at(-1)).toMatchObject({ role: 'assistant', content: [{ type: 'text', text: 'recovered' }] });
+    } finally {
+      vi.useRealTimers();
+    }
+  });
+
+  it('does not retry a request that already streamed text, or a non-retryable failure', async () => {
+    const streamed = {
+      name: 'streamed',
+      async *stream() {
+        yield { type: 'text' as const, text: 'partial' };
+        throw new ProviderRequestError('HTTP 503', { status: 503 });
+      },
+    };
+    const denied = {
+      name: 'denied',
+      async complete() {
+        throw new ProviderRequestError('HTTP 401', { status: 401, code: 'auth' });
+      },
+    };
+    const streamedLoop = new AgentLoop({
+      model: streamed, modelId: 'fake', system: '', tools: registryWithEcho(), permissions: allowAll,
+      cwd: process.cwd(), sessionId: 'test', maxRetries: 3,
+    });
+    const deniedLoop = new AgentLoop({
+      model: denied, modelId: 'fake', system: '', tools: registryWithEcho(), permissions: allowAll,
+      cwd: process.cwd(), sessionId: 'test', maxRetries: 3,
+    });
+    const first = await collect(streamedLoop.run([userMessage('hello')]));
+    const second = await collect(deniedLoop.run([userMessage('hello')]));
+    expect(first.events.filter((event) => event.type === 'model.retry')).toHaveLength(0);
+    expect(first.events.at(-1)).toMatchObject({ type: 'turn.end', reason: 'error' });
+    expect(second.events.filter((event) => event.type === 'model.retry')).toHaveLength(0);
+    expect(second.events.some((event) => event.type === 'error' && event.error.status === 401)).toBe(true);
+  });
+
+  it('stops after the configured retry budget is spent', async () => {
+    vi.useFakeTimers();
+    try {
+      let calls = 0;
+      const model = {
+        name: 'down',
+        async complete() {
+          calls += 1;
+          throw new ProviderRequestError('HTTP 503', { status: 503, retryAfterMs: 5 });
+        },
+      };
+      const loop = new AgentLoop({
+        model, modelId: 'fake', system: '', tools: registryWithEcho(), permissions: allowAll,
+        cwd: process.cwd(), sessionId: 'test', maxRetries: 1,
+      });
+      const pending = collect(loop.run([userMessage('hello')]));
+      await vi.runAllTimersAsync();
+      const { events } = await pending;
+      expect(calls).toBe(2);
+      expect(events.filter((event) => event.type === 'model.retry')).toEqual([
+        expect.objectContaining({ attempt: 1, maxAttempts: 1, delayMs: 5 }),
+      ]);
+      expect(events.at(-1)).toMatchObject({ type: 'turn.end', reason: 'error' });
+    } finally {
+      vi.useRealTimers();
+    }
+  });
+
   it('把工具结果回灌给模型，然后结束', async () => {
     const model = new FakeModel([
       toolCallResponse([{ id: 'c1', name: 'echo', args: { text: 'hi' } }]),

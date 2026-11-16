@@ -23,6 +23,8 @@ export interface AgentError {
   /** HTTP status when the failure came from a provider response. */
   status?: number;
   retryable?: boolean;
+  /** Provider-requested delay before another attempt, when one was advertised. */
+  retryAfterMs?: number;
 }
 
 export type AgentEvent =
@@ -43,6 +45,11 @@ export type AgentEvent =
   | { type: 'plan.review.decided'; requestId: string; approved: boolean; feedback?: string }
   | { type: 'tool.result'; result: ToolResult }
   | { type: 'context.compacted'; beforeTokens: number; afterTokens: number }
+  /**
+   * Live-only notice that the same model request will be attempted again.
+   * The durable trace only records the final failure.
+   */
+  | { type: 'model.retry'; attempt: number; maxAttempts: number; delayMs: number; error: AgentError }
   | { type: 'turn.end'; reason: StopReason }
   | { type: 'error'; error: AgentError };
 

@@ -221,6 +221,7 @@ interface DraftSource {
   apiKeyEnv: string;
   clearApiKeyEnv: boolean;
   auth: 'ambient' | false;
+  maxRetries: string;
   models: DraftModel[];
 }
 
@@ -253,6 +254,7 @@ function draftFrom(source: ModelSourceSummary): DraftSource {
     apiKeyEnv: source.apiKeyEnv ?? '',
     clearApiKeyEnv: false,
     auth: source.auth ?? false,
+    maxRetries: source.maxRetries === undefined ? '' : String(source.maxRetries),
     models: source.models.length === 0 ? [newModel()] : source.models.map((model) => ({
       key: nextModelKey++,
       id: model.id,
@@ -285,6 +287,7 @@ function newDraft(): DraftSource {
     apiKeyEnv: '',
     clearApiKeyEnv: false,
     auth: false,
+    maxRetries: '',
     models: [newModel()],
   };
 }
@@ -320,6 +323,7 @@ function draftWrite(source: DraftSource): ModelSourceWrite {
     ...(source.apiKeyEnv.trim() === '' ? (source.clearApiKeyEnv ? { clearApiKeyEnv: true } : {})
       : { apiKeyEnv: source.apiKeyEnv.trim() }),
     ...(source.auth === false ? { auth: false } : { auth: source.auth }),
+    ...(source.maxRetries.trim() === '' ? { maxRetries: null } : { maxRetries: Number(source.maxRetries) }),
     models: source.models.map((model) => {
       const reasoning = draftReasoning(model);
       return {
@@ -342,6 +346,9 @@ function validateDraft(source: DraftSource, t: Translate, knownProviders: readon
   }
   if (source.api === 'deepseek-messages' && source.id.trim() !== 'deepseek-official') {
     return t('DeepSeek Messages is reserved for the deepseek-official source.');
+  }
+  if (source.maxRetries.trim() !== '' && !/^(?:[0-8])$/.test(source.maxRetries.trim())) {
+    return t('Retry attempts must be a whole number from 0 to 8.');
   }
   if (source.baseURL.trim() !== '') {
     try {
@@ -845,6 +852,12 @@ function SourceEditor({ source, onClose }: SourceEditorProps): ReactNode {
               <span className={css.fieldHint}>{t('Used as a fallback when no key is stored above.')}</span>
             </label>
           </div>
+          <label className={css.field}>
+            <span className={css.fieldLabel}>{t('Retry attempts')}</span>
+            <Input value={draft.maxRetries} inputMode="numeric" placeholder="2"
+              onChange={(event) => { patch({ maxRetries: event.target.value.replace(/[^\d]/g, '').slice(0, 1) }); }} />
+            <span className={css.fieldHint}>{t('How many extra attempts to make after a temporary model failure. Leave blank for the default of 2. Use 0 to fail immediately.')}</span>
+          </label>
           <section className={css.choiceGroup}>
             <div className={css.choiceHead}>
               <span className={css.fieldLabel}>{t('Models')}</span>
@@ -1004,6 +1017,7 @@ export function SettingsModels(): ReactNode {
                       {protocolLabel(source.api, t)}
                       {source.baseURL === undefined ? '' : ` · ${source.baseURL}`}
                       {` · ${t('{count} models', { count: source.models.length })}`}
+                      {source.maxRetries !== undefined ? ` · ${t('Retry attempts')} ${source.maxRetries}` : ''}
                     </span>
                     <span className={source.apiKeyConfigured ? css.sourceKeyOk : css.sourceKeyMissing}>
                       {source.auth === 'ambient' ? t('Provider-native authentication')

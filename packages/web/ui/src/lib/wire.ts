@@ -236,6 +236,7 @@ export interface ModelSourceSummary {
   apiKeyConfigured: boolean;
   apiKeyEnv?: string;
   auth?: 'ambient';
+  maxRetries?: number;
   models: ModelSourceModel[];
   builtIn: boolean;
   legacy: boolean;
@@ -276,6 +277,7 @@ export interface ModelSourceWrite {
   apiKeyEnv?: string;
   clearApiKeyEnv?: boolean;
   auth?: 'ambient' | false;
+  maxRetries?: number | null;
   models?: ModelSourceModelWrite[];
 }
 

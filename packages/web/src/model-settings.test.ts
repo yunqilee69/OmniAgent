@@ -168,6 +168,7 @@ describe('ModelSettings', () => {
     });
 
     await settings.save('custom', {
+      maxRetries: 3,
       clearApiKey: true,
       clearApiKeyEnv: true,
       models: [{ id: 'custom-model' }],
@@ -176,12 +177,16 @@ describe('ModelSettings', () => {
     const route = (config.providers as Record<string, Record<string, unknown>>).custom!;
     expect(route.displayName).toBe('Custom');
     expect(route.api).toBe('anthropic-messages');
+    expect(route.maxRetries).toBe(3);
     expect(route).not.toHaveProperty('apiKey');
     expect(route).not.toHaveProperty('apiKeyEnv');
     expect(route.baseURL).toBe('https://custom.example/v1');
     expect((await settings.list()).sources.find((source) => source.id === 'custom')).toMatchObject({
-      name: 'Custom', apiKeyConfigured: false,
+      name: 'Custom', apiKeyConfigured: false, maxRetries: 3,
     });
+    await expect(settings.save('custom', { maxRetries: 9 })).rejects.toThrow(/maxRetries/);
+    await settings.save('custom', { maxRetries: null });
+    expect((await readJSON(path)).providers).toMatchObject({ custom: expect.not.objectContaining({ maxRetries: expect.anything() }) });
   });
 
   it('clears a built-in route endpoint so its catalog endpoint applies again', async () => {

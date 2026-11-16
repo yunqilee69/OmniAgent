@@ -42,6 +42,8 @@ export interface ResolvedSessionRuntime {
   system: string;
   contextWindowTokens?: number;
   contextWindowSource?: 'config' | 'model';
+  /** Extra attempts after a retryable model failure, when the route sets one. */
+  maxRetries?: number;
   warnings: string[];
   revision: string;
 }
@@ -193,6 +195,7 @@ export class RuntimeResolver {
         contextWindowTokens,
         contextWindowSource: configSnapshot.config.contextWindowTokens === undefined ? 'model' as const : 'config' as const,
       }),
+      ...(resolvedModel.model?.maxRetries === undefined ? {} : { maxRetries: resolvedModel.model.maxRetries }),
       warnings,
       revision,
     };

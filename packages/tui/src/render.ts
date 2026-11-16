@@ -199,6 +199,14 @@ export class TuiRenderer {
         this.turnEnd(event.reason);
         break;
 
+      case 'model.retry':
+        this.stopSpinner();
+        this.endBlocks();
+        this.ensureBlankLine();
+        this.write(`${noticeLine(this.roles, 'warn', `正在重试（${event.attempt}/${event.maxAttempts}）`)}\n`);
+        this.lastBlock = 'notice';
+        break;
+
       case 'error':
         this.stopSpinner();
         this.endBlocks();

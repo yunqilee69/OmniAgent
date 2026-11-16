@@ -164,6 +164,7 @@ async function main(): Promise<void> {
       todoAllowParallelInProgress: resolved.todoAllowParallelInProgress,
       dshPermissions: permissions,
       maxSteps: config.maxSteps,
+      ...(resolved.maxRetries === undefined ? {} : { maxRetries: resolved.maxRetries }),
       ...(resolved.contextWindowTokens === undefined ? {} : { contextWindowTokens: resolved.contextWindowTokens }),
       ...(config.retainContextTokens === undefined ? {} : { retainContextTokens: config.retainContextTokens }),
       approve: interactive ? approvals.handler(workspacePath, handle.id) : async () => 'deny',

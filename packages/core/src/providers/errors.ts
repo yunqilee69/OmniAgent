@@ -1,4 +1,5 @@
 import type { AgentError } from '../protocol/events';
+import { DeepSeekMessagesError } from './dsh-messages-types';
 
 /**
  * Provider failures that are safe to describe to a user.
@@ -14,6 +15,7 @@ export interface ProviderErrorFields {
   code?: string;
   message?: string;
   retryable?: boolean;
+  retryAfterMs?: number;
 }
 
 const ERROR_TEXT_LIMIT = 500;
@@ -28,6 +30,7 @@ export class ProviderRequestError extends Error {
   readonly status?: number;
   readonly code?: string;
   readonly retryable: boolean;
+  readonly retryAfterMs?: number;
 
   constructor(message: string, fields: ProviderErrorFields = {}) {
     super(message);
@@ -35,6 +38,7 @@ export class ProviderRequestError extends Error {
     if (fields.status !== undefined) this.status = fields.status;
     if (fields.code !== undefined) this.code = fields.code;
     this.retryable = fields.retryable ?? retryableStatus(fields.status);
+    if (fields.retryAfterMs !== undefined) this.retryAfterMs = fields.retryAfterMs;
   }
 }
 
@@ -145,14 +149,40 @@ export function providerRequestError(message: string | undefined, fallback: stri
   return new ProviderRequestError(cleanText(summary, ERROR_TEXT_LIMIT), { status, code });
 }
 
+const RETRYABLE_PROVIDER_CODES = new Set([
+  'RATE_LIMIT', 'SERVER', 'TIMEOUT', 'TRANSPORT', 'EMPTY_RESPONSE', 'STREAM_CLOSED',
+]);
+
+function boundedDelay(value: number | undefined): number | undefined {
+  if (value === undefined || !Number.isFinite(value) || value <= 0) return undefined;
+  return Math.min(30_000, Math.floor(value));
+}
+
+function deepSeekRetryable(error: DeepSeekMessagesError): boolean {
+  if (RETRYABLE_PROVIDER_CODES.has(error.code)) return true;
+  return retryableStatus(error.status);
+}
+
 /** Map any thrown value to the public error contract. */
 export function agentErrorFromUnknown(error: unknown, fallback = 'Unknown error'): AgentError {
   if (error instanceof ProviderRequestError) {
+    const retryAfterMs = boundedDelay(error.retryAfterMs);
     return {
       message: error.message,
       ...(error.code === undefined ? {} : { code: error.code }),
       ...(error.status === undefined ? {} : { status: error.status }),
       retryable: error.retryable,
+      ...(retryAfterMs === undefined ? {} : { retryAfterMs }),
+    };
+  }
+  if (error instanceof DeepSeekMessagesError) {
+    const retryAfterMs = boundedDelay(error.retryAfterMs);
+    return {
+      message: cleanText(error.message, ERROR_TEXT_LIMIT),
+      code: error.code,
+      ...(error.status === undefined ? {} : { status: error.status }),
+      retryable: deepSeekRetryable(error),
+      ...(retryAfterMs === undefined ? {} : { retryAfterMs }),
     };
   }
   const message = error instanceof Error ? error.message : String(error);

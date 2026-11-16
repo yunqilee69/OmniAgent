@@ -45,6 +45,19 @@ export interface MessageUsage {
   outputTokens: number;
 }
 
+/** A model failure that belongs to this assistant reply, not a separate notice. */
+export interface AssistantFailure {
+  message: string;
+  code?: string;
+  status?: number;
+}
+
+/** A retry that is still waiting before the same model request runs again. */
+export interface AssistantRetry {
+  attempt: number;
+  maxAttempts: number;
+}
+
 export interface AssistantItem {
   kind: 'assistant';
   id: string;
@@ -53,6 +66,8 @@ export interface AssistantItem {
   timestamp?: number;
   streaming: boolean;
   usage?: MessageUsage;
+  error?: AssistantFailure;
+  retry?: AssistantRetry;
 }
 
 /**
@@ -155,6 +170,42 @@ export interface LiveTurnState {
 
 export function createLiveState(): LiveTurnState {
   return { transcript: [], turns: [], streamText: '', streamReasoning: '' };
+}
+
+function assistantFailure(value: unknown): AssistantFailure {
+  const error = typeof value === 'object' && value !== null ? value as { message?: unknown; code?: unknown; status?: unknown } : {};
+  const message = typeof error.message === 'string' && error.message.trim() !== ''
+    ? error.message : 'The agent reported an error.';
+  const code = typeof error.code === 'string' && /^[A-Za-z0-9][A-Za-z0-9_.:-]{0,63}$/.test(error.code)
+    ? error.code : undefined;
+  const status = typeof error.status === 'number' && Number.isInteger(error.status) && error.status >= 100 && error.status <= 599
+    ? error.status : undefined;
+  return { message, ...(code === undefined ? {} : { code }), ...(status === undefined ? {} : { status }) };
+}
+
+function assistantRetry(value: Record<string, unknown>): AssistantRetry | undefined {
+  const attempt = value.attempt;
+  const maxAttempts = value.maxAttempts;
+  if (typeof attempt !== 'number' || !Number.isSafeInteger(attempt) || attempt < 1) return undefined;
+  if (typeof maxAttempts !== 'number' || !Number.isSafeInteger(maxAttempts) || maxAttempts < attempt) return undefined;
+  return { attempt, maxAttempts };
+}
+
+/** The reply that is still open, or a new empty one when the failure arrived first. */
+function ensureAssistant(turn: LiveTurnState, now: number): AssistantItem {
+  const meta = currentTurn(turn);
+  if (turn.streamAssistantId !== undefined) {
+    const streaming = turn.transcript.find((candidate) => candidate.id === turn.streamAssistantId);
+    if (streaming?.kind === 'assistant' && streaming.turn === meta.index) return streaming;
+  }
+  for (let index = turn.transcript.length - 1; index >= 0; index -= 1) {
+    const item = turn.transcript[index];
+    if (item?.kind === 'user') break;
+    if (item?.kind === 'assistant' && item.turn === meta.index) return item;
+  }
+  return appendItem(turn, {
+    kind: 'assistant', id: itemId('assistant'), turn: meta.index, text: '', timestamp: now, streaming: false,
+  });
 }
 
 function currentTurn(turn: LiveTurnState): TurnMeta {
@@ -373,6 +424,8 @@ export function applyAgentEvent(turn: LiveTurnState, event: AgentEvent | Record<
       if (assistant !== undefined) {
         assistant.text = text;
         assistant.streaming = false;
+        assistant.retry = undefined;
+        assistant.error = undefined;
         const usage = messageUsage(message?.usage);
         if (usage !== undefined) assistant.usage = usage;
       }
@@ -443,7 +496,11 @@ export function applyAgentEvent(turn: LiveTurnState, event: AgentEvent | Record<
       return;
     }
     case 'plan.review.decided': {
-      if (turn.planReview?.requestId === data.requestId) turn.planReview = undefined;
+      // A resumed turn publishes the decision after the original prompt is gone,
+      // so its request id (a fresh uuid) does not match the id restored from the
+      // unanswered tool call. Either way the review on screen is the one just
+      // settled: a second review cannot be waiting at the same time.
+      turn.planReview = undefined;
       return;
     }
     case 'tool.result': {
@@ -473,15 +530,25 @@ export function applyAgentEvent(turn: LiveTurnState, event: AgentEvent | Record<
       });
       return;
     }
+    case 'model.retry': {
+      const retry = assistantRetry(data);
+      if (retry === undefined) return;
+      const assistant = ensureAssistant(turn, now);
+      assistant.retry = retry;
+      assistant.error = undefined;
+      assistant.streaming = false;
+      return;
+    }
     case 'error': {
-      const error = typeof data.error === 'object' && data.error !== null
-        ? data.error as { message?: unknown }
-        : {};
-      const text = typeof error.message === 'string' ? error.message : 'The agent reported an error.';
+      const failure = assistantFailure(data.error);
+      const text = failure.message;
       turn.error = text;
       turn.approval = undefined;
       turn.planReview = undefined;
-      appendItem(turn, { kind: 'notice', id: itemId('notice'), turn: currentTurn(turn).index, tone: 'error', text });
+      const assistant = ensureAssistant(turn, now);
+      assistant.error = failure;
+      assistant.retry = undefined;
+      assistant.streaming = false;
       return;
     }
     case 'turn.end': {
@@ -622,6 +689,8 @@ export function pendingPlanText(call: ToolCall, result: ToolResult | undefined):
  * decision has to answer. Otherwise the latest unanswered `exit_plan_mode` call
  * stands in while its turn is still running. A call that already has a result is
  * not waiting, and an earlier call is stale once a later plan was submitted.
+ * A later user message supersedes it too: the user moved on (for example by
+ * saying "continue"), so reopening the session must not ask for that review again.
  */
 export function pendingPlanReview(
   transcript: readonly TranscriptItem[],
@@ -633,12 +702,32 @@ export function pendingPlanReview(
   }
   for (let index = transcript.length - 1; index >= 0; index -= 1) {
     const item = transcript[index];
-    if (item === undefined || item.kind !== 'tool' || item.call.name !== 'exit_plan_mode') continue;
+    if (item === undefined) continue;
+    if (item.kind === 'user') return undefined;
+    if (item.kind !== 'tool' || item.call.name !== 'exit_plan_mode') continue;
     const plan = pendingPlanText(item.call, item.result);
     if (plan === undefined) return undefined;
     return { requestId: `restored:${item.call.id}`, plan, pending: false, error: '', feedback: '' };
   }
   return undefined;
+}
+
+function assistantFailureForTurn(events: readonly unknown[], replyIndex: number): AssistantFailure | undefined {
+  const spans = replySpans(events);
+  const span = spans[replyIndex];
+  if (span === undefined) return undefined;
+  let latest: AssistantFailure | undefined;
+  for (const event of events) {
+    if (typeof event !== 'object' || event === null) continue;
+    const record = event as { type?: unknown; data?: unknown };
+    if (record.type !== 'trace/error') continue;
+    const timestamp = eventTimestamp(event);
+    if (timestamp !== undefined && span.startedAt !== undefined && timestamp < span.startedAt) continue;
+    if (timestamp !== undefined && span.endedAt !== undefined && timestamp > span.endedAt) continue;
+    const data = typeof record.data === 'object' && record.data !== null ? record.data : undefined;
+    latest = assistantFailure(data);
+  }
+  return latest;
 }
 
 export function hydrateTranscript(messages: readonly PublicMessage[], events: readonly unknown[] = []): {
@@ -674,8 +763,15 @@ export function hydrateTranscript(messages: readonly PublicMessage[], events: re
       if (!started) startTurn();
       const text = message.content === undefined ? '' : messageText(message);
       const usage = messageUsage(message.usage);
-      if (text !== '') {
-        transcript.push({ kind: 'assistant', id: itemId('assistant'), turn: turnIndex, text, streaming: false, ...(typeof message.timestamp === 'number' && Number.isFinite(message.timestamp) ? { timestamp: message.timestamp } : {}), ...(usage === undefined ? {} : { usage }) });
+      const calls = message.toolCalls ?? [];
+      const failure = calls.length === 0 ? assistantFailureForTurn(events, turnIndex) : undefined;
+      if (text !== '' || failure !== undefined) {
+        transcript.push({
+          kind: 'assistant', id: itemId('assistant'), turn: turnIndex, text, streaming: false,
+          ...(typeof message.timestamp === 'number' && Number.isFinite(message.timestamp) ? { timestamp: message.timestamp } : {}),
+          ...(usage === undefined ? {} : { usage }),
+          ...(failure === undefined ? {} : { error: failure }),
+        });
       }
       for (const call of message.toolCalls ?? []) {
         if (findToolIn(transcript, call.id) === undefined) {
@@ -774,7 +870,7 @@ export function groupTurns(transcript: readonly TranscriptItem[], turns: readonl
     let final: AssistantItem | undefined;
     for (let cursor = items.length - 1; cursor >= 0; cursor -= 1) {
       const item = items[cursor];
-      if (item?.kind === 'assistant' && item.text.trim() !== '') {
+      if (item?.kind === 'assistant' && (item.text.trim() !== '' || item.error !== undefined || item.retry !== undefined)) {
         const hasLaterTool = items.slice(cursor + 1).some((later) => later.kind === 'tool');
         if (!hasLaterTool) final = item;
         break;
@@ -791,7 +887,7 @@ export function groupTurns(transcript: readonly TranscriptItem[], turns: readonl
         continue;
       }
       if (item.kind === 'tool') toolCount += 1;
-      if (item.kind === 'assistant' && item.text.trim() === '') continue;
+      if (item.kind === 'assistant' && item.text.trim() === '' && item.error === undefined && item.retry === undefined) continue;
       process.push(item);
     }
     const user = items.find((item): item is UserItem => item.kind === 'user');

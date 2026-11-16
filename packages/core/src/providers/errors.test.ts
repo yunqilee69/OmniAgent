@@ -1,4 +1,5 @@
 import { describe, expect, it } from 'vitest';
+import { DeepSeekMessagesError } from './dsh-messages-types';
 import { ProviderRequestError, agentErrorFromUnknown, providerRequestError } from './errors';
 
 const gatewayBody = JSON.stringify({
@@ -74,5 +75,20 @@ describe('provider request errors', () => {
       retryable: true,
     });
     expect(agentErrorFromUnknown(new Error('private-token'))).toEqual({ message: 'private-token' });
+  });
+
+  it('marks transient DeepSeek failures retryable and keeps the advertised delay', () => {
+    expect(agentErrorFromUnknown(new DeepSeekMessagesError(
+      'DeepSeek Messages rate limited', 'RATE_LIMIT', { status: 429, retryAfterMs: 3000 },
+    ))).toEqual({
+      message: 'DeepSeek Messages rate limited',
+      code: 'RATE_LIMIT',
+      status: 429,
+      retryable: true,
+      retryAfterMs: 3000,
+    });
+    expect(agentErrorFromUnknown(new DeepSeekMessagesError(
+      'DeepSeek Messages authentication failed', 'AUTH', { status: 401 },
+    )).retryable).toBe(false);
   });
 });

@@ -7,6 +7,7 @@ import {
   applyAgentEvent,
   createLiveState,
   createSSEParser,
+  groupTurns,
   hydrateTranscript,
   pendingPlanReview,
   pendingPlanText,
@@ -151,9 +152,44 @@ describe('web client protocol', () => {
     });
     expect(turn.error).toBe('HTTP 503 · all_backends_unavailable: no available backends');
     expect(turn.transcript.at(-1)).toMatchObject({
-      kind: 'notice',
-      tone: 'error',
-      text: 'HTTP 503 · all_backends_unavailable: no available backends',
+      kind: 'assistant',
+      text: '',
+      error: {
+        message: 'HTTP 503 · all_backends_unavailable: no available backends',
+        code: 'all_backends_unavailable',
+        status: 503,
+      },
+    });
+    const grouped = groupTurns(turn.transcript, turn.turns, false);
+    expect(grouped.at(-1)?.final?.error?.status).toBe(503);
+  });
+
+  it('shows a retry on the assistant reply and clears it when the reply succeeds', () => {
+    const turn = createLiveState();
+    applyAgentEvent(turn, { type: 'turn.start', step: 0 });
+    applyAgentEvent(turn, {
+      type: 'model.retry', attempt: 1, maxAttempts: 2, delayMs: 500,
+      error: { message: 'HTTP 503', status: 503, retryable: true },
+    });
+    expect(turn.transcript.at(-1)).toMatchObject({ kind: 'assistant', retry: { attempt: 1, maxAttempts: 2 } });
+    applyAgentEvent(turn, {
+      type: 'assistant.message',
+      message: { role: 'assistant', content: [{ type: 'text', text: 'Recovered' }], toolCalls: [] },
+    });
+    expect(turn.transcript.at(-1)).toMatchObject({ kind: 'assistant', text: 'Recovered', retry: undefined, error: undefined });
+  });
+
+  it('restores a persisted model failure onto the assistant reply', () => {
+    const { transcript } = hydrateTranscript([
+      { role: 'user', content: [{ type: 'text', text: 'hello' }] },
+      { role: 'assistant', content: [], toolCalls: [] },
+    ], [
+      { type: 'trace/turn.start', ts: 1_000, data: { step: 0 } },
+      { type: 'trace/error', ts: 1_500, data: { message: 'HTTP 503 · overloaded', code: 'overloaded', status: 503 } },
+      { type: 'trace/turn.end', ts: 1_600, data: { reason: 'error' } },
+    ]);
+    expect(transcript.find((item) => item.kind === 'assistant')).toMatchObject({
+      error: { message: 'HTTP 503 · overloaded', code: 'overloaded', status: 503 },
     });
   });
   it('renders accessible copy controls and valid message times', () => {
@@ -438,6 +474,12 @@ describe('web client protocol', () => {
       { role: 'assistant', content: [], toolCalls: [{ id: 'newer', name: 'exit_plan_mode', arguments: { plan } }] },
     ]);
     expect(pendingPlanReview(replaced.transcript)?.requestId).toBe('restored:newer');
+    const continued = hydrateTranscript([
+      { role: 'assistant', content: [], toolCalls: [{ id: 'exit', name: 'exit_plan_mode', arguments: { plan } }] },
+      { role: 'user', content: [{ type: 'text', text: '继续' }] },
+      { role: 'assistant', content: [{ type: 'text', text: '计划已定，开始实现。' }] },
+    ]);
+    expect(pendingPlanReview(continued.transcript)).toBeUndefined();
     expect(pendingPlanText({ id: 'x', name: 'exit_plan_mode', arguments: {} }, undefined)).toBeUndefined();
     expect(pendingPlanText({ id: 'x', name: 'read_file', arguments: { plan } }, undefined)).toBeUndefined();
   });
@@ -549,6 +591,15 @@ describe('web client protocol', () => {
     expect(turn.planReview).toMatchObject({ requestId: 'plan-1' });
     applyAgentEvent(turn, { type: 'turn.end', reason: 'end_turn' });
     expect(turn.approval).toBeUndefined();
+    expect(turn.planReview).toBeUndefined();
+  });
+
+  it('clears a restored plan review when the resumed turn reports the decision', () => {
+    const turn = createLiveState();
+    turn.planReview = {
+      requestId: 'restored:exit', plan: '# Plan\n\nDo it.', pending: false, error: '', feedback: '',
+    };
+    applyAgentEvent(turn, { type: 'plan.review.decided', requestId: 'review-1', approved: true });
     expect(turn.planReview).toBeUndefined();
   });
 });

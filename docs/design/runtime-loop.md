@@ -67,6 +67,8 @@ Agent 的本质是一个很小的循环：
 
 7. 模型异常
    ├─ signal 已中断 → turn.end(interrupted)
+   ├─ retryable 且尚未流出文本，且未用完 maxRetries（默认 2，最多 8）
+   │    → yield model.retry，等待退避后重试同一请求
    └─ 其他 → yield error，再 yield turn.end(error)
 
 8. messages.push(assistant)

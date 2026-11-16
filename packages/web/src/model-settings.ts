@@ -54,6 +54,8 @@ export interface ModelSourceSummary {
   apiKeyConfigured: boolean;
   apiKeyEnv?: string;
   auth?: 'ambient';
+  /** Extra attempts after a retryable model failure. Absent means the default of 2. */
+  maxRetries?: number;
   models: ModelSourceModel[];
   builtIn: boolean;
   legacy: boolean;
@@ -94,6 +96,7 @@ export interface ModelSourceWrite {
   apiKeyEnv?: string;
   clearApiKeyEnv?: boolean;
   auth?: 'ambient' | false;
+  maxRetries?: number | null;
   models?: ModelSourceModelWrite[];
 }
 
@@ -230,7 +233,7 @@ function parseWrite(input: unknown): ModelSourceWrite {
   if (!isObject(input)) throw new InvalidModelSettings('model source must be an object');
   const allowed = new Set([
     'name', 'api', 'baseURL', 'clearBaseURL', 'apiKey', 'clearApiKey',
-    'apiKeyEnv', 'clearApiKeyEnv', 'auth', 'models',
+    'apiKeyEnv', 'clearApiKeyEnv', 'auth', 'maxRetries', 'models',
   ]);
   const unknown = Object.keys(input).find((key) => !allowed.has(key));
   if (unknown !== undefined) throw new InvalidModelSettings(`unknown model source field "${unknown}"`);
@@ -282,8 +285,18 @@ function parseWrite(input: unknown): ModelSourceWrite {
     ...(apiKeyEnv === undefined ? {} : { apiKeyEnv }),
     ...(input.clearApiKeyEnv === true ? { clearApiKeyEnv: true } : {}),
     ...(input.auth === false || input.auth === 'ambient' ? { auth: input.auth } : {}),
+    ...(parseMaxRetries(input.maxRetries) === undefined ? {} : { maxRetries: parseMaxRetries(input.maxRetries)! }),
     ...(models === undefined ? {} : { models }),
   };
+}
+
+function parseMaxRetries(value: unknown): number | null | undefined {
+  if (value === undefined) return undefined;
+  if (value === null) return null;
+  if (typeof value !== 'number' || !Number.isInteger(value) || value < 0 || value > 8) {
+    throw new InvalidModelSettings('maxRetries must be an integer from 0 to 8');
+  }
+  return value;
 }
 
 function isBuiltIn(provider: string): boolean {
@@ -429,6 +442,7 @@ function sourceSummary(
     apiKeyConfigured: apiKey !== '' || (envKey !== undefined && envKey !== '') || auth !== undefined,
     ...(apiKeyEnv === undefined ? {} : { apiKeyEnv }),
     ...(auth === undefined ? {} : { auth }),
+    ...(typeof rawRoute.maxRetries === 'number' ? { maxRetries: rawRoute.maxRetries } : {}),
     models,
     builtIn,
     legacy,
@@ -517,6 +531,8 @@ function buildRoute(
   else if (write.apiKeyEnv !== undefined) route.apiKeyEnv = write.apiKeyEnv;
   if (write.auth === false) delete route.auth;
   else if (write.auth === 'ambient') route.auth = 'ambient';
+  if (write.maxRetries === null) delete route.maxRetries;
+  else if (write.maxRetries !== undefined) route.maxRetries = write.maxRetries;
   if (write.models !== undefined) {
     const existingModels = Array.isArray(existing.models) ? existing.models.filter(isObject) : [];
     route.models = write.models.map((model) => mergeModel(
