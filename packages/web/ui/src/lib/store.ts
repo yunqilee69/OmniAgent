@@ -2458,7 +2458,10 @@ export class AppStore {
           return type === 'plan.review.decided' || type === 'turn.end' || type === 'turn.interrupted';
         });
         if (reviewSettled) {
-          if (run.planReview?.requestId.startsWith('restored:') === true) run.planReview = undefined;
+          // A resumed turn's snapshot opens with the decision and never repeats
+          // the prompt, so any review still on screen — restored or live — is
+          // the one that was just answered.
+          run.planReview = undefined;
         } else if (run.planReview === undefined && restoredReview !== undefined) {
           run.planReview = restoredReview;
         }

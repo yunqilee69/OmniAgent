@@ -1907,6 +1907,63 @@ describe('workspace web host', () => {
     }))).status).toBe(409);
   });
 
+  it('tells a follower the review is decided when resuming a plan that already finished waiting', async () => {
+    const plan = '# Plan\n\n1. Inspect.\n2. Implement.';
+    const { base, first, store } = await setup(
+      (id, permissions, workspace, handle) => new Session({
+        cwd: workspace.path,
+        dshPermissions: permissions,
+        session: handle,
+        model: new FakeModel([textResponse('implemented')], { onExhausted: textResponse('done') }),
+        approve: async () => 'deny',
+        reviewPlan: async () => ({ approved: true }),
+      }),
+    );
+    const url = sessionsUrl(base, first.id);
+    const { session } = await jsonResponse<{ session: { id: string } }>(await fetch(url, jsonRequest({})));
+    const handle = await store.open(first.path, session.id);
+    await handle.append({ type: 'plan/mode', data: { active: true } });
+    await handle.append({
+      type: 'message/assistant',
+      data: { role: 'assistant', content: [], toolCalls: [{ id: 'exit', name: 'exit_plan_mode', arguments: { plan } }] },
+    });
+    await handle.append({ type: 'plan/review.pending', data: { requestId: 'review-1', callId: 'exit', plan } });
+    await handle.append({ type: 'trace/turn.end', data: { reason: 'interrupted' } });
+
+    const decided = await fetch(`${url}/${session.id}/plan-review`, jsonRequest({ requestId: 'review-1', approved: true }));
+    expect(decided.status).toBe(202);
+    const follow = await fetch(`${url}/${session.id}/follow`);
+    expect(follow.status).toBe(200);
+    const reader = follow.body!.getReader();
+    const decoder = new TextDecoder();
+    let buffer = '';
+    const events: Array<Record<string, unknown>> = [];
+    const read = (): boolean => {
+      let progressed = false;
+      for (;;) {
+        const end = buffer.indexOf('\n\n');
+        if (end < 0) break;
+        const frame = buffer.slice(0, end);
+        buffer = buffer.slice(end + 2);
+        if (frame.startsWith('data: ')) events.push(JSON.parse(frame.slice(6)) as Record<string, unknown>);
+        progressed = true;
+      }
+      return progressed;
+    };
+    while (!events.some((event) => event.type === 'turn.end')) {
+      const part = await reader.read();
+      if (part.done) break;
+      buffer += decoder.decode(part.value, { stream: true });
+      read();
+    }
+    reader.releaseLock();
+    const snapshot = events.find((event) => event.type === 'run.snapshot');
+    expect(snapshot?.events).toContainEqual(expect.objectContaining({
+      type: 'plan.review.decided', requestId: 'review-1', approved: true,
+    }));
+    expect(events.at(-1)).toEqual({ type: 'turn.end', reason: 'end_turn' });
+  });
+
   it('unregisters a workspace without deleting its stored sessions', async () => {
     const { base, first, store } = await setup();
     await store.create({ id: 'keep', workspace: first.path, cwd: first.path });

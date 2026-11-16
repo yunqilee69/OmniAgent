@@ -120,6 +120,8 @@ export interface SessionOptions {
    */
   reviewPlan?: (plan: string, signal: AbortSignal, requestId?: string) => Promise<PlanReviewResponse>;
   maxSteps?: number;
+  /** Extra attempts after a retryable model failure. Defaults to 2. */
+  maxRetries?: number;
   contextWindowTokens?: number;
   retainContextTokens?: number;
   sessionId?: string;
@@ -146,6 +148,11 @@ export interface SessionOptions {
   mcpTools?: readonly Tool[];
   /** Called for events produced by turns started outside a UI send() call. */
   onBackgroundEvent?: (event: AgentEvent) => void;
+}
+
+/** Observe background-turn events without replacing the listener the host set. */
+export interface BackgroundEventSource {
+  addBackgroundListener(listener: (event: AgentEvent) => void): () => void;
 }
 
 interface GoalRoundContext {
@@ -182,6 +189,7 @@ export class Session {
   private readonly subagents?: SubagentService;
   private readonly reviewPlanHandler?: SessionOptions['reviewPlan'];
   private readonly onBackgroundEvent?: SessionOptions['onBackgroundEvent'];
+  private readonly backgroundListeners = new Set<(event: AgentEvent) => void>();
   private readonly titleOptions?: SessionTitleOptions;
   private readonly titleLimits: SessionTitleLimits;
   private readonly titleLlm?: Required<SessionTitleLlmOptions>;
@@ -351,6 +359,7 @@ export class Session {
       cwd,
       sessionId: this.id,
       maxSteps: options.maxSteps ?? DEFAULT_MAX_STEPS,
+      ...(options.maxRetries === undefined ? {} : { maxRetries: options.maxRetries }),
       ...(options.contextWindowTokens === undefined ? {} : { contextWindowTokens: options.contextWindowTokens }),
       ...(options.retainContextTokens === undefined ? {} : { retainContextTokens: options.retainContextTokens }),
       ...(options.audit ? { audit: options.audit } : {}),
@@ -452,6 +461,20 @@ export class Session {
 
   get activeTurn(): boolean {
     return this.controller !== undefined || this.executing;
+  }
+
+  /**
+   * Receive events from turns this session starts on its own, such as the turn
+   * that carries out an approved plan. The returned function removes the listener.
+   */
+  addBackgroundListener(listener: (event: AgentEvent) => void): () => void {
+    this.backgroundListeners.add(listener);
+    return () => { this.backgroundListeners.delete(listener); };
+  }
+
+  private emitBackground(event: AgentEvent): void {
+    this.onBackgroundEvent?.(event);
+    for (const listener of this.backgroundListeners) listener(event);
   }
 
   /** Whether the current model turn was started by a direct top-level human message. */
@@ -787,7 +810,7 @@ export class Session {
           const event: AgentEvent = { type: 'turn.end', reason: 'interrupted' };
           await this.appendTrace(event);
           terminal = true;
-          if (background) this.onBackgroundEvent?.(event);
+          if (background) this.emitBackground(event);
           yield event;
           return 'interrupted';
         }
@@ -826,7 +849,7 @@ export class Session {
           recordedError = true;
           failed = true;
         }
-        if (background) this.onBackgroundEvent?.(event);
+        if (background) this.emitBackground(event);
         yield event;
       }
     } catch (error) {
@@ -835,7 +858,7 @@ export class Session {
           const event: AgentEvent = { type: 'turn.end', reason: 'interrupted' };
           await this.appendTrace(event);
           terminal = true;
-          if (background) this.onBackgroundEvent?.(event);
+          if (background) this.emitBackground(event);
           yield event;
         }
         return 'interrupted';

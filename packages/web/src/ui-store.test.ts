@@ -463,6 +463,32 @@ describe('independent run observation', () => {
     store.dispose();
     controller.close();
   });
+
+  it('drops the review once a resumed turn snapshot already carries the decision', async () => {
+    const plan = '# 重试计划\n\n按配置重试。';
+    let controller!: ReadableStreamDefaultController<Uint8Array>;
+    const store = await boot(sessionFetcher((url) => {
+      if (url === '/api/workspaces/a/sessions/shared/follow') {
+        return new Response(new ReadableStream<Uint8Array>({ start(value) { controller = value; } }));
+      }
+      if (url === '/api/workspaces/a/sessions/shared') {
+        return json(detail({
+          running: true,
+          messages: [
+            { role: 'assistant', content: [], toolCalls: [{ id: 'exit', name: 'exit_plan_mode', arguments: { plan } }] },
+          ],
+        }));
+      }
+      return undefined;
+    }));
+    await waitFor(() => store.currentEntry()?.run?.planReview?.requestId === 'restored:exit');
+    controller.enqueue(new TextEncoder().encode(
+      `data: ${JSON.stringify({ type: 'run.snapshot', events: [{ type: 'plan.review.decided', requestId: 'review-1', approved: true }] })}\n\n`,
+    ));
+    await waitFor(() => store.currentEntry()?.run?.planReview === undefined);
+    store.dispose();
+    controller.close();
+  });
 });
 
 describe('workspace session isolation', () => {

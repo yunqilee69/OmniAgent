@@ -122,6 +122,8 @@ export interface WebSession {
    * turn so the model receives the result. Returns false when nothing is pending.
    */
   resumePlanReview?(decision: { requestId: string; approved: boolean; feedback?: string }): Promise<boolean>;
+  /** Observe the turn a resumed review starts after its own request has returned. */
+  addBackgroundListener?(listener: (event: AgentEvent) => void): () => void;
   contextMessageEstimate?(): number | undefined;
   contextProjection?(): {
     breakdown: { systemTokens: number; toolsTokens: number; messageTokens: number };
@@ -1591,6 +1593,7 @@ async function route(
       ...(typeof body.feedback === 'string' ? { feedback: body.feedback } : {}),
     });
     if (resumed !== true) throw new HttpError(409, 'Plan review is no longer active');
+    const feedback = typeof body.feedback === 'string' ? body.feedback.trim().slice(0, 4_000) : '';
     const turn: RunningTurn = {
       session, cancelled: false, ready: Promise.resolve(), baselineReady: Promise.resolve(),
       startedAt: Date.now(), deliveries: new Set(), events: [], replayBytes: 0, replayOverflow: false,
@@ -1601,12 +1604,26 @@ async function route(
       },
     };
     running.set(key, turn);
+    // The resumed turn starts after the review is already decided. A follower
+    // never sees the live decision event, so publish it here or the composer
+    // keeps waiting after the work has finished.
+    publishTurnEvent(turn, {
+      type: 'plan.review.decided',
+      requestId: body.requestId,
+      approved: body.approved,
+      ...(feedback === '' ? {} : { feedback }),
+    });
     turn.publishStatus(true);
+    const stopListening = session.addBackgroundListener?.((event) => {
+      if (running.get(key) !== turn) return;
+      publishTurnEvent(turn, publicAgentEvent(event, turn.startedAt));
+    });
     const started = Date.now();
     void (async () => {
       while (Date.now() - started < 60_000 && turn.session?.activeTurn === true) {
         await new Promise((resolve) => setTimeout(resolve, 200));
       }
+      stopListening?.();
       if (running.get(key) !== turn) return;
       running.delete(key);
       if (turn.staleRuntime === true) {
@@ -2204,6 +2221,7 @@ async function resumedSession(
 function publicAgentEvent(event: AgentEvent, startedAt?: number): unknown {
   if (event.type === 'turn.start' && startedAt !== undefined) return { ...event, startedAt };
   if (event.type === 'error') return publicAgentError(event.error);
+  if (event.type === 'model.retry') return { ...event, error: (publicAgentError(event.error) as { error: unknown }).error };
   if (event.type === 'assistant.message') {
     return { ...event, message: safePublicMessages([event.message])[0] };
   }
