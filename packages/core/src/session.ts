@@ -41,6 +41,13 @@ import { createDshShellTool } from './tools/builtin/dsh-shell';
 import { createTodoWriteTool } from './tools/builtin/todo-write';
 import { createExitPlanModeTool, EXIT_PLAN_MODE_TOOL_NAME } from './tools/builtin/exit-plan-mode';
 import type { PlanReviewResponse } from './tools/builtin/exit-plan-mode';
+import {
+  ASK_USER_DEFAULT_TIMEOUT_SEC,
+  ASK_USER_TOOL_NAME,
+  createAskUserTool,
+  renderLateAskUserAnswer,
+} from './tools/builtin/ask-user';
+import type { AskUserAnswerItem, AskUserQuestion, AskUserToolResult } from './tools/builtin/ask-user';
 import { createSubagentTools, SUBAGENT_TOOL_NAME } from './tools/builtin/subagent';
 import { createGoalTools, CREATE_GOAL_TOOL_NAME, GET_GOAL_TOOL_NAME, UPDATE_GOAL_TOOL_NAME } from './tools/builtin/goal';
 import { createScheduleTools, renderScheduleToolGuidance, SCHEDULE_TOOL_GROUP } from './schedule/tools';
@@ -68,6 +75,13 @@ import {
   PLAN_MODE_GUIDANCE,
   projectPlanMode,
 } from './session/plan';
+import {
+  answersForPendingAskUser,
+  createAskUserContinuedEvent,
+  createAskUserDecisionEvent,
+  createAskUserPendingEvent,
+  projectPendingAskUser,
+} from './session/ask-user';
 import { ToolExecutor } from './exec/executor';
 import { DSH_PRESET_BUNDLES, isDshPermissionPreset, snapshotDshPermissions } from './permissions/dsh-permissions';
 import type { DshPermissionSnapshot, DshSandboxMode } from './permissions/dsh-permissions';
@@ -119,6 +133,18 @@ export interface SessionOptions {
    * the session has one; the prompt must reuse it so a later decision matches.
    */
   reviewPlan?: (plan: string, signal: AbortSignal, requestId?: string) => Promise<PlanReviewResponse>;
+  /**
+   * UI 提供：向用户提问并等待回答。
+   * 时限到达时返回 pending，而不是伪造答案。requestId 复用已持久化的 id。
+   * timeoutSec 为 -1 时一直等到回答或取消。
+   */
+  askUser?: (
+    questions: readonly AskUserQuestion[],
+    signal: AbortSignal,
+    request: { requestId?: string; timeoutSec: number },
+  ) => Promise<AskUserToolResult>;
+  /** Foreground wait used when a call omits timeout_sec. Defaults to five minutes. */
+  askUserTimeoutSec?: number;
   maxSteps?: number;
   /** Extra attempts after a retryable model failure. Defaults to 2. */
   maxRetries?: number;
@@ -188,6 +214,8 @@ export class Session {
   private readonly modelCapabilities?: ModelCapabilities;
   private readonly subagents?: SubagentService;
   private readonly reviewPlanHandler?: SessionOptions['reviewPlan'];
+  private readonly askUserHandler?: SessionOptions['askUser'];
+  private readonly askUserTimeoutSec: number;
   private readonly onBackgroundEvent?: SessionOptions['onBackgroundEvent'];
   private readonly backgroundListeners = new Set<(event: AgentEvent) => void>();
   private readonly titleOptions?: SessionTitleOptions;
@@ -208,6 +236,8 @@ export class Session {
   private readonly pendingPermissions = new Map<string, { requestId: string; callId: string; name: string; reason: string }>();
   /** Request id reserved for the plan review the current turn is presenting. */
   private pendingPlanReview?: { requestId: string; callId: string };
+  /** Request id reserved for the question the current turn is asking. */
+  private pendingAskUser?: { requestId: string; callId: string };
   private turnSource: 'human' | 'goal' | 'external' | 'notice' | 'system' = 'system';
   private currentGoalRound?: GoalRoundContext;
 
@@ -223,6 +253,8 @@ export class Session {
     this.modelCapabilities = options.modelCapabilities;
     this.subagents = options.subagents;
     this.reviewPlanHandler = options.reviewPlan;
+    this.askUserHandler = options.askUser;
+    this.askUserTimeoutSec = options.askUserTimeoutSec ?? ASK_USER_DEFAULT_TIMEOUT_SEC;
     this.onBackgroundEvent = options.onBackgroundEvent;
     this.titleOptions = options.title;
     this.titleLimits = resolveSessionTitleLimits(options.title);
@@ -309,6 +341,32 @@ export class Session {
       });
       this.tools.register(exitPlanTool);
       this.trusted.add(exitPlanTool);
+    }
+
+    if (allows(ASK_USER_TOOL_NAME) && this.askUserHandler) {
+      const askUserTool = createAskUserTool({
+        defaultTimeoutSec: this.askUserTimeoutSec,
+        callId: () => this.pendingAskUser?.callId,
+        ask: async (request) => {
+          if (this.depth !== 0 || this.parentSessionId !== undefined) {
+            throw new Error(
+              'ask_user is unavailable while this agent is owned by another live agent; '
+              + 'include the unresolved question in the final result',
+            );
+          }
+          const reserved = this.pendingAskUser?.requestId;
+          const result = await this.askUserHandler!(request.questions, request.signal, {
+            ...(reserved === undefined ? {} : { requestId: reserved }),
+            timeoutSec: request.timeoutSec,
+          });
+          if ('pending' in result && result.pending && this.pendingAskUser !== undefined && this.session !== undefined) {
+            await this.session.append(createAskUserContinuedEvent(this.pendingAskUser));
+          }
+          return result;
+        },
+      });
+      this.tools.register(askUserTool);
+      this.trusted.add(askUserTool);
     }
 
     for (const tool of createGoalTools(this)) {
@@ -641,6 +699,88 @@ export class Session {
   }
 
   /**
+   * Accept an answer or cancellation for the question this session is still asking.
+   *
+   * An open question finishes the tool call and continues the turn. A question
+   * whose wait already expired keeps that pending tool result and delivers the
+   * answer as a user message. A second answer, or one for a closed question,
+   * does nothing.
+   */
+  async resumeAskUser(input: {
+    requestId: string;
+    action: 'answer' | 'cancel';
+    answers?: readonly AskUserAnswerItem[];
+  }): Promise<boolean> {
+    if (this.session === undefined) return false;
+    const pending = projectPendingAskUser(this.session.events);
+    if (pending === null || pending.requestId !== input.requestId) return false;
+    if (input.action === 'cancel') {
+      await this.session.append(createAskUserDecisionEvent({
+        requestId: pending.requestId,
+        callId: pending.callId,
+        kind: 'cancel',
+      }));
+      if (pending.state === 'open') {
+        await this.finishOpenAskUser(pending.callId, {
+          ok: false,
+          content: 'ask_user was cancelled before the user answered',
+        });
+      }
+      return true;
+    }
+    let answers: AskUserAnswerItem[];
+    try {
+      answers = answersForPendingAskUser(pending, input.answers ?? []);
+    } catch {
+      return false;
+    }
+    await this.session.append(createAskUserDecisionEvent({
+      requestId: pending.requestId,
+      callId: pending.callId,
+      kind: 'answer',
+      answers,
+    }));
+    if (pending.state === 'open') {
+      const { renderAskUserResult } = await import('./tools/builtin/ask-user');
+      await this.finishOpenAskUser(pending.callId, {
+        ok: true,
+        content: renderAskUserResult({ answers }),
+      });
+      return true;
+    }
+    const text = renderLateAskUserAnswer({ callId: pending.callId, questions: pending.questions, answers });
+    const message = userMessage(text);
+    this.history.push(message);
+    await this.appendMessage('message/user', {
+      text,
+      source: { kind: 'ask-user-reply', callId: pending.callId, outcome: 'answered' },
+    });
+    if (this.executing) {
+      this.inbox.push(message);
+      this.notifyInbox();
+    } else {
+      this.runBackgroundTurn('external');
+    }
+    return true;
+  }
+
+  /** Write the tool result for a question whose call is still open, then continue. */
+  private async finishOpenAskUser(callId: string, result: { ok: boolean; content: string }): Promise<void> {
+    const toolResult = {
+      callId,
+      name: ASK_USER_TOOL_NAME,
+      ok: result.ok,
+      content: result.content,
+      truncated: false,
+    };
+    await this.appendMessage('message/tool-result', { result: toolResult });
+    const previous = this.history.at(-1);
+    if (previous?.role === 'tool') previous.results.push(toolResult);
+    else this.history.push({ role: 'tool', results: [toolResult] });
+    if (!this.executing) this.runBackgroundTurn('external');
+  }
+
+  /**
    * Deliver a direct human message into the active turn. The model sees it at
    * the next step, so the turn keeps streaming instead of being restarted.
    */
@@ -797,16 +937,7 @@ export class Session {
       generator = this.loop.run(modelHistory.messages, controller.signal);
 
       while (true) {
-        if (controller.signal.aborted && !terminal && this.pendingPlanReview === undefined) {
-          if (pendingAudit) {
-            pendingAudit = false;
-            try {
-              await generator.next();
-            } catch (error) {
-              failed = true;
-              throw error;
-            }
-          }
+        if (controller.signal.aborted && !terminal) {
           const event: AgentEvent = { type: 'turn.end', reason: 'interrupted' };
           await this.appendTrace(event);
           terminal = true;
@@ -829,6 +960,9 @@ export class Session {
           this.pendingPermissions.delete(callId);
           if (event.type === 'tool.result' && event.result.callId === this.pendingPlanReview?.callId) {
             this.pendingPlanReview = undefined;
+          }
+          if (event.type === 'tool.result' && event.result.callId === this.pendingAskUser?.callId) {
+            this.pendingAskUser = undefined;
           }
         }
         if (event.type === 'assistant.message') {
@@ -867,7 +1001,7 @@ export class Session {
       if (!recordedError) await this.appendTrace({ type: 'error', error: { message: '' } });
       throw error;
     } finally {
-      if (!terminal && this.pendingPlanReview === undefined) controller.abort();
+      if (!terminal) controller.abort();
       try {
         if (generator && pendingAudit) {
           pendingAudit = false;
@@ -946,13 +1080,55 @@ export class Session {
     await this.session.append(createPlanReviewPendingEvent({ requestId, callId, plan }));
   }
 
+  /**
+   * Persist a question before its prompt starts waiting.
+   *
+   * The request id is allocated here and reused by the prompt, so an answer
+   * made after a restart still matches the record.
+   */
+  private async recordAskUser(questions: readonly unknown[]): Promise<void> {
+    const callId = this.latestToolCallId(ASK_USER_TOOL_NAME);
+    if (callId === undefined || this.session === undefined) return;
+    const { randomUUID } = await import('node:crypto');
+    const { parseAskUserQuestions, parseAskUserTimeout } = await import('./tools/builtin/ask-user');
+    let parsed: AskUserQuestion[];
+    try {
+      parsed = parseAskUserQuestions({ questions });
+    } catch {
+      return;
+    }
+    const args = this.latestToolArguments(ASK_USER_TOOL_NAME);
+    const timeoutSec = parseAskUserTimeout(
+      args !== undefined && typeof args === 'object' && args !== null && !Array.isArray(args)
+        ? (args as { timeout_sec?: unknown }).timeout_sec
+        : undefined,
+      this.askUserTimeoutSec,
+    );
+    const requestId = randomUUID();
+    this.pendingAskUser = { requestId, callId };
+    await this.session.append(createAskUserPendingEvent({ requestId, callId, questions: parsed, timeoutSec }));
+  }
+
   /** The call the model just submitted, which the review record has to point at. */
   private latestPlanCallId(): string | undefined {
+    return this.latestToolCallId(EXIT_PLAN_MODE_TOOL_NAME);
+  }
+
+  private latestToolCallId(name: string): string | undefined {
     for (let index = this.history.length - 1; index >= 0; index -= 1) {
       const message = this.history[index];
       if (message?.role !== 'assistant') continue;
-      const call = message.toolCalls.findLast((item) => item.name === EXIT_PLAN_MODE_TOOL_NAME);
+      const call = message.toolCalls.findLast((item) => item.name === name);
       return call?.id;
+    }
+    return undefined;
+  }
+
+  private latestToolArguments(name: string): unknown {
+    for (let index = this.history.length - 1; index >= 0; index -= 1) {
+      const message = this.history[index];
+      if (message?.role !== 'assistant') continue;
+      return message.toolCalls.findLast((item) => item.name === name)?.arguments;
     }
     return undefined;
   }
@@ -1043,6 +1219,16 @@ export class Session {
     if (tool?.name === SUBAGENT_TOOL_NAME && (!this.subagents || !this.subagents.canStart(this))) {
       return deny('Subagent delegation depth or capacity is exhausted');
     }
+    if (tool?.name === ASK_USER_TOOL_NAME) {
+      if (this.depth !== 0 || this.parentSessionId !== undefined) {
+        return deny('ask_user is unavailable to a delegated agent');
+      }
+      const questions = typeof args === 'object' && args !== null && !Array.isArray(args)
+        ? (args as { questions?: unknown }).questions : undefined;
+      if (!Array.isArray(questions) || questions.length === 0) return deny('ask_user requires at least one question');
+      await this.recordAskUser(questions);
+      signal.throwIfAborted();
+    }
     if (!tool || !this.trusted.has(tool)) {
       return deny('No trusted sandbox enforcement for this tool');
     }
@@ -1058,13 +1244,12 @@ export class Session {
     else if (tool === this.dshShell) selected = createDshShellTool({ policy, sandbox: this.dshSandbox });
     const registry = new ToolRegistry();
     if (selected) registry.register(selected);
-    const review = tool?.name === EXIT_PLAN_MODE_TOOL_NAME;
-    const executor = new ToolExecutor(registry, { cwd, signal: review ? new AbortController().signal : signal });
+    const executor = new ToolExecutor(registry, { cwd, signal });
     return {
       decision: 'allow',
       source: `DSH ${mode}`,
       execute: async () => {
-        if (!review) signal.throwIfAborted();
+        signal.throwIfAborted();
         return executor.execute(cleanCall);
       },
     };

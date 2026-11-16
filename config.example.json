@@ -78,6 +78,7 @@
         "skill",
         "todo_write",
         "exit_plan_mode",
+        "ask_user",
         "get_goal",
         "create_goal",
         "update_goal",
@@ -112,6 +113,9 @@
   "subagents": {
     "maxDepth": 1,
     "maxActive": 8
+  },
+  "askUser": {
+    "timeoutSec": 300
   },
   "todo": {
     "allowParallelInProgress": true

@@ -72,6 +72,7 @@ import {
   applyAgentEvent,
   createLiveState,
   hydrateTranscript,
+  pendingAskUser,
   pendingPlanReview,
   type ApprovalRequest,
   type LiveTurnState,
@@ -163,6 +164,8 @@ export interface AppState {
   permissionsLoading: boolean;
   permissionsSaving: boolean;
   permissionsError: string;
+  askUserTimeout: { timeoutSec: number; requiresSelection: boolean } | null;
+  askUserTimeoutSaving: boolean;
   models: ModelSummary[];
   modelsLoading: boolean;
   modelsError: string;
@@ -461,6 +464,8 @@ export class AppStore {
     permissionsLoading: true,
     permissionsSaving: false,
     permissionsError: '',
+    askUserTimeout: null,
+    askUserTimeoutSaving: false,
     models: [],
     modelsLoading: true,
     modelsError: '',
@@ -830,6 +835,7 @@ export class AppStore {
   openSettings(): void {
     this.patch({ tab: 'settings' });
     void this.loadPermissions();
+    void this.loadAskUserTimeout();
     void this.loadCatalogs();
     void this.loadModes();
     void this.loadRoleEntries();
@@ -1168,6 +1174,7 @@ export class AppStore {
 
   async bootstrap(): Promise<void> {
     void this.loadPermissions();
+    void this.loadAskUserTimeout();
     void this.loadCatalogs();
     void this.loadModelSources();
     void this.loadMcpServers();
@@ -1683,7 +1690,8 @@ export class AppStore {
         : null;
       const restoredReview = pendingPlanReview(hydrated.transcript, persistedReview)
         ?? (body.running === true ? pendingPlanReview(hydrated.transcript) : undefined);
-      const closedApproval = closedApprovalRequest(body.pendingApproval);
+      const restoredAskUser = pendingAskUser(body.askUser);
+       const closedApproval = closedApprovalRequest(body.pendingApproval);
       this.patchEntry(key, {
         header: typeof body.header === 'object' && body.header !== null ? body.header as Record<string, unknown> : null,
         title: typeof body.title === 'string' && body.title.trim() !== '' ? body.title.trim() : null,
@@ -1716,17 +1724,19 @@ export class AppStore {
         running: body.running === true,
         ...(restoredReview !== undefined
           ? { run: { ...createLiveState(), ...hydrated, planReview: restoredReview } }
-          : closedApproval !== undefined
+          : restoredAskUser !== undefined
+             ? { run: { ...createLiveState(), ...hydrated, askUser: restoredAskUser } }
+             : closedApproval !== undefined
             ? { run: { ...createLiveState(), ...hydrated, approval: closedApproval } }
             : reconcile && body.running !== true
               ? { run: undefined }
               : {}),
       });
       if (body.running === true) {
-        if (this.state.entries[key]?.run === undefined || restoredReview !== undefined) this.followRun(workspaceId, sessionId);
+        if (this.state.entries[key]?.run === undefined || restoredReview !== undefined || restoredAskUser !== undefined) this.followRun(workspaceId, sessionId);
       } else {
         this.clearRunningPoll(key);
-        if (restoredReview === undefined) void this.flushQueue(workspaceId, sessionId);
+        if (restoredReview === undefined && restoredAskUser === undefined) void this.flushQueue(workspaceId, sessionId);
       }
       return true;
     } catch (error) {
@@ -2691,6 +2701,75 @@ export class AppStore {
       await this.loadSessions(workspaceId, false);
     } catch {
       // Keep the existing list.
+    }
+  }
+
+  async resolveAskUser(action: 'answer' | 'cancel', answers?: readonly { id: string; selected: string[]; custom?: string }[]): Promise<void> {
+    const { workspaceId, sessionId } = this.state;
+    if (workspaceId === null || sessionId === null) return;
+    const key = sessionKey(workspaceId, sessionId);
+    const run = this.state.entries[key]?.run;
+    const request = run?.askUser;
+    if (run === undefined || request === undefined || request.pending === true) return;
+    this.patchEntry(key, { run: { ...run, askUser: { ...request, pending: true, error: '' } } });
+    try {
+      await this.api(sessionApiPath(workspaceId, sessionId, 'ask-user'), jsonOptions('POST', {
+        requestId: request.requestId,
+        action,
+        ...(answers === undefined ? {} : { answers }),
+      }));
+      const latest = this.state.entries[key]?.run;
+      const live = this.liveRuns.get(key);
+      if (live?.askUser?.requestId === request.requestId) live.askUser = undefined;
+      if (latest?.askUser?.requestId === request.requestId) {
+        this.patchEntry(key, { run: { ...latest, askUser: undefined }, running: true });
+      }
+      if (this.observers.has(key) !== true) this.followRun(workspaceId, sessionId);
+    } catch (error) {
+      const latest = this.state.entries[key]?.run;
+      if (latest?.askUser?.requestId === request.requestId) {
+        this.patchEntry(key, {
+          run: { ...latest, askUser: { ...request, pending: false, error: translator(this.state.locale)('Could not submit answer: {message}', { message: (error as Error).message }) } },
+        });
+      }
+    }
+  }
+
+  async loadAskUserTimeout(): Promise<void> {
+    try {
+      const body = await this.api<{ settings?: { timeoutSec?: unknown; requiresSelection?: unknown } }>('/api/settings/ask-user');
+      const timeoutSec = body.settings?.timeoutSec;
+      if (typeof timeoutSec !== 'number') return;
+      this.patch({
+        askUserTimeout: {
+          timeoutSec,
+          requiresSelection: body.settings?.requiresSelection === true,
+        },
+      });
+    } catch {
+      // The card falls back to the five-minute default until settings load.
+    }
+  }
+
+  async saveAskUserTimeout(timeoutSec: number): Promise<void> {
+    if (this.state.askUserTimeoutSaving) return;
+    this.patch({ askUserTimeoutSaving: true });
+    try {
+      const body = await this.api<{ settings?: { timeoutSec?: unknown; requiresSelection?: unknown } }>(
+        '/api/settings/ask-user',
+        jsonOptions('PUT', { timeoutSec }),
+      );
+      const saved = body.settings?.timeoutSec;
+      this.patch({
+        askUserTimeoutSaving: false,
+        askUserTimeout: {
+          timeoutSec: typeof saved === 'number' ? saved : timeoutSec,
+          requiresSelection: false,
+        },
+      });
+    } catch (error) {
+      this.patch({ askUserTimeoutSaving: false });
+      this.showAlert(translator(this.state.locale)('Could not save question timeout: {message}', { message: (error as Error).message }));
     }
   }
 

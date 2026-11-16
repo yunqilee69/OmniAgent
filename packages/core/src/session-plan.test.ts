@@ -128,12 +128,17 @@ describe('Session plan mode', () => {
       });
       expect(events.find((event) => event.type === 'permission.decided')).toMatchObject({ decision: 'allow' });
       session.interrupt();
-      release?.({ approved: false, feedback: 'cancelled' });
       await consuming;
+      release?.({ approved: false, feedback: 'cancelled' });
       const reopened = await store.open(cwd, 'parent');
       const pending = reopened.events.find((event) => event.type === 'plan/review.pending');
       expect(pending?.data).toMatchObject({ callId: 'exit', plan: '# Plan\n\nImplement it.' });
-      expect(reopened.events.filter((event) => event.type === 'message/tool-result')).toHaveLength(1);
+      const toolResult = reopened.events.find((event) => event.type === 'message/tool-result');
+      expect(toolResult?.data).toMatchObject({
+        result: { callId: 'exit', ok: false, content: expect.stringContaining('interrupted') },
+      });
+      expect(reopened.events.some((event) => event.type === 'trace/turn.end' && (event.data as { reason?: string }).reason === 'interrupted')).toBe(true);
+      expect(events.at(-1)).toMatchObject({ type: 'turn.end', reason: 'interrupted' });
 
       const resumed = new Session({
         cwd,

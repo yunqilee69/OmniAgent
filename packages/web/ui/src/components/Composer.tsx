@@ -77,6 +77,7 @@ import { ModelPicker } from './ModelPicker.tsx';
 import { ContextMeter } from './ContextMeter.tsx';
 import { SessionStats } from './SessionStats.tsx';
 import { permissionIcon } from './permission-icon.tsx';
+import { AskUserCard } from './AskUserCard.tsx';
 import { PlanReviewComposer } from './PlanReview.tsx';
 import css from '../styles/dsh/input-bar.module.css';
 import menuCss from '../styles/dsh/composer-menu.module.css';
@@ -743,6 +744,14 @@ export function Composer({ hero = false, onOpenPlanPreview }: { hero?: boolean; 
 
   // A waiting plan review replaces the draft controls but keeps this component
   // mounted, so a draft typed before the review survives the detour.
+  if (run?.askUser !== undefined && run.planReview === undefined) {
+    return (
+      <div className={clsx(css.root, hero && css.hero)}>
+        <AskUserCard request={run.askUser} />
+      </div>
+    );
+  }
+
   if (run?.planReview !== undefined) {
     return (
       <div className={clsx(css.root, hero && css.hero)}>

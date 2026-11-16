@@ -43,8 +43,8 @@ export interface SessionSummary {
   usage?: SessionUsage;
 }
 
-/** A running turn's user-facing wait: a tool approval or a plan review. */
-export type SessionPendingKind = 'approval' | 'plan-review';
+/** A running turn's user-facing wait: a tool approval, a plan review, or a question. */
+export type SessionPendingKind = 'approval' | 'plan-review' | 'ask-user';
 
 /** Terminal reason recorded for a session's latest turn. */
 export type SessionTurnEndReason =

@@ -18,6 +18,7 @@ import {
   createPlanModeEvent,
   defaultConfigDir,
   defaultModelBinding,
+  resolveAskUserTimeout,
   isInitCommand,
   listCatalogModels,
   projectAgentSelection,
@@ -32,6 +33,8 @@ import type {
   AgentEvent,
   ApprovalResponse,
   ModelBinding,
+  AskUserQuestion,
+  AskUserToolResult,
   PermissionRequest,
   PlanReviewResponse,
   ResolvedSessionRuntime,
@@ -96,6 +99,65 @@ async function approve(request: PermissionRequest): Promise<ApprovalResponse> {
   const allowed = normalized === 'y' || normalized === 'yes';
   renderer.recordPermissionAnswer(allowed, request.call.id);
   return allowed ? 'allow' : 'deny';
+}
+
+async function askUser(
+  questions: readonly AskUserQuestion[],
+  signal: AbortSignal,
+  request: { timeoutSec: number },
+): Promise<AskUserToolResult> {
+  signal.throwIfAborted();
+  const answers = [];
+  const deadline = request.timeoutSec === -1 ? undefined : Date.now() + request.timeoutSec * 1000;
+  for (const question of questions) {
+    if (deadline !== undefined && Date.now() >= deadline) {
+      return { pending: true, callId: '' };
+    }
+    renderer.beforePrompt();
+    const heading = question.header === undefined ? '提问' : question.header;
+    renderer.print(`\n${sayIndent(roles.accentBold(heading))}\n`);
+    renderer.print(`${sayIndent(sanitizeTerminal(question.question))}\n`);
+    question.options?.forEach((option, index) => {
+      const extra = option.description === undefined ? '' : ` — ${option.description}`;
+      renderer.print(`${sayIndent(`${index + 1}. ${sanitizeTerminal(option.label + extra)}`)}\n`);
+    });
+    const hint = question.multiSelect
+      ? '多选输入编号，逗号分隔；直接输入文字作为自定义答案；空行跳过'
+      : '输入编号，或直接输入文字作为自定义答案；空行跳过';
+    const timeoutController = new AbortController();
+    const timer = deadline === undefined ? undefined : setTimeout(
+      () => timeoutController.abort(),
+      Math.max(1, deadline - Date.now()),
+    );
+    let answer: string;
+    try {
+      answer = (await rl.question(`${sayIndent(roles.dim(hint))} `, { signal: timeoutController.signal })).trim();
+    } catch (error) {
+      if (timeoutController.signal.aborted) return { pending: true, callId: '' };
+      throw error;
+    } finally {
+      if (timer !== undefined) clearTimeout(timer);
+    }
+    signal.throwIfAborted();
+    if (answer === '') {
+      answers.push({ id: question.id, selected: [] });
+      continue;
+    }
+    const indexes = answer.split(/[,，\s]+/u).map((part) => Number(part)).filter((part) => Number.isInteger(part));
+    const selected = question.options === undefined ? [] : indexes.flatMap((index) => {
+      const option = question.options?.[index - 1];
+      return option === undefined ? [] : [option.label];
+    });
+    if (selected.length > 0 && indexes.join(',') === answer.replaceAll(' ', '')) {
+      answers.push({
+        id: question.id,
+        selected: question.multiSelect ? [...new Set(selected)] : selected.slice(0, 1),
+      });
+    } else {
+      answers.push({ id: question.id, selected: [], custom: answer });
+    }
+  }
+  return { answers };
 }
 
 async function reviewPlan(plan: string, signal: AbortSignal): Promise<PlanReviewResponse> {
@@ -353,6 +415,14 @@ async function main(): Promise<void> {
       maxSteps: latest.maxSteps,
       approve,
       reviewPlan,
+      askUser: async (questions, signal, request) => {
+        const result = await askUser(questions, signal, request);
+        if ('pending' in result) {
+          renderer.print(`${sayIndent(roles.dim('提问等待已结束，问题仍可稍后回答。'))}\n`);
+        }
+        return result;
+      },
+      askUserTimeoutSec: resolveAskUserTimeout(configStore.snapshot.config).timeoutSec,
       audit: (entry) => audit.record(entry),
       session: nextHandle,
       system: resolved.system,

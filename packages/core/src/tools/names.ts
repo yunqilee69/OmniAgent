@@ -1,5 +1,6 @@
 import { LIST_AGENT_DEFINITIONS_TOOL_NAME, WRITE_AGENT_DEFINITION_TOOL_NAME } from '../agents/authoring.ts';
 import { SCHEDULE_TOOL_GROUP } from '../schedule/tools.ts';
+import { ASK_USER_TOOL_NAME } from './builtin/ask-user.ts';
 
 export const READ_FILE_TOOL_NAME = 'read_file';
 export const WRITE_FILE_TOOL_NAME = 'write_file';
@@ -47,6 +48,7 @@ export const KNOWN_TOOL_NAMES = new Set<string>([
   SKILL_TOOL_NAME,
   TODO_WRITE_TOOL_NAME,
   EXIT_PLAN_MODE_TOOL_NAME,
+  ASK_USER_TOOL_NAME,
   GET_GOAL_TOOL_NAME,
   CREATE_GOAL_TOOL_NAME,
   UPDATE_GOAL_TOOL_NAME,

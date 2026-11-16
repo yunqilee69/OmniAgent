@@ -278,11 +278,15 @@ export class AgentLoop {
           yield { type: 'turn.end', reason: 'interrupted' };
           return messages;
         }
-        const result = permission.decision === 'allow'
+        const execution = permission.decision === 'allow'
           ? prepared?.decision === 'allow'
-            ? await prepared.execute()
-            : await executor.execute(call)
-          : deniedResult(call, permission.source);
+            ? prepared.execute()
+            : executor.execute(call)
+          : Promise.resolve(deniedResult(call, permission.source));
+        const result = await Promise.race([
+          execution,
+          abortResult(call, callSignal),
+        ]);
 
         results.push(result);
         yield { type: 'tool.result', result };
@@ -364,6 +368,24 @@ function waitForRetry(delayMs: number, signal?: AbortSignal): Promise<void> {
     }
     signal?.addEventListener('abort', onAbort, { once: true });
   });
+}
+
+/** A stop request ends the wait. The underlying call may still finish later. */
+function abortResult(call: ToolCall, signal: AbortSignal): Promise<ToolResult> {
+  if (signal.aborted) return Promise.resolve(interruptedResult(call));
+  return new Promise((resolve) => {
+    signal.addEventListener('abort', () => resolve(interruptedResult(call)), { once: true });
+  });
+}
+
+function interruptedResult(call: ToolCall): ToolResult {
+  return {
+    callId: call.id,
+    name: call.name,
+    ok: false,
+    content: 'Tool execution was interrupted before it finished. Do not assume it ran.',
+    truncated: false,
+  };
 }
 
 /** 被拒也是一种 observation：告诉模型为什么不行，它才有机会换个做法。 */

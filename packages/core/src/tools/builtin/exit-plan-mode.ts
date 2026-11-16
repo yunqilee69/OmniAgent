@@ -37,10 +37,16 @@ export function createExitPlanModeTool(options: ExitPlanModeToolOptions): Tool {
         throw new Error('exit_plan_mode requires a non-empty markdown plan starting with a # heading');
       }
       ctx.signal.throwIfAborted();
-      // Once presented, the decision is durable and must survive interruption of
-      // the turn that asked for it.
-      const response = await options.review(plan, new AbortController().signal);
-      ctx.signal.throwIfAborted();
+      // The review itself stays on disk when this turn is interrupted. The wait
+      // still has to settle as a tool result, or the presenting turn never ends.
+      let response: PlanReviewResponse;
+      try {
+        response = await options.review(plan, ctx.signal);
+      } catch (error) {
+        if (ctx.signal.aborted) return { ok: false, content: 'Plan review was interrupted before the user answered.' };
+        throw error;
+      }
+      if (ctx.signal.aborted) return { ok: false, content: 'Plan review was interrupted before the user answered.' };
       if (response.approved) {
         await options.onApproved();
         return {

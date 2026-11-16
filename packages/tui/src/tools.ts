@@ -37,6 +37,7 @@ const PRESENTATION: Record<string, { title: string; icon: string }> = {
   list_agents: { title: '代理列表', icon: '⑂' },
   interrupt_agent: { title: '中断代理', icon: '■' },
   exit_plan_mode: { title: '提交计划', icon: '◫' },
+  ask_user: { title: '询问用户', icon: '?' },
   get_goal: { title: '读取目标', icon: '◎' },
   create_goal: { title: '创建目标', icon: '◎' },
   update_goal: { title: '更新目标', icon: '◎' },
@@ -129,6 +130,12 @@ function summarizeArguments(name: string, args: Record<string, unknown>): string
         ?? stringValue(args['goal_id'])
         ?? '';
       return detail === '' ? action : `${action} · ${detail}`;
+    }
+    case 'ask_user': {
+      const questions = Array.isArray(args['questions']) ? args['questions'] : [];
+      const first = questions.find((item) => typeof item === 'object' && item !== null) as { question?: unknown } | undefined;
+      const text = typeof first?.question === 'string' ? first.question : '';
+      return questions.length > 1 ? `${questions.length} 个问题 · ${text}` : text;
     }
     case 'exit_plan_mode': {
       const plan = stringValue(args['plan']) ?? '';

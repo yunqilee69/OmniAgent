@@ -18,6 +18,7 @@ export type TrajectoryToolName =
   | 'bash'
   | 'todo_write'
   | 'exit_plan_mode'
+  | 'ask_user'
   | 'get_goal'
   | 'create_goal'
   | 'update_goal'
@@ -30,7 +31,7 @@ export type TrajectoryToolName =
 const TRAJECTORY_TOOL_NAMES = new Set<string>([
   'read_file', 'write_file', 'edit_file', 'list_dir', 'glob', 'grep', 'web_fetch',
   'skill', 'bash', 'todo_write',
-  'exit_plan_mode', 'get_goal', 'create_goal', 'update_goal', 'subagent', 'send_message', 'list_agents', 'wait_agent', 'interrupt_agent',
+  'exit_plan_mode', 'ask_user', 'get_goal', 'create_goal', 'update_goal', 'subagent', 'send_message', 'list_agents', 'wait_agent', 'interrupt_agent',
 ]);
 export type TrajectoryEndReason = 'end_turn' | 'tool_use' | 'max_tokens' | 'max_steps' | 'interrupted' | 'error';
 

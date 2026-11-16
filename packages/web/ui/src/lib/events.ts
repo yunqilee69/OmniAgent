@@ -149,6 +149,31 @@ export interface PlanReviewRequest {
   feedback?: string;
 }
 
+export interface AskUserOptionView {
+  label: string;
+  description?: string;
+}
+
+export interface AskUserQuestionView {
+  id: string;
+  question: string;
+  header?: string;
+  options?: AskUserOptionView[];
+  multiSelect: boolean;
+}
+
+export interface AskUserRequest {
+  requestId: string;
+  questions: AskUserQuestionView[];
+  /** -1 waits until the user answers. */
+  timeoutSec: number;
+  deadlineAt?: number;
+  pending?: boolean;
+  error?: string;
+  /** True after the foreground wait expired; an answer still starts a new turn. */
+  continued?: boolean;
+}
+
 export interface LiveTurnState {
   transcript: TranscriptItem[];
   turns: TurnMeta[];
@@ -162,6 +187,7 @@ export interface LiveTurnState {
   streamReasoningId?: string;
   approval?: ApprovalRequest;
   planReview?: PlanReviewRequest;
+  askUser?: AskUserRequest;
   error?: string;
   stopping?: boolean;
   finishing?: boolean;
@@ -503,6 +529,29 @@ export function applyAgentEvent(turn: LiveTurnState, event: AgentEvent | Record<
       turn.planReview = undefined;
       return;
     }
+    case 'ask-user.requested': {
+      if (turn.stopping === true || turn.outcome !== undefined) return;
+      const questions = readAskUserQuestions(data.questions);
+      if (typeof data.requestId !== 'string' || questions === undefined) return;
+      const timeoutSec = typeof data.timeoutSec === 'number' ? data.timeoutSec : -1;
+      turn.askUser = {
+        requestId: data.requestId,
+        questions,
+        timeoutSec,
+        ...(typeof data.deadlineAt === 'number' ? { deadlineAt: data.deadlineAt } : {}),
+        pending: false,
+        error: '',
+      };
+      return;
+    }
+    case 'ask-user.decided': {
+      if (data.action === 'pending' && turn.askUser !== undefined) {
+        turn.askUser = { ...turn.askUser, continued: true, pending: false };
+        return;
+      }
+      turn.askUser = undefined;
+      return;
+    }
     case 'tool.result': {
       const result = data.result as ToolResult | undefined;
       if (result === undefined) return;
@@ -692,6 +741,27 @@ export function pendingPlanText(call: ToolCall, result: ToolResult | undefined):
  * A later user message supersedes it too: the user moved on (for example by
  * saying "continue"), so reopening the session must not ask for that review again.
  */
+export function pendingAskUser(
+  value: unknown,
+  now = Date.now(),
+): AskUserRequest | undefined {
+  if (typeof value !== 'object' || value === null || Array.isArray(value)) return undefined;
+  const record = value as Record<string, unknown>;
+  if (typeof record.requestId !== 'string' || typeof record.timeoutSec !== 'number' || !Array.isArray(record.questions)) return undefined;
+  const questions = readAskUserQuestions(record.questions);
+  if (questions === undefined) return undefined;
+  const deadlineAt = typeof record.deadlineAt === 'number' ? record.deadlineAt : undefined;
+  return {
+    requestId: record.requestId,
+    questions,
+    timeoutSec: record.timeoutSec,
+    ...(deadlineAt === undefined ? {} : { deadlineAt }),
+    pending: false,
+    error: '',
+    ...(deadlineAt !== undefined && deadlineAt <= now ? { continued: true } : {}),
+  };
+}
+
 export function pendingPlanReview(
   transcript: readonly TranscriptItem[],
   persisted?: { requestId?: unknown; plan?: unknown } | null,
@@ -905,6 +975,34 @@ export function groupTurns(transcript: readonly TranscriptItem[], turns: readonl
     });
   }
   return result;
+}
+
+function readAskUserQuestions(value: unknown): AskUserQuestionView[] | undefined {
+  if (!Array.isArray(value) || value.length === 0) return undefined;
+  const questions: AskUserQuestionView[] = [];
+  for (const item of value) {
+    if (typeof item !== 'object' || item === null || Array.isArray(item)) return undefined;
+    const record = item as Record<string, unknown>;
+    if (typeof record.id !== 'string' || typeof record.question !== 'string') return undefined;
+    const options = Array.isArray(record.options)
+      ? record.options.flatMap((option) => {
+        if (typeof option !== 'object' || option === null || Array.isArray(option)) return [];
+        const label = (option as { label?: unknown }).label;
+        const description = (option as { description?: unknown }).description;
+        return typeof label === 'string'
+          ? [{ label, ...(typeof description === 'string' ? { description } : {}) }]
+          : [];
+      })
+      : undefined;
+    questions.push({
+      id: record.id,
+      question: record.question,
+      ...(typeof record.header === 'string' ? { header: record.header } : {}),
+      ...(options === undefined || options.length === 0 ? {} : { options }),
+      multiSelect: record.multiSelect === true,
+    });
+  }
+  return questions;
 }
 
 /** SSE parser used by the streaming turn; exported for the protocol tests. */

@@ -1,8 +1,12 @@
 import { randomUUID } from 'node:crypto';
-import type { AgentEvent, ApprovalResponse, PermissionRequest, PlanReviewResponse, SessionOptions } from '@omniagent/core';
+import type {
+  AgentEvent, ApprovalResponse, AskUserAnswerItem, AskUserQuestion, AskUserToolResult,
+  PermissionRequest, PlanReviewResponse, SessionOptions,
+} from '@omniagent/core';
 
 type Prompt = Extract<AgentEvent, { type: 'permission.requested' }>;
 type PlanPrompt = Extract<AgentEvent, { type: 'plan.review.requested' }>;
+type AskPrompt = Extract<AgentEvent, { type: 'ask-user.requested' }>;
 type EventResult = IteratorResult<AgentEvent>;
 
 const GENERIC_APPROVAL_REASON = 'Tool execution requires approval';
@@ -69,6 +73,24 @@ export class ApprovalBroker {
     return this.turns.get(this.key(workspace, sessionId))?.respond(requestId, decision) ?? false;
   }
 
+  askHandler(workspace: string, sessionId: string): NonNullable<SessionOptions['askUser']> {
+    const key = this.key(workspace, sessionId);
+    return (questions, signal, request) => this.turns.get(key)?.requestAskUser(questions, signal, request)
+      ?? Promise.reject(new Error('ask_user is unavailable'));
+  }
+
+  respondAskUser(
+    workspace: string,
+    sessionId: string,
+    requestId: string,
+    action: unknown,
+    answers: unknown,
+  ): boolean {
+    if (action !== 'answer' && action !== 'cancel') return false;
+    return this.turns.get(this.key(workspace, sessionId))
+      ?.respondAskUser(requestId, action, answers) ?? false;
+  }
+
   planHandler(workspace: string, sessionId: string): NonNullable<SessionOptions['reviewPlan']> {
     const key = this.key(workspace, sessionId);
     return (plan, signal, requestId) => this.turns.get(key)?.requestPlanReview(plan, signal, requestId)
@@ -93,6 +115,14 @@ export class ApprovalTurn {
   private planPending?: { id: string; prompt: PlanPrompt; settle(response: PlanReviewResponse): void };
   private planPrompt?: PlanPrompt;
   private planDecision?: Extract<AgentEvent, { type: 'plan.review.decided' }>;
+  private askPending?: {
+    id: string;
+    prompt: AskPrompt;
+    settle(result: AskUserToolResult): void;
+    fail(error: Error): void;
+  };
+  private askPrompt?: AskPrompt;
+  private askDecision?: Extract<AgentEvent, { type: 'ask-user.decided' }>;
   private wake?: () => void;
   private closed = false;
   private streaming = false;
@@ -100,8 +130,9 @@ export class ApprovalTurn {
   constructor(private readonly timeoutMs: number, private readonly onClose: () => void) {}
 
   /** Currently actionable prompts, including those already emitted to a follower. */
-  pendingPrompts(): Array<Prompt | PlanPrompt> {
-    return [this.pending?.prompt, this.planPending?.prompt].filter((prompt): prompt is Prompt | PlanPrompt => prompt !== undefined);
+  pendingPrompts(): Array<Prompt | PlanPrompt | AskPrompt> {
+    return [this.pending?.prompt, this.planPending?.prompt, this.askPending?.prompt]
+      .filter((prompt): prompt is Prompt | PlanPrompt | AskPrompt => prompt !== undefined);
   }
 
   request(request: PermissionRequest, signal: AbortSignal): Promise<ApprovalResponse> {
@@ -178,6 +209,84 @@ export class ApprovalTurn {
     return true;
   }
 
+  requestAskUser(
+    questions: readonly AskUserQuestion[],
+    signal: AbortSignal,
+    request: { requestId?: string; timeoutSec: number },
+  ): Promise<AskUserToolResult> {
+    if (this.closed || this.askPending) return Promise.reject(new Error('ask_user is unavailable'));
+    if (signal.aborted) return Promise.reject(new Error('ask_user was cancelled before the user answered'));
+    if (questions.length === 0 || questions.length > 8) {
+      return Promise.reject(new Error('ask_user requires 1–8 questions'));
+    }
+    const reserved = typeof request.requestId === 'string' && request.requestId.trim() !== ''
+      && request.requestId.length <= 256
+      ? request.requestId : randomUUID();
+    const timeoutSec = request.timeoutSec;
+    const prompt: AskPrompt = {
+      type: 'ask-user.requested',
+      requestId: reserved,
+      questions: questions.map((question) => ({ ...question, options: question.options?.map((option) => ({ ...option })) })),
+      timeoutSec,
+      ...(timeoutSec === -1 ? {} : { deadlineAt: Date.now() + timeoutSec * 1000 }),
+    };
+    return new Promise((resolve, reject) => {
+      let timer: ReturnType<typeof setTimeout> | undefined;
+      const onAbort = () => fail(new Error('ask_user was cancelled before the user answered'));
+      const finish = (): void => {
+        if (timer !== undefined) clearTimeout(timer);
+        signal.removeEventListener('abort', onAbort);
+      };
+      const fail = (error: Error) => {
+        if (this.askPending !== pending) return;
+        this.askPending = undefined;
+        if (this.askPrompt === prompt) this.askPrompt = undefined;
+        finish();
+        reject(error);
+      };
+      const settle = (result: AskUserToolResult) => {
+        if (this.askPending !== pending) return;
+        this.askPending = undefined;
+        if (this.askPrompt === prompt) this.askPrompt = undefined;
+        finish();
+        resolve(result);
+      };
+      if (timeoutSec !== -1) {
+        const delay = Math.min(2_147_483_647, Math.max(1, timeoutSec * 1000));
+        timer = setTimeout(() => {
+          this.askDecision = { type: 'ask-user.decided', requestId: reserved, action: 'pending' };
+          this.notify();
+          settle({ pending: true, callId: reserved });
+        }, delay);
+        timer.unref?.();
+      }
+      const pending = { id: prompt.requestId, prompt, settle, fail };
+      this.askPending = pending;
+      this.askPrompt = prompt;
+      signal.addEventListener('abort', onAbort, { once: true });
+      if (signal.aborted) fail(new Error('ask_user was cancelled before the user answered'));
+      else this.notify();
+    });
+  }
+
+  respondAskUser(requestId: string, action: 'answer' | 'cancel', answers: unknown): boolean {
+    const pending = this.askPending;
+    if (this.closed || !pending || pending.id !== requestId) return false;
+    if (action === 'cancel') {
+      this.askDecision = { type: 'ask-user.decided', requestId, action: 'cancel' };
+      pending.fail(new Error('ask_user was cancelled before the user answered'));
+      this.notify();
+      return true;
+    }
+    if (!Array.isArray(answers)) return false;
+    this.askDecision = { type: 'ask-user.decided', requestId, action: 'answer' };
+    pending.settle({
+      answers: answers as AskUserAnswerItem[],
+    });
+    this.notify();
+    return true;
+  }
+
   respondPlan(requestId: string, approved: boolean, feedback?: string): boolean {
     const pending = this.planPending;
     if (this.closed || !pending || pending.id !== requestId) return false;
@@ -195,9 +304,12 @@ export class ApprovalTurn {
     this.closed = true;
     this.pending?.settle('deny');
     this.planPending?.settle({ approved: false, feedback: 'Plan review was cancelled.' });
+    this.askPending?.fail(new Error('ask_user was cancelled before the user answered'));
     this.prompt = undefined;
     this.planPrompt = undefined;
     this.planDecision = undefined;
+    this.askPrompt = undefined;
+    this.askDecision = undefined;
     this.onClose();
     this.notify();
   }
@@ -222,6 +334,18 @@ export class ApprovalTurn {
           yield prompt;
           continue;
         }
+        if (this.askPrompt) {
+          const prompt = this.askPrompt;
+          this.askPrompt = undefined;
+          yield prompt;
+          continue;
+        }
+        if (this.askDecision) {
+          const decision = this.askDecision;
+          this.askDecision = undefined;
+          yield decision;
+          continue;
+        }
         if (this.planDecision) {
           const decision = this.planDecision;
           this.planDecision = undefined;
@@ -236,7 +360,7 @@ export class ApprovalTurn {
           next.then((result) => ({ kind: 'source' as const, result })),
           new Promise<{ kind: 'prompt' }>((resolve) => {
             this.wake = () => resolve({ kind: 'prompt' });
-            if (this.prompt || this.planPrompt || this.closed) this.notify();
+            if (this.prompt || this.planPrompt || this.askPrompt || this.askDecision || this.closed) this.notify();
           }),
         ]);
         this.wake = undefined;

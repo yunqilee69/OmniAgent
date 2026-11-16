@@ -82,9 +82,14 @@ import {
   projectPendingPlanReview,
   projectPlanMode,
 } from '../../core/src/session/plan';
+import { projectPendingAskUser } from '../../core/src/session/ask-user';
+import { validateAskUserAnswers } from '../../core/src/tools/builtin/ask-user';
+import type { AskUserAnswerItem } from '../../core/src/tools/builtin/ask-user';
 import type { ApprovalBroker, ApprovalTurn } from './approval';
 import { InvalidPermissionSettings } from './permissions';
 import type { PermissionSettings } from './permissions';
+import { InvalidAskUserSettings } from './ask-user-settings';
+import type { AskUserConfigSettings } from './ask-user-settings';
 import { InvalidRoleSettings } from './catalog-settings';
 import type { RoleSettings } from './catalog-settings';
 import { InvalidModelSettings } from './model-settings';
@@ -122,6 +127,12 @@ export interface WebSession {
    * turn so the model receives the result. Returns false when nothing is pending.
    */
   resumePlanReview?(decision: { requestId: string; approved: boolean; feedback?: string }): Promise<boolean>;
+  /** Apply an answer or cancellation to a question that is still open or pending. */
+  resumeAskUser?(input: {
+    requestId: string;
+    action: 'answer' | 'cancel';
+    answers?: readonly import('@omniagent/core').AskUserAnswerItem[];
+  }): Promise<boolean>;
   /** Observe the turn a resumed review starts after its own request has returned. */
   addBackgroundListener?(listener: (event: AgentEvent) => void): () => void;
   contextMessageEstimate?(): number | undefined;
@@ -202,6 +213,8 @@ export interface WebHostOptions {
   agentAuthoring?: AgentAuthoringService;
   readAudit?: (workspace: Workspace, sessionId: string) => Promise<unknown[]>;
   permissionSettings?: Pick<PermissionSettings, 'read' | 'update' | 'snapshot' | 'current'>;
+  /** Global ask_user foreground wait, stored beside the permission default. */
+  askUserSettings?: Pick<AskUserConfigSettings, 'read' | 'update'>;
   approvalBroker?: ApprovalBroker;
   /** Credential-free model metadata for the configured catalog. */
   modelCatalog?: () => ModelSummary[] | Promise<ModelSummary[]>;
@@ -978,6 +991,18 @@ async function route(
     if (!options.schedule) throw new HttpError(404, 'Not found');
     return routeSchedules(request, response, url, options.schedule);
   }
+  if (url.pathname === '/api/settings/ask-user' && options.askUserSettings) {
+    if (request.method === 'GET') return json(response, 200, { settings: await options.askUserSettings.read() });
+    if (request.method === 'PUT') {
+      const body = await readJson(request);
+      try {
+        return json(response, 200, { settings: await options.askUserSettings.update(body) });
+      } catch (error) {
+        if (error instanceof InvalidAskUserSettings) throw new HttpError(400, 'Invalid question timeout');
+        throw error;
+      }
+    }
+  }
   if (url.pathname === '/api/settings/permissions' && options.permissionSettings) {
     if (request.method === 'GET') return json(response, 200, { settings: await options.permissionSettings.read() });
     if (request.method === 'PUT') {
@@ -1313,6 +1338,7 @@ async function route(
       ...selection,
       plan: projectPlanMode(handle.events),
       planReview: projectPendingPlanReview(handle.events),
+      askUser: projectPendingAskUser(handle.events),
       pendingApproval: projectPendingPermission(handle.events),
       todos: projectTodos(handle.events),
       events: projectTraceEvents(handle.events),
@@ -1613,6 +1639,85 @@ async function route(
       approved: body.approved,
       ...(feedback === '' ? {} : { feedback }),
     });
+    turn.publishStatus(true);
+    const stopListening = session.addBackgroundListener?.((event) => {
+      if (running.get(key) !== turn) return;
+      publishTurnEvent(turn, publicAgentEvent(event, turn.startedAt));
+    });
+    void (async () => {
+      while (turn.session?.activeTurn === true) {
+        await new Promise((resolve) => setTimeout(resolve, 200));
+      }
+      stopListening?.();
+      if (running.get(key) !== turn) return;
+      running.delete(key);
+      if (turn.staleRuntime === true) {
+        sessions.delete(key);
+        options.liveSessions?.delete(key);
+      }
+      turn.publishStatus(false);
+      for (const follower of turn.followers) follower.end();
+      turn.followers.clear();
+    })();
+    return json(response, 202, { ok: true, resumed: true });
+  }
+  if (request.method === 'POST' && parts.length === 6 && parts[5] === 'ask-user') {
+    const body = await readJson(request);
+    const allowed = new Set(['requestId', 'action', 'answers']);
+    if (Object.keys(body).some((name) => !allowed.has(name))
+      || typeof body.requestId !== 'string' || body.requestId.length === 0 || body.requestId.length > 256
+      || (body.action !== 'answer' && body.action !== 'cancel')) {
+      throw new HttpError(400, 'A request ID and an answer or cancellation are required');
+    }
+    const handle = await openSession(options.store, workspace, sessionId);
+    const pending = projectPendingAskUser(handle.events);
+    if (pending === null || pending.requestId !== body.requestId) {
+      throw new HttpError(409, 'Question is no longer active');
+    }
+    let answers: AskUserAnswerItem[] | undefined;
+    if (body.action === 'answer') {
+      if (!Array.isArray(body.answers)) throw new HttpError(400, 'An answer for every question is required');
+      try {
+        answers = validateAskUserAnswers(pending.questions, body.answers as AskUserAnswerItem[]);
+      } catch {
+        throw new HttpError(400, 'The answer does not match the questions');
+      }
+    }
+    if (options.approvalBroker?.respondAskUser(workspace.path, sessionId, body.requestId, body.action, answers)) {
+      return json(response, 200, { ok: true, resumed: false });
+    }
+    const activeTurn = running.get(key);
+    if (activeTurn?.session?.resumeAskUser !== undefined) {
+      const resumed = await activeTurn.session.resumeAskUser({
+        requestId: body.requestId,
+        action: body.action,
+        ...(answers === undefined ? {} : { answers }),
+      });
+      if (resumed) {
+        publishTurnEvent(activeTurn, { type: 'ask-user.decided', requestId: body.requestId, action: body.action });
+        activeTurn.publishStatus(true);
+        return json(response, 200, { ok: true, resumed: true });
+      }
+    }
+    if (running.has(key)) throw new HttpError(409, 'Session already has an active turn');
+    const session = await resumedSession(options, sessions, running, workspace, handle, key, permissionLocks, failedPermissions);
+    const resumed = await session.resumeAskUser?.({
+      requestId: body.requestId,
+      action: body.action,
+      ...(answers === undefined ? {} : { answers }),
+    });
+    if (resumed !== true) throw new HttpError(409, 'Question is no longer active');
+    const turn: RunningTurn = {
+      session, cancelled: false, ready: Promise.resolve(), baselineReady: Promise.resolve(),
+      startedAt: Date.now(), deliveries: new Set(), events: [], replayBytes: 0, replayOverflow: false,
+      followers: new Set(), sessionId,
+      baseline: { messages: projectPublicHistory(handle.header, handle.events), metrics: projectSessionMetrics(handle.events) },
+      publishStatus: (active) => {
+        statusHub.publish(workspace.id, { type: 'session.status', sessionId, running: active, pending: null });
+      },
+    };
+    running.set(key, turn);
+    publishTurnEvent(turn, { type: 'ask-user.decided', requestId: body.requestId, action: body.action });
     turn.publishStatus(true);
     const stopListening = session.addBackgroundListener?.((event) => {
       if (running.get(key) !== turn) return;
@@ -2158,7 +2263,8 @@ function publishTurnEvent(turn: RunningTurn, event: unknown, excluded?: ServerRe
   // learn about a new or answered prompt without following the turn.
   const type = typeof event === 'object' && event !== null ? (event as { type?: unknown }).type : undefined;
   if (type === 'permission.requested' || type === 'permission.decided'
-    || type === 'plan.review.requested' || type === 'plan.review.decided') {
+    || type === 'plan.review.requested' || type === 'plan.review.decided'
+     || type === 'ask-user.requested' || type === 'ask-user.decided') {
     turn.publishStatus(true);
   }
 }

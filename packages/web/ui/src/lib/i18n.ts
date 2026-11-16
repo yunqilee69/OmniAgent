@@ -233,6 +233,25 @@ const zh: Record<string, string> = {
   // Settings.
   'Close settings': '关闭设置',
   'Permissions': '权限',
+  'Questions': '提问',
+  'Question': '提问',
+  'Waiting for an answer': '等待回答',
+  'Question wait': '提问等待',
+  'Question wait in minutes': '提问等待（分钟）',
+  'How long a question waits before the agent continues. The question stays answerable. The default is 5 minutes.':
+    '提问等待多久后智能体继续工作。问题仍然可以回答。默认 5 分钟。',
+  'Wait until answered': '一直等待回答',
+  'The saved wait is invalid. Saving replaces it with the value shown here.':
+    '已保存的等待时间无效。保存后会替换为这里显示的值。',
+  'Waiting {seconds}s. Leave a question blank to skip it.': '还等待 {seconds} 秒。留空表示跳过该题。',
+  'The agent is waiting for an answer. Leave a question blank to skip it.':
+    '智能体正在等待回答。留空表示跳过该题。',
+  'The wait expired. An answer still continues the work; skipping is not permission.':
+    '等待已结束。回答仍会继续这项工作；跳过不是许可。',
+  'Custom answer': '自定义回答',
+  'Submit answers': '提交回答',
+  'Could not submit answer: {message}': '无法提交回答：{message}',
+  'Could not save question timeout: {message}': '无法保存提问等待：{message}',
   'Default permission for new sessions': '新会话的默认权限',
   'Each session chooses its own permission; this is the preset a new session starts from.':
     '每个会话都会单独选择权限；这里配置新会话的起始预设。',

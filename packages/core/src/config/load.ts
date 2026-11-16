@@ -153,6 +153,11 @@ export const ConfigSchema = z.object({
     maxDepth: z.number().int().nonnegative().default(1),
     maxActive: z.number().int().positive().default(8),
   }).passthrough().optional(),
+  /**
+   * Foreground wait for ask_user. Invalid stored values stay readable so the
+   * settings page can repair them; resolution applies the default.
+   */
+  askUser: z.unknown().optional(),
   /** Model-facing todo policy. Parallel active items suit workflows that delegate work to subagents. */
   todo: z.object({
     allowParallelInProgress: z.boolean().default(false),

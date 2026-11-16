@@ -1964,6 +1964,55 @@ describe('workspace web host', () => {
     expect(events.at(-1)).toEqual({ type: 'turn.end', reason: 'end_turn' });
   });
 
+  it('keeps a resumed plan review stoppable for as long as its turn runs', async () => {
+    vi.useFakeTimers();
+    const plan = '# Plan\n\n1. Inspect.\n2. Implement.';
+    let release: (() => void) | undefined;
+    const blocked = new Promise<void>((resolve) => { release = resolve; });
+    const { base, first, store } = await setup(
+      (id, permissions, workspace, handle) => new Session({
+        cwd: workspace.path,
+        dshPermissions: permissions,
+        session: handle,
+        model: {
+          name: 'fake',
+          async complete(request: { signal?: AbortSignal }) {
+            await Promise.race([
+              blocked,
+              new Promise((_resolve, reject) => {
+                request.signal?.addEventListener('abort', () => reject(new Error('aborted')), { once: true });
+              }),
+            ]);
+            const step = textResponse('implemented');
+            return { message: step.message, usage: { inputTokens: 1, outputTokens: 1 }, stopReason: step.stopReason ?? 'end_turn' };
+          },
+        } as never,
+        approve: async () => 'deny',
+        reviewPlan: async () => ({ approved: true }),
+      }),
+    );
+    const url = sessionsUrl(base, first.id);
+    const { session } = await jsonResponse<{ session: { id: string } }>(await fetch(url, jsonRequest({})));
+    const handle = await store.open(first.path, session.id);
+    await handle.append({ type: 'plan/mode', data: { active: true } });
+    await handle.append({
+      type: 'message/assistant',
+      data: { role: 'assistant', content: [], toolCalls: [{ id: 'exit', name: 'exit_plan_mode', arguments: { plan } }] },
+    });
+    await handle.append({ type: 'plan/review.pending', data: { requestId: 'review-1', callId: 'exit', plan } });
+    await handle.append({ type: 'trace/turn.end', data: { reason: 'interrupted' } });
+
+    const decided = await fetch(`${url}/${session.id}/plan-review`, jsonRequest({ requestId: 'review-1', approved: true }));
+    expect(decided.status).toBe(202);
+    await vi.advanceTimersByTimeAsync(61_000);
+    const listed = await jsonResponse<{ sessions: Array<{ id: string; running?: boolean }> }>(await fetch(url));
+    expect(listed.sessions.find((item) => item.id === session.id)?.running).toBe(true);
+    const stopped = await fetch(`${url}/${session.id}/interrupt`, jsonRequest({}));
+    expect(stopped.status).toBe(200);
+    release?.();
+    await vi.useRealTimers();
+  });
+
   it('unregisters a workspace without deleting its stored sessions', async () => {
     const { base, first, store } = await setup();
     await store.create({ id: 'keep', workspace: first.path, cwd: first.path });

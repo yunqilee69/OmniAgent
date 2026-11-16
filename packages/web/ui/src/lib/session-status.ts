@@ -102,7 +102,9 @@ export function sessionRowStatuses(
     ? { state: 'warning' as const, label: t('Waiting for approval'), trailingLabel: t('Approval') }
     : input.pending === 'plan-review'
       ? { state: 'warning' as const, label: t('Waiting for plan review'), trailingLabel: t('Plan review') }
-      : undefined;
+      : input.pending === 'ask-user'
+        ? { state: 'warning' as const, label: t('Waiting for an answer'), trailingLabel: t('Question') }
+        : undefined;
   if (pending !== undefined) return subagents === undefined ? [pending] : [pending, subagents];
   if (input.running) {
     const primary: SessionRowStatus = { state: 'ongoing', label: t('Running') };

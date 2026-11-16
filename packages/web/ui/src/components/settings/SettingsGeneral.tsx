@@ -14,6 +14,63 @@ import permissionCss from '../../styles/dsh/permission-row.module.css';
 import css from '../../styles/app.module.css';
 
 /**
+ * Foreground wait for ask_user. A blank or illegal stored value shows the
+ * five-minute default until the user saves a replacement. -1 waits indefinitely.
+ */
+function QuestionTimeout(): ReactNode {
+  const app = useApp();
+  const t = translator(app.locale);
+  const stored = app.askUserTimeout;
+  const indefinite = stored?.timeoutSec === -1;
+  const minutes = stored === null || indefinite ? 5 : Math.max(1, Math.round(stored.timeoutSec / 60));
+  const [draft, setDraft] = useState(String(minutes));
+  const [seen, setSeen] = useState(stored?.timeoutSec);
+  if (stored !== null && stored.timeoutSec !== seen) {
+    setSeen(stored.timeoutSec);
+    setDraft(String(minutes));
+  }
+  const saveMinutes = (): void => {
+    const value = Number(draft);
+    if (!Number.isInteger(value) || value < 1 || value > 1440) return;
+    void store.saveAskUserTimeout(value * 60);
+  };
+  return (
+    <div className={css.settingsRow}>
+      <div>
+        <span className={css.settingsLabel}>{t('Question wait')}</span>
+        <span className={css.settingsDescription}>
+          {t('How long a question waits before the agent continues. The question stays answerable. The default is 5 minutes.')}
+        </span>
+      </div>
+      <div>
+        <input
+          aria-label={t('Question wait in minutes')}
+          inputMode="numeric"
+          value={indefinite ? '' : draft}
+          disabled={indefinite || app.askUserTimeoutSaving}
+          onChange={(event) => setDraft(event.target.value)}
+          onBlur={saveMinutes}
+        />
+        <label>
+          <input
+            type="checkbox"
+            checked={indefinite}
+            disabled={app.askUserTimeoutSaving}
+            onChange={(event) => {
+              void store.saveAskUserTimeout(event.target.checked ? -1 : Math.max(1, minutes) * 60);
+            }}
+          />
+          {t('Wait until answered')}
+        </label>
+        {stored?.requiresSelection === true && (
+          <p className={css.settingsHint}>{t('The saved wait is invalid. Saving replaces it with the value shown here.')}</p>
+        )}
+      </div>
+    </div>
+  );
+}
+
+/**
  * General preferences: permission default, appearance and about. This is the
  * first rail page of the settings panel, so it keeps the pre-rail content.
  */
@@ -83,6 +140,11 @@ export function SettingsGeneral(): ReactNode {
           && defaultPreset === null && (
             <p className={css.settingsHint}>{t('New sessions wait for a permission choice until a default is set.')}</p>
           )}
+      </section>
+
+      <section className={css.settingsSection}>
+        <h3>{t('Questions')}</h3>
+        <QuestionTimeout />
       </section>
 
       <section className={css.settingsSection}>

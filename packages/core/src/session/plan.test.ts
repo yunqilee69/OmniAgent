@@ -114,4 +114,23 @@ describe('exit_plan_mode', () => {
     await expect(tool.execute({ plan: '# Plan\n\nDo it better.' }, ctx)).rejects.toThrow(/Add tests/);
     expect(onApproved).toHaveBeenCalledOnce();
   });
+
+  it('stops waiting for review when the presenting turn is interrupted', async () => {
+    const controller = new AbortController();
+    const review = vi.fn((_plan: string, signal: AbortSignal) => new Promise<never>((_resolve, reject) => {
+      const fail = (): void => reject(signal.reason instanceof Error ? signal.reason : new Error('The operation was aborted'));
+      if (signal.aborted) fail();
+      else signal.addEventListener('abort', fail, { once: true });
+    }));
+    const tool = createExitPlanModeTool({ review, onApproved: async () => undefined });
+    const running = tool.execute({ plan: '# Plan\n\nDo it.' }, {
+      callId: 'c1', cwd: '/tmp', signal: controller.signal,
+    } as never);
+    await vi.waitFor(() => { expect(review).toHaveBeenCalledOnce(); });
+    controller.abort();
+    await expect(running).resolves.toMatchObject({
+      ok: false,
+      content: expect.stringContaining('Plan review was interrupted'),
+    });
+  });
 });

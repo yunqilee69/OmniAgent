@@ -1,6 +1,7 @@
 import { homedir } from 'node:os';
 import { join } from 'node:path';
 import {
+  resolveAskUserTimeout,
   AgentAuthoringService,
   AgentCatalog,
   ConfigStore,
@@ -26,6 +27,7 @@ import { RoleSettings } from './catalog-settings';
 import { McpSettings } from './mcp-settings';
 import { ModelSettings } from './model-settings';
 import { LiveSessionRegistry } from './live-sessions';
+import { AskUserConfigSettings } from './ask-user-settings';
 import { PermissionSettings } from './permissions';
 import { SessionScheduleHost } from './schedule-host';
 import { parseWebPort, startWebHost } from './server';
@@ -35,6 +37,7 @@ async function main(): Promise<void> {
   await prepareLinuxSandbox();
   const configDir = defaultConfigDir();
   const permissionSettings = await PermissionSettings.open(join(configDir, 'config.json'), { trustedHome: homedir() });
+  const askUserSettings = await AskUserConfigSettings.open(permissionSettings);
   const configStore = await ConfigStore.open(join(configDir, 'config.json'));
   const roleSettings = await RoleSettings.open(join(configDir, 'config.json'), { trustedHome: homedir() });
   const modelSettings = await ModelSettings.open(join(configDir, 'config.json'), { trustedHome: homedir() });
@@ -171,6 +174,10 @@ async function main(): Promise<void> {
       reviewPlan: interactive
         ? (plan, signal, requestId) => approvals.planHandler(workspacePath, handle.id)(plan, signal, requestId)
         : async () => ({ approved: false, feedback: 'Plan review is unavailable in an unattended scheduled session.' }),
+      askUser: interactive
+        ? (questions, signal, request) => approvals.askHandler(workspacePath, handle.id)(questions, signal, request)
+        : async () => { throw new Error('ask_user is unavailable in an unattended scheduled session.'); },
+      askUserTimeoutSec: resolveAskUserTimeout(permissionSettings.configSnapshot()).timeoutSec,
       audit: (entry) => recordWorkspaceAudit(configDir, workspacePath, entry),
       session: handle,
       system: resolved.system,
@@ -192,6 +199,7 @@ async function main(): Promise<void> {
     workspaces,
     store,
     permissionSettings,
+    askUserSettings,
     approvalBroker: approvals,
     runtime,
     modelCatalog: async () => {

@@ -7,9 +7,10 @@
 
 import type { TrajectoryEndReason } from './trajectory';
 import { projectPendingPermission, projectPendingPlanReview } from '../../core/src/session/plan';
+import { projectPendingAskUser } from '../../core/src/session/ask-user';
 
 /** The user-facing interaction a running turn is blocked on. */
-export type SessionPendingKind = 'approval' | 'plan-review';
+export type SessionPendingKind = 'approval' | 'plan-review' | 'ask-user';
 
 /** How the session's latest persisted turn ended. */
 export interface SessionLastTurn {
@@ -69,6 +70,7 @@ export function sessionPendingKind(
 ): SessionPendingKind | null {
   const types = new Set(prompts.map((prompt) => prompt.type));
   if (types.has('plan.review.requested')) return 'plan-review';
+  if (types.has('ask-user.requested')) return 'ask-user';
   if (types.has('permission.requested')) return 'approval';
   if (events === undefined) return null;
   const log = events.flatMap((event) => {
@@ -76,6 +78,7 @@ export function sessionPendingKind(
     return typeof data?.type === 'string' ? [{ type: data.type, data: data.data }] : [];
   });
   if (projectPendingPlanReview(log) !== null) return 'plan-review';
+  if (projectPendingAskUser(log) !== null) return 'ask-user';
   if (projectPendingPermission(log) !== null) return 'approval';
   return null;
 }

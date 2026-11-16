@@ -220,6 +220,17 @@ export {
 } from './session/plan';
 export type { PendingPermission, PendingPlanReview, PlanProjection } from './session/plan';
 export {
+  ASK_USER_CONTINUED_EVENT,
+  ASK_USER_DECISION_EVENT,
+  ASK_USER_PENDING_EVENT,
+  answersForPendingAskUser,
+  createAskUserContinuedEvent,
+  createAskUserDecisionEvent,
+  createAskUserPendingEvent,
+  projectPendingAskUser,
+} from './session/ask-user';
+export type { AskUserDecision, AskUserDecisionKind, PendingAskUser } from './session/ask-user';
+export {
   GOAL_ACTIVATIONS,
   GOAL_CHANGE_EVENT,
   GOAL_CHANGE_VERSION,
@@ -314,6 +325,27 @@ export {
 } from './tools/builtin/exit-plan-mode';
 export type { PlanReviewResponse } from './tools/builtin/exit-plan-mode';
 export {
+  ASK_USER_DEFAULT_TIMEOUT_SEC,
+  ASK_USER_MAX_TIMEOUT_SEC,
+  ASK_USER_PENDING_MESSAGE,
+  ASK_USER_TOOL_NAME,
+  createAskUserTool,
+  parseAskUserQuestions,
+  parseAskUserTimeout,
+  renderAskUserResult,
+  renderLateAskUserAnswer,
+  validateAskUserAnswers,
+} from './tools/builtin/ask-user';
+export type {
+  AskUserAnswerBatch,
+  AskUserAnswerItem,
+  AskUserOption,
+  AskUserPendingResult,
+  AskUserQuestion,
+  AskUserRequest,
+  AskUserToolResult,
+} from './tools/builtin/ask-user';
+export {
   CREATE_GOAL_TOOL_NAME,
   GET_GOAL_TOOL_NAME,
   UPDATE_GOAL_TOOL_NAME,
@@ -400,6 +432,8 @@ export {
   loadConfig,
 } from './config/load';
 export type { Config, LoadedConfig, ProviderConfig } from './config/load';
+export { isAskUserTimeout, resolveAskUserTimeout } from './config/ask-user';
+export type { AskUserSettings } from './config/ask-user';
 
 // 组合根
 export { DEFAULT_SYSTEM_PROMPT, Session } from './session';

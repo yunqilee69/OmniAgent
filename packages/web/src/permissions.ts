@@ -167,6 +167,27 @@ export class PermissionSettings {
     return this.snapshot();
   }
 
+  /**
+   * Replace the parsed configuration after another settings section validated it.
+   * Callers must already hold a consistent snapshot; this writes the file and
+   * refreshes the trusted in-process copy.
+   */
+  async replaceConfig(config: Record<string, unknown>): Promise<void> {
+    const operation = this.pending.then(async () => {
+      const current = await readConfig(this.filePath, this.home);
+      if (current.text !== this.lastText) throw new Error('Configuration changed outside the settings service');
+      const text = `${JSON.stringify(config, null, 2)}\n`;
+      const parsed = ConfigSchema.parse(config);
+      await this.write(text);
+      this.lastText = text;
+      this.value = resolveSettings(config);
+      this.config = parsed;
+      this.revision += 1;
+    });
+    this.pending = operation.then(() => undefined, () => undefined);
+    return operation;
+  }
+
   async update(input: unknown): Promise<PermissionSettingsValue> {
     const nextPreset = validateUpdate(input);
     const operation = this.pending.then(async () => {

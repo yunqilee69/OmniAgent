@@ -1,4 +1,5 @@
 import type { ToolCall, ToolResult, AssistantMessage, Message } from '../domain/message';
+import type { AskUserQuestion } from '../tools/builtin/ask-user';
 
 /**
  * 对外协议层：core 与 UI 之间唯一的契约。
@@ -43,6 +44,16 @@ export type AgentEvent =
   /** Live-only plan review prompt; the plan is persisted with the tool call/result. */
   | { type: 'plan.review.requested'; requestId: string; plan: string }
   | { type: 'plan.review.decided'; requestId: string; approved: boolean; feedback?: string }
+  /** Live-only question prompt. The questions are persisted with the tool call. */
+  | {
+    type: 'ask-user.requested';
+    requestId: string;
+    questions: AskUserQuestion[];
+    timeoutSec: number;
+    /** Epoch milliseconds when a finite wait expires. Absent when the wait is indefinite. */
+    deadlineAt?: number;
+  }
+  | { type: 'ask-user.decided'; requestId: string; action: 'answer' | 'cancel' | 'pending' }
   | { type: 'tool.result'; result: ToolResult }
   | { type: 'context.compacted'; beforeTokens: number; afterTokens: number }
   /**

@@ -15,7 +15,7 @@ import { writeFileTool } from './write-file';
  * 需要会话上下文的工具不在这里注册，由组合根按需构造：
  *
  * - `bash`、`write_file`、`edit_file` 的沙盒版本 → session.ts（要 DSH 权限策略）
- * - `todo_write` / `exit_plan_mode` → session.ts（要写会话事件、要审批回调）
+ * - `todo_write` / `exit_plan_mode` / `ask_user` → session.ts（要写会话事件、要用户回调）
  * - `get_goal` / `create_goal` / `update_goal` → session.ts（要读写 goal 事件与轮次状态）
  * - `subagent` 组 → session.ts（要 SubagentService）
  *
