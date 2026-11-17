@@ -434,6 +434,16 @@ export {
 export type { Config, LoadedConfig, ProviderConfig } from './config/load';
 export { isAskUserTimeout, resolveAskUserTimeout } from './config/ask-user';
 export type { AskUserSettings } from './config/ask-user';
+export {
+  ARCHIVE_DEFAULT_RETENTION_MS,
+  ARCHIVE_MAX_RETENTION_MS,
+  ARCHIVE_MIN_RETENTION_MS,
+  ARCHIVE_SCAN_INTERVAL_MS,
+  isArchiveRetention,
+  resolveArchiveSettings,
+  selectArchiveCandidates,
+} from './config/archive';
+export type { ArchiveCandidate, ArchiveSettings } from './config/archive';
 
 // 组合根
 export { DEFAULT_SYSTEM_PROMPT, Session } from './session';

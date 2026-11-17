@@ -13,6 +13,7 @@ import {
   sessionApiPath,
   workspaceApiPath,
   validateAgent,
+  validateArchiveSettings,
   validateAgentDefinition,
   validateAgentProfiles,
   validateAgentSkills,
@@ -34,6 +35,7 @@ import {
   validateScheduleHistory,
   responseError,
   type AgentDefinitionDetail,
+  type ArchiveSettings,
   type ArchivedSessionSummary,
   type AgentDefinitionWrite,
   type AgentSkill,
@@ -166,6 +168,9 @@ export interface AppState {
   permissionsError: string;
   askUserTimeout: { timeoutSec: number; requiresSelection: boolean } | null;
   askUserTimeoutSaving: boolean;
+  /** Automatic archiving. Null until the settings page has loaded it. */
+  archiveSettings: ArchiveSettings | null;
+  archiveSettingsSaving: boolean;
   models: ModelSummary[];
   modelsLoading: boolean;
   modelsError: string;
@@ -466,6 +471,8 @@ export class AppStore {
     permissionsError: '',
     askUserTimeout: null,
     askUserTimeoutSaving: false,
+    archiveSettings: null,
+    archiveSettingsSaving: false,
     models: [],
     modelsLoading: true,
     modelsError: '',
@@ -836,6 +843,7 @@ export class AppStore {
     this.patch({ tab: 'settings' });
     void this.loadPermissions();
     void this.loadAskUserTimeout();
+    void this.loadArchiveSettings();
     void this.loadCatalogs();
     void this.loadModes();
     void this.loadRoleEntries();
@@ -1175,6 +1183,7 @@ export class AppStore {
   async bootstrap(): Promise<void> {
     void this.loadPermissions();
     void this.loadAskUserTimeout();
+    void this.loadArchiveSettings();
     void this.loadCatalogs();
     void this.loadModelSources();
     void this.loadMcpServers();
@@ -2733,6 +2742,74 @@ export class AppStore {
         });
       }
     }
+  }
+
+  async loadArchiveSettings(): Promise<void> {
+    try {
+      const body = await this.api<{ settings?: unknown }>('/api/settings/archive');
+      this.patch({ archiveSettings: validateArchiveSettings(body.settings) });
+    } catch {
+      // The card shows the off-by-default fallback until settings load.
+    }
+  }
+
+  async saveArchiveSettings(enabled: boolean, retentionMs: number): Promise<void> {
+    if (this.state.archiveSettingsSaving) return;
+    this.patch({ archiveSettingsSaving: true });
+    try {
+      const body = await this.api<{ settings?: unknown }>(
+        '/api/settings/archive',
+        jsonOptions('PUT', { enabled, retentionMs }),
+      );
+      this.patch({ archiveSettingsSaving: false, archiveSettings: validateArchiveSettings(body.settings) });
+    } catch (error) {
+      this.patch({ archiveSettingsSaving: false });
+      this.showAlert(translator(this.state.locale)('Could not save archive settings: {message}', { message: (error as Error).message }));
+    }
+  }
+
+  /**
+   * Delete archived sessions by the ids the caller just listed.
+   *
+   * Sending the ids, rather than "delete everything archived", keeps a session
+   * that was filed away while the request was in flight. The host skips any id
+   * that is no longer archived, so a restore wins over a stale delete.
+   * @returns the sessions the host actually removed.
+   */
+  async deleteArchivedSessions(sessions: readonly { workspaceId: string; id: string }[]): Promise<{ workspaceId: string; id: string }[]> {
+    if (sessions.length === 0) return [];
+    const body = await this.api<{ deleted?: unknown; sessions?: unknown }>(
+      '/api/sessions/archived/delete',
+      jsonOptions('POST', { sessions: sessions.map((session) => ({ workspaceId: session.workspaceId, id: session.id })) }),
+    );
+    if (!Array.isArray(body.sessions)) throw new Error(translator(this.state.locale)('The server did not return a session list.'));
+    const removed = body.sessions
+      .filter((item): item is Record<string, unknown> => typeof item === 'object' && item !== null)
+      .filter((item) => typeof item.workspaceId === 'string' && typeof item.id === 'string')
+      .map((item) => ({ workspaceId: item.workspaceId as string, id: item.id as string }));
+    let changed = false;
+    for (const session of removed) {
+      const key = sessionKey(session.workspaceId, session.id);
+      const wasSelected = this.state.workspaceId === session.workspaceId && this.state.sessionId === session.id;
+      const wasRemembered = this.state.selectedByWorkspace[session.workspaceId] === session.id;
+      if (this.state.entries[key] === undefined && !wasRemembered && !wasSelected) continue;
+      const entries = { ...this.state.entries };
+      delete entries[key];
+      const selected = { ...this.state.selectedByWorkspace };
+      if (wasRemembered) delete selected[session.workspaceId];
+      this.state = {
+        ...this.state,
+        entries,
+        selectedByWorkspace: selected,
+        ...(wasSelected ? { sessionId: null } : {}),
+      };
+      changed = true;
+    }
+    if (changed) {
+      this.persistSelection();
+      this.emit();
+    }
+    return removed;
   }
 
   async loadAskUserTimeout(): Promise<void> {

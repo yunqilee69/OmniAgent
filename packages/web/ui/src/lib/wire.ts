@@ -179,6 +179,15 @@ export interface RecentSessionSummary {
   mode?: string;
 }
 
+/** Automatic archiving. Disabled until the user turns it on. */
+export interface ArchiveSettings {
+  enabled: boolean;
+  /** Idle time, in milliseconds, after which a root session is filed away. */
+  retentionMs: number;
+  /** True when the stored value is illegal and the shown value is the fallback. */
+  requiresSelection: boolean;
+}
+
 /** One archived session, listed across every registered workspace. */
 export interface ArchivedSessionSummary {
   id: string;
@@ -1253,6 +1262,23 @@ export function validateArchivedSessions(value: unknown): ArchivedSessionSummary
       ...(typeof item.agent === 'string' ? { agent: item.agent } : {}),
       ...(typeof item.mode === 'string' ? { mode: item.mode } : {}),
     }));
+}
+
+export function validateArchiveSettings(value: unknown): ArchiveSettings {
+  if (typeof value !== 'object' || value === null) throw new Error('Invalid archive settings response.');
+  const settings = value as Record<string, unknown>;
+  if (typeof settings.enabled !== 'boolean'
+    || typeof settings.retentionMs !== 'number'
+    || !Number.isSafeInteger(settings.retentionMs)
+    || settings.retentionMs < 1
+    || typeof settings.requiresSelection !== 'boolean') {
+    throw new Error('Invalid archive settings response.');
+  }
+  return {
+    enabled: settings.enabled,
+    retentionMs: settings.retentionMs,
+    requiresSelection: settings.requiresSelection,
+  };
 }
 
 export function validatePermissionSettings(value: unknown): PermissionSettings {

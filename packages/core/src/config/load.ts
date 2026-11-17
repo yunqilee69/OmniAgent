@@ -158,6 +158,11 @@ export const ConfigSchema = z.object({
    * settings page can repair them; resolution applies the default.
    */
   askUser: z.unknown().optional(),
+  /**
+   * Automatic session archiving. Invalid stored values stay readable so the
+   * settings page can repair them; resolution applies the off-by-default fallback.
+   */
+  archive: z.unknown().optional(),
   /** Model-facing todo policy. Parallel active items suit workflows that delegate work to subagents. */
   todo: z.object({
     allowParallelInProgress: z.boolean().default(false),

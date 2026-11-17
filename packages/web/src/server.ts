@@ -28,6 +28,7 @@ import {
   SESSION_PIN_EVENT,
   SESSION_TITLE_EVENT,
   truncateTitleUtf8,
+  ARCHIVE_SCAN_INTERVAL_MS,
 } from '@omniagent/core';
 import type {
   AgentAuthoringService,
@@ -90,6 +91,9 @@ import { InvalidPermissionSettings } from './permissions';
 import type { PermissionSettings } from './permissions';
 import { InvalidAskUserSettings } from './ask-user-settings';
 import type { AskUserConfigSettings } from './ask-user-settings';
+import { InvalidArchiveSettings } from './archive-settings';
+import type { ArchiveConfigSettings } from './archive-settings';
+import { scanAutomaticArchives } from './archive-scan';
 import { InvalidRoleSettings } from './catalog-settings';
 import type { RoleSettings } from './catalog-settings';
 import { InvalidModelSettings } from './model-settings';
@@ -215,6 +219,11 @@ export interface WebHostOptions {
   permissionSettings?: Pick<PermissionSettings, 'read' | 'update' | 'snapshot' | 'current'>;
   /** Global ask_user foreground wait, stored beside the permission default. */
   askUserSettings?: Pick<AskUserConfigSettings, 'read' | 'update'>;
+  /**
+   * Automatic session archiving. The host scans on its own cadence; this is
+   * only the stored on/off switch and retention window.
+   */
+  archiveSettings?: Pick<ArchiveConfigSettings, 'read' | 'update'>;
   approvalBroker?: ApprovalBroker;
   /** Credential-free model metadata for the configured catalog. */
   modelCatalog?: () => ModelSummary[] | Promise<ModelSummary[]>;
@@ -419,6 +428,22 @@ export function createWebHost(options: WebHostOptions): WebHost {
   const compactRequests = new Set<string>();
   const statusHub = new SessionStatusHub();
   const observedSockets = new WeakSet<object>();
+  // Automatic archiving is a host concern: every pass re-reads the saved
+  // setting, so turning it off takes effect without a restart. The first pass
+  // runs once the listener is up, then repeats on the scan interval.
+  const runArchiveScan = (): void => {
+    if (options.archiveSettings === undefined) return;
+    void (async () => {
+      const settings = await options.archiveSettings?.read();
+      if (settings === undefined || !settings.enabled) return;
+      await scanAutomaticArchives(options.store, settings, new Set(running.keys()));
+    })().catch(() => undefined);
+  };
+  const archiveTimer = options.archiveSettings === undefined
+    ? undefined
+    : setInterval(runArchiveScan, ARCHIVE_SCAN_INTERVAL_MS);
+  archiveTimer?.unref();
+  if (options.archiveSettings !== undefined) setTimeout(runArchiveScan, 0).unref();
   const server = createServer((request, response) => {
     // A client can reset the connection while a response write is in flight;
     // that surfaces as EPIPE/ECONNRESET on the socket, not on the response.
@@ -501,6 +526,7 @@ export function createWebHost(options: WebHostOptions): WebHost {
       return `http://${hostname.includes(':') ? `[${hostname}]` : hostname}:${address.port}`;
     },
     close: () => new Promise((resolve, reject) => {
+      if (archiveTimer !== undefined) clearInterval(archiveTimer);
       statusHub.closeAll();
       for (const turn of running.values()) {
         cancelTurn(turn);
@@ -990,6 +1016,24 @@ async function route(
   if (url.pathname === '/api/schedules' || url.pathname.startsWith('/api/schedules/')) {
     if (!options.schedule) throw new HttpError(404, 'Not found');
     return routeSchedules(request, response, url, options.schedule);
+  }
+  if (url.pathname === '/api/settings/archive' && options.archiveSettings) {
+    if (request.method === 'GET') return json(response, 200, { settings: await options.archiveSettings.read() });
+    if (request.method === 'PUT') {
+      const body = await readJson(request);
+      try {
+        return json(response, 200, { settings: await options.archiveSettings.update(body) });
+      } catch (error) {
+        if (error instanceof InvalidArchiveSettings) throw new HttpError(400, 'Invalid archive settings');
+        throw error;
+      }
+    }
+  }
+  if (request.method === 'POST' && url.pathname === '/api/sessions/archived/delete') {
+    const body = await readJson(request);
+    const requested = parseArchivedDeletion(body);
+    const removed = await deleteArchivedSessions(options, requested, running);
+    return json(response, 200, { deleted: removed.length, sessions: removed });
   }
   if (url.pathname === '/api/settings/ask-user' && options.askUserSettings) {
     if (request.method === 'GET') return json(response, 200, { settings: await options.askUserSettings.read() });
@@ -2553,6 +2597,65 @@ async function describeSelection(
       agentWarnings: [],
     };
   }
+}
+
+/**
+ * Accept `{ sessions: [{ workspaceId, id }] }` and nothing else.
+ * An empty list deletes nothing; callers that want every archived session send
+ * the ids they just listed, so a session archived a moment later is not swept up.
+ */
+function parseArchivedDeletion(body: Record<string, unknown>): Array<{ workspaceId: string; id: string }> {
+  if (Object.keys(body).length !== 1 || !Array.isArray(body.sessions)) {
+    throw new HttpError(400, 'A list of archived sessions is required');
+  }
+  if (body.sessions.length > 500) throw new HttpError(400, 'Too many sessions to delete at once');
+  const seen = new Set<string>();
+  return body.sessions.map((item) => {
+    if (typeof item !== 'object' || item === null || Array.isArray(item)) {
+      throw new HttpError(400, 'A list of archived sessions is required');
+    }
+    const entry = item as Record<string, unknown>;
+    if (Object.keys(entry).length !== 2 || typeof entry.workspaceId !== 'string' || entry.workspaceId === ''
+      || typeof entry.id !== 'string' || entry.id === '') {
+      throw new HttpError(400, 'Each archived session needs a workspace and an id');
+    }
+    const key = `${entry.workspaceId}\0${entry.id}`;
+    if (seen.has(key)) throw new HttpError(400, 'The same archived session was listed twice');
+    seen.add(key);
+    return { workspaceId: entry.workspaceId, id: entry.id };
+  });
+}
+
+/**
+ * Delete archived root sessions and nothing else.
+ *
+ * A session that is not archived, is a child, is missing, or still has an open
+ * turn is reported back as skipped by simply not appearing in the result: the
+ * caller already holds the list it asked to delete and can tell which rows remain.
+ */
+async function deleteArchivedSessions(
+  options: WebHostOptions,
+  requested: readonly { workspaceId: string; id: string }[],
+  running: Map<string, RunningTurn>,
+): Promise<Array<{ workspaceId: string; id: string }>> {
+  const removed: Array<{ workspaceId: string; id: string }> = [];
+  for (const target of requested) {
+    const workspace = await options.workspaces.get(target.workspaceId);
+    if (workspace === undefined) continue;
+    if (running.has(`${workspace.path}\0${target.id}`)) continue;
+    let handle: SessionHandle;
+    try {
+      handle = await openSession(options.store, workspace, target.id);
+    } catch {
+      continue;
+    }
+    if (!foldSessionArchived(handle.events)) continue;
+    if (handle.header.parentSessionId !== undefined || handle.header.depth !== undefined) continue;
+    await options.store.delete(workspace.path, target.id);
+    options.liveSessions?.delete(`${workspace.path}\0${target.id}`);
+    removed.push(target);
+  }
+  return removed;
 }
 
 async function openSession(store: WebHostOptions['store'], workspace: Workspace, sessionId: string): Promise<SessionHandle> {

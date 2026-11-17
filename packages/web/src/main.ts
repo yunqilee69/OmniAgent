@@ -28,6 +28,7 @@ import { McpSettings } from './mcp-settings';
 import { ModelSettings } from './model-settings';
 import { LiveSessionRegistry } from './live-sessions';
 import { AskUserConfigSettings } from './ask-user-settings';
+import { ArchiveConfigSettings } from './archive-settings';
 import { PermissionSettings } from './permissions';
 import { SessionScheduleHost } from './schedule-host';
 import { parseWebPort, startWebHost } from './server';
@@ -38,6 +39,7 @@ async function main(): Promise<void> {
   const configDir = defaultConfigDir();
   const permissionSettings = await PermissionSettings.open(join(configDir, 'config.json'), { trustedHome: homedir() });
   const askUserSettings = await AskUserConfigSettings.open(permissionSettings);
+  const archiveSettings = await ArchiveConfigSettings.open(permissionSettings);
   const configStore = await ConfigStore.open(join(configDir, 'config.json'));
   const roleSettings = await RoleSettings.open(join(configDir, 'config.json'), { trustedHome: homedir() });
   const modelSettings = await ModelSettings.open(join(configDir, 'config.json'), { trustedHome: homedir() });
@@ -200,6 +202,7 @@ async function main(): Promise<void> {
     store,
     permissionSettings,
     askUserSettings,
+    archiveSettings,
     approvalBroker: approvals,
     runtime,
     modelCatalog: async () => {

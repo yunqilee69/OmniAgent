@@ -2,6 +2,7 @@ import { useState, type ReactNode } from 'react';
 import clsx from 'clsx';
 import {
   IconAgentPresetOutlineRegular,
+  IconArchiveOutlineRegular,
   IconCordisPluginOutlineRegular,
   IconDataOutlineRegular,
   IconPersonalizationOutlineRegular,
@@ -13,10 +14,11 @@ import { SettingsGeneral } from './settings/SettingsGeneral.tsx';
 import { SettingsModels } from './settings/SettingsModels.tsx';
 import { SettingsModes } from './settings/SettingsModes.tsx';
 import { SettingsAgents } from './settings/SettingsAgents.tsx';
+import { SettingsArchive } from './settings/SettingsArchive.tsx';
 import { SettingsMcp } from './settings/SettingsMcp.tsx';
 import css from '../styles/settings.module.css';
 
-type SettingsTab = 'general' | 'models' | 'mcp' | 'modes' | 'agents';
+type SettingsTab = 'general' | 'archive' | 'models' | 'mcp' | 'modes' | 'agents';
 
 /**
  * Settings page: a left navigation rail beside a scrollable content column.
@@ -30,6 +32,7 @@ export function SettingsPage(): ReactNode {
 
   const tabs: Array<{ id: SettingsTab; label: string; icon: ReactNode }> = [
     { id: 'general', label: t('General'), icon: <IconSettingsOutlineRegular size={16} /> },
+    { id: 'archive', label: t('Archive'), icon: <IconArchiveOutlineRegular size={16} /> },
     { id: 'models', label: t('Model configuration'), icon: <IconDataOutlineRegular size={16} /> },
     { id: 'mcp', label: t('MCP servers'), icon: <IconCordisPluginOutlineRegular size={16} /> },
     { id: 'modes', label: t('Mode presets'), icon: <IconPersonalizationOutlineRegular size={16} /> },
@@ -59,6 +62,7 @@ export function SettingsPage(): ReactNode {
           </nav>
           <div className={css.content}>
             {active === 'general' && <SettingsGeneral />}
+            {active === 'archive' && <SettingsArchive />}
             {active === 'models' && <SettingsModels />}
             {active === 'mcp' && <SettingsMcp />}
             {active === 'modes' && <SettingsModes />}

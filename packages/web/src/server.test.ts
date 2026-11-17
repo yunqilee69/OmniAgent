@@ -640,6 +640,44 @@ describe('workspace web host', () => {
       .toEqual([expect.objectContaining({ id: 'alpha-filed' })]);
   });
 
+  it('deletes only the archived sessions the caller listed', async () => {
+    const { base, first, second, store } = await setup();
+    const filed = await store.create({ id: 'filed', workspace: first.path, cwd: first.path });
+    await filed.append({ type: 'message/user', data: { text: 'filed' }, ts: 10 });
+    const kept = await store.create({ id: 'kept', workspace: first.path, cwd: first.path });
+    await kept.append({ type: 'message/user', data: { text: 'kept' }, ts: 20 });
+    const other = await store.create({ id: 'other', workspace: second.path, cwd: second.path });
+    await other.append({ type: 'message/user', data: { text: 'other' }, ts: 30 });
+    await fetch(`${sessionsUrl(base, first.id)}/filed/archive`, jsonRequest({ archived: true }));
+    await fetch(`${sessionsUrl(base, second.id)}/other/archive`, jsonRequest({ archived: true }));
+
+    const removed = await fetch(`${base}/api/sessions/archived/delete`, jsonRequest({
+      sessions: [{ workspaceId: first.id, id: 'filed' }, { workspaceId: first.id, id: 'kept' }],
+    }));
+    expect(removed.status).toBe(200);
+    // The open session was named but is not archived, so it stays on disk.
+    expect(await removed.json()).toEqual({
+      deleted: 1,
+      sessions: [{ workspaceId: first.id, id: 'filed' }],
+    });
+    expect((await fetch(`${sessionsUrl(base, first.id)}/filed`)).status).toBe(404);
+    expect((await fetch(`${sessionsUrl(base, first.id)}/kept`)).status).toBe(200);
+    const remaining = (await jsonResponse<{ sessions: Array<{ id: string }> }>(
+      await fetch(`${base}/api/sessions/archived`),
+    )).sessions.map((session) => session.id);
+    expect(remaining).toEqual(['other']);
+
+    for (const body of [
+      {},
+      { sessions: [{ workspaceId: first.id, id: 'other', extra: true }] },
+      { sessions: [{ workspaceId: '', id: 'other' }] },
+      { sessions: 'all' },
+    ]) {
+      expect((await fetch(`${base}/api/sessions/archived/delete`, jsonRequest(body))).status).toBe(400);
+    }
+    expect((await store.open(second.path, 'other')).id).toBe('other');
+  });
+
   it('deletes one session without touching its siblings', async () => {
     const { base, first, store } = await setup();
     const url = sessionsUrl(base, first.id);

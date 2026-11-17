@@ -95,7 +95,8 @@ export class ConfigStore {
       if (error instanceof ZodError) {
         const allowedFields = new Set(['web', 'host', 'port', 'auth', 'enabled', 'username', 'password', 'model', 'provider',
           'providers', 'roles', 'agentProfiles', 'mcpServers', 'reasoningEffort', 'maxTokens', 'contextWindowTokens',
-          'retainContextTokens', 'dsh', 'maxSteps', 'subagents', 'maxDepth', 'maxActive', 'todo', 'allowParallelInProgress', 'system']);
+          'retainContextTokens', 'dsh', 'maxSteps', 'subagents', 'maxDepth', 'maxActive', 'todo', 'allowParallelInProgress',
+          'askUser', 'archive', 'retentionMs', 'system']);
         const issues = error.issues.map((issue) => {
           const path = issue.path.map((part) => typeof part === 'string' && allowedFields.has(part) ? part : '*').join('.');
           return `${path || '<root>'}: ${issue.code}`;

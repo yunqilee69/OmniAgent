@@ -493,6 +493,8 @@ AuthGate
 
 侧边栏每个工作区组默认只渲染最新的 5 条会话，底部「显示更多（N）」按钮一次再放出 5 条（`SESSIONS_PER_PAGE`，按工作区记窗口大小）；当前选中的会话即使落在窗口之外也会强制显示，搜索态不做分页，命中的会话全部列出。会话行菜单的「归档会话」写入 `session/archived` 事件：行立即从列表消失，但对话记录、标题和子智能体都留在数据目录里，仍可按键入的会话 id 打开；侧边栏标题栏的归档按钮打开「归档会话」弹窗，那里拉取的是跨工作区的归档列表（`GET /api/sessions/archived`，只列主会话，子会话仍从父会话的团队卡片进入），每行标注所属工作区并可以「恢复会话」——恢复时按该行的工作区 id 调归档接口，成功后重新拉一次对应工作区的侧边栏列表。归档弹窗不再依赖当前选中的工作区，因此未选工作区时入口也可用。
 
+设置页左侧有独立的「归档管理」分区，不在通用配置里。自动归档默认关闭，开启后选择保留时长（1 天到 90 天，写入 `config.json` 的 `archive`）。宿主大约每小时扫描一次，把最后活动时间早于该时长的主会话写入 `session/archived`；置顶、子会话和正在运行的会话不参与。同一页按工作区分组列出全部已归档会话，可搜索、按更新时间 / 创建时间 / 名称排序、按项目筛选，并支持逐条或按当前列表全部删除（`POST /api/sessions/archived/delete`，只删除调用方点名的已归档主会话）。
+
 子智能体在标题栏呈现为一棵可导航的路径：打开子会话时，标题变成「主会话标题 / 子任务名」，主会话那一段是可点击按钮，点击即切回主会话（多层嵌套则逐段可点）。团队入口只出现一次：主会话视图是标题右侧的「N 个子智能体」文字按钮；子会话视图不再显示这个按钮，改成当前子任务名本身可以点开——在这个位置选其他子智能体。两种入口打开的是同一张卡片，每行给出状态点、任务名、任务说明、可继续 / 状态、耗时和 token 总量，点击某行切到该子会话。侧边栏只列用户自己发起的会话，子智能体不再占用任务列表的一行，全部从这张卡片进入。标题文字统一取自工作区会话列表（与侧边栏同源），因为标题可能在回合一结束之后才生成，只有列表里有；列表数据里的 `subagentStatus` 与 `usage` 投影提供状态与 token，展开卡片时重新拉一次列表，因此子智能体结束后状态不会停在「运行中」。
 
 响应式：
@@ -527,7 +529,7 @@ AuthGate
 
 关键行为：
 
-- `bootstrap()`：加载工作区、会话、catalog、权限；
+- `bootstrap()`：加载工作区、会话、catalog、权限、自动归档设置；
 - `loadDetail()`：一次 patch 全部字段（含 metrics），重建 transcript / turns；
 - `startDraftSession()`：UI-only draft，不落库；
 - `persistDraftSession()`：第一条消息时创建真实会话，再补权限 / plan；
@@ -536,7 +538,7 @@ AuthGate
 - `consumeStream()`：逐事件 `applyAgentEvent`，同时用 `applyMetricsEvent` 增量维护 metrics；
 - `stopTurn()`：先置 stopping，再 `POST interrupt`；
 - `resolveApproval()` / `resolvePlanReview()`：HTTP 回填；
-- `compactSession()`、`queueMessage()`、`steerMessage()`、`renameSession()`、`setSessionPinned()`、`setSessionArchived()`、`listArchivedSessions()`、`forkSession()`、`deleteSession()`、`exportSession()`；归档后行从 `sessionsByWorkspace` 移除，恢复时重新拉该工作区列表；`listArchivedSessions()` 读 `GET /api/sessions/archived`，覆盖全部已登记工作区，结果只存在于归档弹窗自己的状态里；
+- `compactSession()`、`queueMessage()`、`steerMessage()`、`renameSession()`、`setSessionPinned()`、`setSessionArchived()`、`listArchivedSessions()`、`deleteArchivedSessions()`、`forkSession()`、`deleteSession()`、`exportSession()`；归档后行从 `sessionsByWorkspace` 移除，恢复时重新拉该工作区列表；`listArchivedSessions()` 读 `GET /api/sessions/archived`，覆盖全部已登记工作区，结果只存在于归档弹窗和设置页自己的状态里；`deleteArchivedSessions()` 把调用方列出的 id 交给 `POST /api/sessions/archived/delete`，只从本地选择里清掉服务端确认删除的会话；
 - `ensureStatusStream()` / `consumeStatusStream()`：订阅 `GET /api/workspaces/:id/events`，把宿主推送的 `session.status` 合并进 `statusBySession`；流不可用或断开时退回列表基线，只有曾经连通过才在 2 秒后重连；
 - `reconcileSessionStatuses()`：用列表基线补齐每个会话的现状（含 `lastTurn` 失败标记），与推送走同一套迁移规则；
 - `observeSessionStatus()`：处理单条推送；`running` 真→假时若该会话不是当前会话，置 `completionUnread`，并在 400 毫秒后调用 `refreshSessions()` 一次性刷新排序与结果；
