@@ -56,6 +56,8 @@ import { createScheduleTools, renderScheduleToolGuidance, SCHEDULE_TOOL_GROUP } 
 import type { ScheduleService } from './schedule/service';
 import { createAgentAuthoringTools, WRITE_AGENT_DEFINITION_TOOL_NAME } from './agents/authoring';
 import type { AgentAuthoringService } from './agents/authoring';
+import { createCreatorTools, CREATOR_TOOL_GROUP, renderCreatorToolGuidance } from './creator/tools';
+import type { CreatorServices } from './creator/types';
 import { TODO_WRITE_EVENT } from './session/todo';
 import {
   createPermissionPendingEvent,
@@ -177,6 +179,12 @@ export interface SessionOptions {
   /** Creator-mode agent definition authoring; enables list/write agent tools. */
   agentAuthoring?: AgentAuthoringService;
   /**
+   * Host-provided Creator configuration capabilities (modes, roles, model
+   * sources, general settings and MCP). Only interactive Creator sessions
+   * receive this object, so ordinary sessions never see these tools.
+   */
+  creator?: CreatorServices;
+  /**
    * Tools discovered from configured MCP servers. They run outside the local
    * sandbox, so they are trusted by the permission layer; the server entry
    * itself is user-authored configuration.
@@ -223,6 +231,7 @@ export class Session {
   private readonly agentValue?: SessionAgent;
   private readonly modelCapabilities?: ModelCapabilities;
   private readonly subagents?: SubagentService;
+  private readonly creatorServices?: CreatorServices;
   private readonly teamMembers?: readonly TeamMemberSnapshot[];
   private readonly teamMaxActive?: number;
   private readonly reviewPlanHandler?: SessionOptions['reviewPlan'];
@@ -265,6 +274,7 @@ export class Session {
     this.agentValue = options.agent;
     this.modelCapabilities = options.modelCapabilities;
     this.subagents = options.subagents;
+    this.creatorServices = options.creator;
     this.teamMembers = options.teamMembers;
     this.teamMaxActive = options.teamMaxActive;
     this.reviewPlanHandler = options.reviewPlan;
@@ -432,6 +442,14 @@ export class Session {
       }
     }
 
+    if (options.creator) {
+      for (const tool of createCreatorTools(options.creator)) {
+        if (!allows(tool.name)) continue;
+        this.tools.register(tool);
+        this.trusted.add(tool);
+      }
+    }
+
     this.loop = new AgentLoop({
       model: options.model,
       modelId: options.modelId ?? 'fake',
@@ -523,6 +541,7 @@ export class Session {
       parts.push(renderTeamGuidance(this.teamMembers, this.teamMaxActive ?? this.teamMembers.length));
     }
     if (this.hasScheduleTools()) parts.push(renderScheduleToolGuidance());
+    if (this.hasCreatorTools()) parts.push(renderCreatorToolGuidance());
     if (this.depth === 0 && this.subagents !== undefined) {
       const guidance: string[] = [];
       if (this.allowsTool('send_message')) {
@@ -548,6 +567,10 @@ export class Session {
 
   private hasScheduleTools(): boolean {
     return SCHEDULE_TOOL_GROUP.some((name) => this.allowsTool(name));
+  }
+
+  private hasCreatorTools(): boolean {
+    return this.creatorServices !== undefined && CREATOR_TOOL_GROUP.some((name) => this.allowsTool(name));
   }
 
   get sessionHandle(): SessionHandle | undefined {

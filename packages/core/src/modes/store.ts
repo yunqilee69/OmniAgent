@@ -22,8 +22,10 @@ import { resolveModelBinding, defaultModelBinding, ModelBindingSchema } from '..
 import type { ModelBinding } from '../session/model-binding';
 import { usageAllowsRoot } from '../session/agent-selection';
 import { KNOWN_TOOL_NAMES, expandToolSelector } from '../tools/names';
+import { isMcpToolName } from '../mcp/config';
 import type { AgentCatalog } from '../agents/catalog';
 import { LIST_AGENT_DEFINITIONS_TOOL_NAME, WRITE_AGENT_DEFINITION_TOOL_NAME } from '../agents/authoring';
+import { CREATOR_TOOL_GROUP } from '../creator/tools';
 import {
   CREATE_GOAL_TOOL_NAME,
   EXIT_PLAN_MODE_TOOL_NAME,
@@ -231,6 +233,7 @@ function builtinModes(): ModeDefinition[] {
         SCHEDULE_EDIT_TOOL_NAME,
         LIST_AGENT_DEFINITIONS_TOOL_NAME,
         WRITE_AGENT_DEFINITION_TOOL_NAME,
+        ...CREATOR_TOOL_GROUP,
       ],
       skills: '*',
       members: [],
@@ -249,7 +252,7 @@ function normalizeSelector(selector: ModeSelector): ModeSelector {
 function unknownTools(selector: ModeSelector): string[] {
   const expanded = expandToolSelector(selector);
   if (expanded === '*') return [];
-  return expanded.filter((name) => !KNOWN_TOOL_NAMES.has(name));
+  return expanded.filter((name) => !KNOWN_TOOL_NAMES.has(name) && !isMcpToolName(name));
 }
 
 function withModeFile(value: unknown): ModeFile {

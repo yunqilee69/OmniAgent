@@ -31,6 +31,12 @@ export class ConfigFileError extends Error {}
 
 const trustedDarwinAliases = new Set(['/tmp', '/var']);
 const locks = new Map<string, Promise<void>>();
+/**
+ * Last text this process wrote or observed at open. Every settings service
+ * shares it by path, so a sequence like role write → archive write is coherent
+ * while a hand edit still fails closed on the next write.
+ */
+const trustedTexts = new Map<string, string | undefined>();
 
 export function isObject(value: unknown): value is Record<string, unknown> {
   return typeof value === 'object' && value !== null && !Array.isArray(value);
@@ -84,7 +90,7 @@ async function readSnapshot(path: string, home?: TrustedHome): Promise<ConfigFil
     if (!isNotFound(error)) throw error;
   }
   if (text === undefined || text.trim() === '') {
-    return { raw: {}, config: ConfigSchema.parse({}) };
+    return { ...(text === undefined ? {} : { text }), raw: {}, config: ConfigSchema.parse({}) };
   }
   let raw: unknown;
   try {
@@ -96,12 +102,16 @@ async function readSnapshot(path: string, home?: TrustedHome): Promise<ConfigFil
   return { text, raw, config: ConfigSchema.parse(raw) };
 }
 
-async function writeSnapshot(path: string, raw: Record<string, unknown>, home?: TrustedHome): Promise<Config> {
+async function writeSnapshot(
+  path: string,
+  raw: Record<string, unknown>,
+  home?: TrustedHome,
+): Promise<{ config: Config; text: string }> {
   await assertTrustedHome(home);
   await assertNoSymlinkParents(path, true);
   await mkdir(dirname(path), { recursive: true, mode: 0o700 });
   const config = ConfigSchema.parse(raw);
-  const text = `${JSON.stringify(config, null, 2)}\n`;
+  const text = `${JSON.stringify(raw, null, 2)}\n`;
   const temporary = `${path}.${process.pid}.${randomUUID()}.tmp`;
   let handle: Awaited<ReturnType<typeof open>> | undefined;
   try {
@@ -115,7 +125,7 @@ async function writeSnapshot(path: string, raw: Record<string, unknown>, home?: 
     await handle?.close().catch(() => undefined);
     await unlink(temporary).catch(() => undefined);
   }
-  return config;
+  return { config, text };
 }
 
 /** Serialize one read-modify-write cycle per resolved file path. */
@@ -157,7 +167,8 @@ export class ConfigFile {
       home = { path: homePath, target, configPath: join(target, suffix) };
     }
     const filePath = home?.configPath ?? absolute;
-    await readSnapshot(filePath, home);
+    const snapshot = await readSnapshot(filePath, home);
+    if (!trustedTexts.has(filePath)) trustedTexts.set(filePath, snapshot.text);
     return new ConfigFile(filePath, home);
   }
 
@@ -171,8 +182,13 @@ export class ConfigFile {
   ): Promise<T> {
     return withFileLock(this.path, async () => {
       const snapshot = await readSnapshot(this.path, this.home);
+      if (!trustedTexts.has(this.path)) trustedTexts.set(this.path, snapshot.text);
+      if (snapshot.text !== trustedTexts.get(this.path)) {
+        throw new ConfigFileError('Configuration changed outside the settings service');
+      }
       const { raw, result } = await operation(snapshot);
-      await writeSnapshot(this.path, raw, this.home);
+      const written = await writeSnapshot(this.path, raw, this.home);
+      trustedTexts.set(this.path, written.text);
       return result;
     });
   }

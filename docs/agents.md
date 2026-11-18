@@ -131,7 +131,8 @@ profile: search-only
 - 正文就是 system prompt。为空时使用全局 `system`，两者都为空时使用内置默认提示。
 - agent 文件不能设置模型、工具、skill、权限或沙盒；这些只能来自 config.json 和角色层。
 - 没有 `default.md` 时使用内置 default agent（role `default`、usage `both`、profile `default`、空正文）。如果存在 `default.md` 但无效，不会回退到内置 agent。
-- 内置 `creator`（创造智能体，role `default`、usage `primary`、profile `default`）始终可用，除非目录中存在同名的 `creator.md`。它用于通过对话调整 OmniAgent 本身：`schedule_*` 工具创建自动化任务，`list_agent_definitions` / `write_agent_definition` 读取和写入 `~/.omniagent/agents/*.md`。这两个定义工具只注册在创造模式的主会话中；标准模式不会暴露它们。
+- 内置 `creator`（创造智能体，role `default`、usage `primary`、profile `default`）始终可用，除非目录中存在同名的 `creator.md`。它用于通过对话调整 OmniAgent 本身：`schedule_*` 工具创建自动化任务，`list_agent_definitions` / `write_agent_definition` 读取和写入 `~/.omniagent/agents/*.md`，以及一组配置工具管理模式预设、模型角色与来源、通用设置和 MCP 服务器。这些工具只注册在创造模式的主会话中；标准模式不会暴露它们。
+- 配置工具的安全边界：模型来源只接受 `apiKeyEnv`（环境变量名），不接受或返回 API Key；MCP 的 `env` / `headers` 值只允许 `${VAR}` 引用，列表只返回键名；`update_permission_default` 只接受 `read-only` / `workspace-write`，`danger-full-access` 必须走设置页的风险确认；禁止模型直接手写 `config.json` 或 `modes.json`。
 - `default` 和 `creator` 是保留 id；`write_agent_definition` 拒绝覆盖内置定义。自定义智能体使用独立 id。
 - Web 的「设置 → 智能体」提供人工编辑表单，走同一套校验与写入逻辑（`~/.omniagent/agents/<id>.md`）：可以新建、修改和删除自定义定义，内置定义只读。创造模式则通过对话调用 `list_agent_definitions` / `write_agent_definition` 完成同样的写入。
 
@@ -148,7 +149,16 @@ profile: search-only
 模式是 Web 新会话的组合快照：一个 agent、初始模型绑定来源、工具 allowlist 和 skill allowlist。创建会话后 agent、工具和 skill 固定，模型可在会话内切换。内置模式定义在代码中：
 
 - `standard`（标准模式）：`default` 智能体，跟随智能体角色，全部工具和 skill。
-- `creator`（创造模式）：`creator` 智能体，跟随智能体角色，仅暴露调研、计划、自动化任务和智能体定义相关工具。
+- `creator`（创造模式）：`creator` 智能体，跟随智能体角色，暴露调研、计划、自动化任务、智能体定义，以及模式、模型、通用设置和 MCP 配置工具。
+
+创造模式的配置工具：
+
+- 模式：`list_modes`、`write_mode`、`delete_mode`、`set_default_mode`、`list_mode_options`；模型绑定可使用不带 `version` 的简写，工具层会补 v2。
+- 模型：`list_model_roles`、`write_model_role`、`delete_model_role`、`list_model_sources`、`write_model_source`、`delete_model_source`、`discover_models`。
+- 通用设置：`get_omniagent_settings`、`update_permission_default`、`update_archive_settings`、`update_ask_user_timeout`。
+- MCP：`list_mcp_servers`、`write_mcp_server`、`delete_mcp_server`、`test_mcp_server`。
+
+模式、角色和模型来源的写入会立即落盘并影响后续选择；已有会话保留创建时的模式/智能体/工具快照。通用权限默认值与 ask 超时作用于新会话，MCP 变更在新会话或新子代理中生效。API Key 仍需在「设置 → 模型配置」或环境变量中配置。
 
 用户覆盖和自定义模式保存在 `~/.omniagent/modes.json`：
 
@@ -172,7 +182,7 @@ profile: search-only
 - `name` 必填，最多 120 字符；`description` 可选，最多 2000 字符。
 - `agent` 必须是可作为主智能体使用的有效 id。
 - `model` 省略时等价于 `{ "version": 2, "kind": "agent" }`；也可以使用 role 绑定或具体模型。
-- `tools` / `skills` 可以是 `"*"` 或字符串数组。未知工具会让模式无效；未知 skill 在会话中只产生 warning。
+- `tools` / `skills` 可以是 `"*"` 或字符串数组。未知工具会让模式无效；`mcp__<server>__<tool>` 形式的 MCP 工具名按结构接受（服务器当前是否连接由运行时判断）；未知 skill 在会话中只产生 warning。
 - 内置 id `standard` / `creator` 可以在 `modes.json` 中覆盖，删除覆盖项即可恢复内置定义。
 - `defaultMode` 只决定新会话选择器的默认项；会话创建后模式不可更改，只能新开会话选择其他模式。
 

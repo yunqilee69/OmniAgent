@@ -11,6 +11,7 @@ import type { DshPermissionSnapshot } from '@omniagent/core';
 import { startWebHost } from './server';
 import type { WebHost, WebHostOptions } from './server';
 import { PermissionSettings } from './permissions';
+import type { ConfigFileSnapshot } from './config-file';
 import { WorkspaceRegistry } from './workspaces';
 
 const hosts: WebHost[] = [];
@@ -202,9 +203,12 @@ describe('permission settings API', () => {
     const settings = await permissionStore(configPath);
     let release!: () => void;
     const gate = new Promise<void>((resolve) => { release = resolve; });
-    const stubbed = settings as unknown as { write: (text: string) => Promise<void> };
-    const write = stubbed.write.bind(settings);
-    stubbed.write = async (text) => { await gate; await write(text); };
+    type Mutate = (
+      operation: (snapshot: ConfigFileSnapshot) => Promise<{ raw: Record<string, unknown>; result: unknown }>,
+    ) => Promise<unknown>;
+    const stubbed = settings as unknown as { file: { mutate: Mutate } };
+    const mutate = stubbed.file.mutate.bind(stubbed.file);
+    stubbed.file.mutate = async (operation) => { await gate; return mutate(operation); };
     const updating = settings.update(preset('read-only'));
     // The queued write has not landed, so the synchronous snapshot is stale but
     // an awaiting reader still observes the preset the user chose.

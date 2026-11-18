@@ -1,4 +1,4 @@
-import { ConfigSchema, isArchiveRetention, resolveArchiveSettings } from '@omniagent/core';
+import { isArchiveRetention, resolveArchiveSettings } from '@omniagent/core';
 import type { ArchiveSettings } from '@omniagent/core';
 import type { PermissionSettings } from './permissions';
 
@@ -13,7 +13,8 @@ function record(value: unknown): Record<string, unknown> | undefined {
 
 /**
  * Persist `archive.enabled` and `archive.retentionMs` without dropping the rest
- * of the configuration. The permission settings service owns the file write.
+ * of the configuration. The merge starts from the latest raw document under the
+ * shared config lock.
  */
 export class ArchiveConfigSettings {
   private revision = 0;
@@ -47,13 +48,14 @@ export class ArchiveConfigSettings {
     }
     const enabled = body.enabled;
     const retentionMs = body.retentionMs;
-    const operation = this.pending.then(async () => {
-      const current = this.permissions.configSnapshot() as unknown as Record<string, unknown>;
-      const previous = record(current.archive) ?? {};
-      const config = { ...current, archive: { ...previous, enabled, retentionMs } };
-      ConfigSchema.parse(config);
-      await this.permissions.replaceConfig(config);
-      this.value = { enabled, retentionMs, requiresSelection: false };
+    const operation = this.permissions.mutate(async (raw) => {
+      const previous = record(raw.archive) ?? {};
+      return {
+        raw: { ...raw, archive: { ...previous, enabled, retentionMs } },
+        result: { enabled, retentionMs, requiresSelection: false },
+      };
+    }).then((value) => {
+      this.value = value;
       this.revision += 1;
       return { ...this.value };
     });

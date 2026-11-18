@@ -150,6 +150,12 @@ Web 附件不写进工作区，而是写到工作区外、Git worktree 之外的
 | `subagent` / `send_message` / `list_agents` / `wait_agent` / `interrupt_agent` | 子代理协作 |
 | `schedule_create` / `schedule_list` / `schedule_view` / `schedule_edit` | 计划任务；主会话可用，子代理不可用 |
 | `list_agent_definitions` / `write_agent_definition` | 只在创造模式会话注册 |
+| `list_modes` / `write_mode` / `delete_mode` / `set_default_mode` / `list_mode_options` | 创造模式配置工具；由 Host 注入模式服务后注册 |
+| `list_model_roles` / `write_model_role` / `delete_model_role` / `list_model_sources` / `write_model_source` / `delete_model_source` / `discover_models` | 创造模式模型配置；只接受 `apiKeyEnv`，不读写明文 Key |
+| `get_omniagent_settings` / `update_permission_default` / `update_archive_settings` / `update_ask_user_timeout` | 创造模式通用设置；默认权限只允许 `read-only` / `workspace-write` |
+| `list_mcp_servers` / `write_mcp_server` / `delete_mcp_server` / `test_mcp_server` | 创造模式 MCP 配置；`env` / `headers` 只接受 `${VAR}` 引用 |
+
+创造模式的配置写工具全部标记 `mutating: true`，因此 plan 模式会拒绝；`list_*`、`get_omniagent_settings`、`discover_models`、`test_mcp_server` 标记为只读。工具只注册在交互式 Web creator 会话，非交互/定时会话不获得写配置能力。
 
 ## 4. 工具暴露：四层过滤
 

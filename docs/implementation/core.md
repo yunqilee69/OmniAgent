@@ -93,8 +93,19 @@ store / context / exec
 
 | 文件 | 内容 |
 | --- | --- |
-| `store.ts` | `modes.json` 读写、内置 standard / creator、合并 / 校验 / 默认模式 |
+| `store.ts` | `modes.json` 读写、内置 standard / creator、合并 / 校验 / 默认模式；`unknownTools()` 接受 `mcp__<server>__<tool>` |
 | `index.ts` | 目录导出 |
+
+### 3.5.1 `creator/`
+
+| 文件 | 内容 |
+| --- | --- |
+| `types.ts` | Host 端口 `CreatorServices`：modes / roles / modelSources / settings / 可选 mcp，以及脱敏后的返回类型 |
+| `tools.ts` | 20 个配置工具的名称、zod schema、`mutating` 标记、错误转换、`renderCreatorToolGuidance()` |
+| `index.ts` | 目录导出 |
+| `tools.test.ts` | fake 端口 + 真实 `ModeStore` + FakeModel 的注册/执行测试 |
+
+`SessionOptions.creator` 存在时才注册工具；Web 只在 `interactive && resolved.agent.id === 'creator'` 时注入。模型侧不直接读写 `config.json` / `modes.json`，API Key 与 MCP 明文密钥不进入工具参数。
 
 ### 3.6 `skills/`
 

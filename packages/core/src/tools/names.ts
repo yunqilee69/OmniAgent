@@ -1,4 +1,5 @@
 import { LIST_AGENT_DEFINITIONS_TOOL_NAME, WRITE_AGENT_DEFINITION_TOOL_NAME } from '../agents/authoring.ts';
+import { CREATOR_TOOL_GROUP } from '../creator/tools.ts';
 import { SCHEDULE_TOOL_GROUP } from '../schedule/tools.ts';
 import { ASK_USER_TOOL_NAME } from './builtin/ask-user.ts';
 
@@ -28,6 +29,7 @@ export {
   SCHEDULE_VIEW_TOOL_NAME,
   SCHEDULE_TOOL_GROUP,
 } from '../schedule/tools.ts';
+export { CREATOR_TOOL_GROUP } from '../creator/tools.ts';
 
 export const SUBAGENT_TOOL_GROUP = [
   SUBAGENT_TOOL_NAME,
@@ -57,6 +59,7 @@ export const KNOWN_TOOL_NAMES = new Set<string>([
   WRITE_AGENT_DEFINITION_TOOL_NAME,
   ...SUBAGENT_TOOL_GROUP,
   ...SCHEDULE_TOOL_GROUP,
+  ...CREATOR_TOOL_GROUP,
 ]);
 
 /** Expand the `subagent` group and dedupe a profile selector. */

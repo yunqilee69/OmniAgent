@@ -1,7 +1,6 @@
 import { homedir } from 'node:os';
 import { join } from 'node:path';
 import {
-  resolveAskUserTimeout,
   AgentAuthoringService,
   AgentCatalog,
   ConfigStore,
@@ -24,6 +23,7 @@ import type { AgentSummary, RoleSummary } from './server';
 import { readWorkspaceAudit, recordWorkspaceAudit } from './audit';
 import { ApprovalBroker } from './approval';
 import { RoleSettings } from './catalog-settings';
+import { createCreatorServices } from './creator-settings';
 import { McpSettings } from './mcp-settings';
 import { ModelSettings } from './model-settings';
 import { LiveSessionRegistry } from './live-sessions';
@@ -63,6 +63,16 @@ async function main(): Promise<void> {
     dir: join(configDir, 'agents'),
     catalog: agents,
     configStore,
+  });
+  const creatorServices = createCreatorServices({
+    modes,
+    roles: roleSettings,
+    modelSources: modelSettings,
+    permissions: permissionSettings,
+    askUser: askUserSettings,
+    archive: archiveSettings,
+    mcp: mcpSettings,
+    mcpToolNames: () => mcp.toolNames(),
   });
   const runtime = new RuntimeResolver({ configStore, agents });
   const store = new SessionStore(join(configDir, 'sessions'));
@@ -180,7 +190,7 @@ async function main(): Promise<void> {
       askUser: interactive
         ? (questions, signal, request) => approvals.askHandler(workspacePath, handle.id)(questions, signal, request)
         : async () => { throw new Error('ask_user is unavailable in an unattended scheduled session.'); },
-      askUserTimeoutSec: resolveAskUserTimeout(permissionSettings.configSnapshot()).timeoutSec,
+      askUserTimeoutSec: askUserSettings.snapshot().timeoutSec,
       audit: (entry) => recordWorkspaceAudit(configDir, workspacePath, entry),
       session: handle,
       system: resolved.system,
@@ -199,7 +209,9 @@ async function main(): Promise<void> {
       }),
       mcpTools: mcp.tools(),
       schedule: schedules,
-      ...(interactive && resolved.agent.id === 'creator' ? { agentAuthoring } : {}),
+      ...(interactive && resolved.agent.id === 'creator'
+        ? { agentAuthoring, creator: creatorServices }
+        : {}),
     });
   }
 

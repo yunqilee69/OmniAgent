@@ -37,7 +37,8 @@ TypeScript 配置是 strict + `noUncheckedIndexedAccess` + `verbatimModuleSyntax
 | 会话子模块 | `session/agent-selection.test.ts`、`goal.test.ts`、`init-command.test.ts`、`mode-selection.test.ts`、`model-binding.test.ts`、`model-replay.test.ts`、`ownership.test.ts`、`plan.test.ts`、`projection.test.ts`、`runtime.test.ts`、`session-management.test.ts`、`store.test.ts`、`todo.test.ts` |
 | 配置 | `config/dsh-config.test.ts`、`models.test.ts`、`store.test.ts`、`web-config.test.ts` |
 | 智能体 | `agents/catalog.test.ts`、`authoring.test.ts` |
-| 模式 | `modes/store.test.ts` |
+| 创造智能体配置 | `creator/tools.test.ts`：工具清单/分组、strict schema 拒绝 `apiKey` 与明文 MCP 密钥、宿主错误转 `ok:false`、真实 `ModeStore` + FakeModel 注册与执行 |
+| 模式 | `modes/store.test.ts`（含创造模式工具列表与 MCP 工具名） |
 | Provider | `providers/dsh-deepseek.test.ts`、`dsh-registry.test.ts`、`openai.test.ts`、`pi-model.test.ts` |
 | 工具 | `tools/builtin/fs-tools.test.ts`、`search.test.ts`、`skill.test.ts`、`web-fetch.test.ts`、`dsh-shell.test.ts`、`tools/attachment-storage.test.ts`、`tools/paths.test.ts` |
 | 权限 | `permissions/dsh-permissions.test.ts`、`dsh-escalation.test.ts` |
@@ -73,6 +74,7 @@ TypeScript 配置是 strict + `noUncheckedIndexedAccess` + `verbatimModuleSyntax
 | `model-settings.test.ts` / `model-route.test.ts` / `model-sources-route.test.ts` | 模型来源与角色 |
 | `catalog-settings.test.ts` | 角色目录 |
 | `mcp-settings.test.ts` / `mcp-route.test.ts` | MCP 设置 |
+| `creator-settings.test.ts` | 创造智能体端口：模式、角色/来源无 Key 泄露、权限/归档/ask 连续写入一致性、MCP `${VAR}` 引用 |
 | `agent-settings-route.test.ts` | 智能体定义 |
 | `schedule-route.test.ts` | 计划任务路由 |
 | `session-export.test.ts` / `export-route.test.ts` | 导出 |

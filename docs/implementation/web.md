@@ -15,6 +15,7 @@ Web 由一个本地 Node HTTP Host（`packages/web/src`）和一个 React 工作
 | `packages/web/src/model-settings.ts` | 模型来源与角色编辑 |
 | `packages/web/src/catalog-settings.ts` | 角色设置 |
 | `packages/web/src/mcp-settings.ts` | MCP 设置 |
+| `packages/web/src/creator-settings.ts` | 把 `ModeStore`、`RoleSettings`、`ModelSettings`、`PermissionSettings`、`AskUserConfigSettings`、`ArchiveConfigSettings`、`McpSettings` 适配成 core 的 `CreatorServices` |
 | `packages/web/src/agent-settings...`（`server.ts` + core authoring） | 智能体定义编辑 |
 | `packages/web/src/workspaces.ts` | 工作区注册表（含默认工作区） |
 | `packages/web/src/live-sessions.ts` | 跨请求共享 Session |
@@ -54,7 +55,8 @@ Web 由一个本地 Node HTTP Host（`packages/web/src`）和一个 React 工作
 
 - 前台：`approve = approvals.handler(...)`，`reviewPlan = approvals.planHandler(...)`；
 - 非交互（计划任务）：`approve` 一律 deny，`reviewPlan` 返回 `{ approved: false }`；
-- `creator` agent 额外注入 `agentAuthoring`。
+- `creator` agent 在交互式会话中额外注入 `agentAuthoring` 与 `creator: createCreatorServices(...)`；定时/非交互 creator 会话不注入配置工具；
+- 配置服务的 `askUserTimeoutSec` 读 `askUserSettings.snapshot()`，不再从启动期 config 快照读取。
 
 退出时依次关闭 schedules、mcp、subagents、host。
 
@@ -376,15 +378,17 @@ tool.result
 - `assertNoSymlinkParents()` 禁止父目录 symlink（例外 `/tmp`、`/var`）；
 - 读取 `O_NOFOLLOW | O_NONBLOCK`，必须是普通文件；
 - 写入同目录临时文件 + `O_EXCL | O_NOFOLLOW` + fsync + rename；
-- `withFileLock()` 按路径串行化读-改-写。
+- `withFileLock()` 按路径串行化读-改-写；
+- 按路径维护进程内 trusted text：任何设置服务写入后更新，下一次写入前若发现文件被外部手改则 fail closed；
+- 写入原始 raw JSON 而不是 parse 后的 config，避免给精确文件偷偷补默认字段。
 
 ### 7.2 PermissionSettings
 
-- 独立于 ConfigFile，有自己的 revision；
+- 复用 `ConfigFile` 的锁、原子替换与外部修改检测；
 - 读取 `dsh.permission.defaultPreset`；
 - 空 / 非法 → `{ defaultPreset: null, requiresSelection: true }`；
-- 写入前比较 `lastText`，检测外部修改并拒绝覆盖；
-- 原子替换。
+- `mutate()` 把最新 raw 交给归档 / ask 超时等设置服务合并，避免互相覆盖；
+- 写操作与其它 config.json 设置共享 trusted text。
 
 ### 7.3 ModelSettings
 
@@ -402,8 +406,8 @@ tool.result
 
 - 编辑 `config.roles`；
 - 同时列出 `catalog.roleErrors`，方便修复；
-- 写入走 ConfigFile 的串行化锁；
-- 不提供 `lastText` 外部修改检测，最后写入者获胜。
+- 写入走 `ConfigFile` 的串行化锁与共享 trusted text；
+- 与模型来源、权限、归档、ask 超时、MCP 连续写入不会触发误报的外部修改错误。
 
 ### 7.5 McpSettings
 
@@ -413,6 +417,20 @@ tool.result
 - 切换 transport 清空另一种 shape 的字段；
 - 保存后触发 `mcp.sync()`；
 - 测试连接返回 tools / resources / prompts。
+
+### 7.5.1 通用设置
+
+- `AskUserConfigSettings` / `ArchiveConfigSettings` 都通过 `PermissionSettings.mutate()` 从最新 raw 合并，再写回自己的 section；
+- 每次成功写入更新本地快照与 revision；失败保留旧值；
+- `creator-settings.ts` 的 `settings.read()` 返回权限默认值、归档、ask 超时和默认模式。
+
+### 7.5.2 创造智能体配置适配
+
+- `createCreatorServices()` 只做适配，不复制校验逻辑；
+- `modes.options(cwd)` 返回 `KNOWN_TOOL_NAMES` 与实时 `mcp.toolNames()` 的并集，以及 `discoverSkills({ workspace: cwd })`；
+- 角色列表去掉 `RoleSettings.list()` 的外层包装；模型来源与 MCP 直接复用现有设置服务；
+- `main.ts` 只对 `interactive && agent.id === 'creator'` 的 Session 注入 `creator`，因此定时任务和子代理拿不到配置写工具；
+- UI 在 `tool.result` 后按工具名刷新模式、模型/角色目录、权限/归档/ask 超时与 MCP 列表。
 
 ### 7.6 智能体定义
 
@@ -738,8 +756,8 @@ plan 模式没有常驻开关：只有输入 `/plan` 开启后，输入框才出
 - 认证账号密码明文保存在 `config.json`，HTTP 不提供传输加密。
 - 子代理的完成通知不会进入父回合的原始 SSE；需要重新加载父会话。
 - Web 子代理没有 live approval handler；一次性沙盒升级会被拒绝，plan review 不可用。
-- `RoleSettings` / `ModelSettings` 走 `ConfigFile` 的进程内锁，但没有 `PermissionSettings` 那样的 `lastText` 外部修改检测；多进程同时编辑时最后写入者获胜。
-- 模式保存不接受 MCP 工具名（见 [configuration-agents-modes.md](../design/configuration-agents-modes.md) 的实现备注）。
+- 所有 `config.json` 设置服务共享 `ConfigFile` 的进程内锁和 trusted text 检测；跨进程并发编辑仍可能最后写入者获胜，没有跨进程文件锁。
+- 模式允许 `mcp__<server>__<tool>` 形式的工具名；保存时只做结构校验，服务器断开或工具不存在由运行时解析处理。
 - 文本预览仍限制在 1 MiB UTF-8（`files/content`）；二进制、图片、PDF、Office、音视频走 `files/raw`，单文件上限 256 MiB。PDF 由浏览器渲染，样式随浏览器而定；Word 只还原结构与表格，不还原版式；Excel 只读单元格原值，不做数字格式与公式计算；HTML 渲染视图是白名单净化后的近似效果。
 - Context Meter 的 `projectedTokens` 是基于字节数 / 4 和图片固定成本的近似值；切换模型或历史后可能先显示估算，直到出现新的真实 usage。
 - 实时 SSE、`follow` 的 `run.snapshot` 和原始会话记录不是脱敏导出格式；assistant 文本、工具参数和结果都可能含敏感内容。

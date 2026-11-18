@@ -4,6 +4,7 @@ import { join } from 'node:path';
 import { afterEach, describe, expect, it } from 'vitest';
 import { AgentCatalog } from '../agents/catalog';
 import { ConfigStore } from '../config/store';
+import { CREATOR_TOOL_GROUP } from '../creator/tools';
 import { ModeConfigError, ModeStore } from './store';
 
 const roots: string[] = [];
@@ -68,6 +69,24 @@ describe('ModeStore', () => {
     const file = JSON.parse(await readFile(modesPath, 'utf8')) as { version: number; modes: Record<string, unknown> };
     expect(file.version).toBe(1);
     expect(file.modes.research).toMatchObject({ name: 'Research', agent: 'default' });
+  });
+
+  it('gives the built-in creator mode every configuration tool', async () => {
+    const { store } = await fixture();
+    const creator = await store.get('creator');
+    expect(creator?.tools).toEqual(expect.arrayContaining([...CREATOR_TOOL_GROUP]));
+    expect(creator?.valid).toBe(true);
+  });
+
+  it('accepts MCP tool names in a mode allowlist', async () => {
+    const { store } = await fixture();
+    const saved = await store.save('mcp', {
+      name: 'MCP',
+      agent: 'default',
+      tools: ['read_file', 'mcp__filesystem__read_text_file'],
+    });
+    expect(saved.valid).toBe(true);
+    expect(saved.tools).toContain('mcp__filesystem__read_text_file');
   });
 
   it('rejects an invalid mode before writing it to disk', async () => {

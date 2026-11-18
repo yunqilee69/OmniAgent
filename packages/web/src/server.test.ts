@@ -19,6 +19,7 @@ import { createInitialDshPermissionEvent, projectDshPermissions } from '../../co
 import type { DshPermissionSnapshot } from '../../core/src/permissions/dsh-permissions';
 import { ApprovalBroker } from './approval';
 import { readWorkspaceAudit, recordWorkspaceAudit } from './audit';
+import type { ConfigFileSnapshot } from './config-file';
 import { PermissionSettings } from './permissions';
 import { WorkspaceRegistry } from './workspaces';
 import { startWebHost } from './server';
@@ -1326,12 +1327,15 @@ describe('workspace web host', () => {
     const { base, first } = await setup(undefined, undefined, settings);
     const started = signal();
     const gate = signal();
-    const stubbed = settings as unknown as { write: (text: string) => Promise<void> };
-    const write = stubbed.write.bind(settings);
-    stubbed.write = async (text) => {
+    type Mutate = (
+      operation: (snapshot: ConfigFileSnapshot) => Promise<{ raw: Record<string, unknown>; result: unknown }>,
+    ) => Promise<unknown>;
+    const stubbed = settings as unknown as { file: { mutate: Mutate } };
+    const mutate = stubbed.file.mutate.bind(stubbed.file);
+    stubbed.file.mutate = async (operation) => {
       started.resolve();
       await gate.promise;
-      return write(text);
+      return mutate(operation);
     };
     const changing = fetch(`${base}/api/settings/permissions`, {
       method: 'PUT', headers: { 'content-type': 'application/json' }, body: JSON.stringify({ defaultPreset: 'read-only' }),

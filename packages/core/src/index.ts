@@ -455,6 +455,9 @@ export type { BackgroundEventSource, SessionOptions } from './session';
 // 调度任务
 export * from './schedule/index.ts';
 
+// 创造智能体的配置工具（模式、模型、通用设置、MCP）
+export * from './creator/index.ts';
+
 // 评测
 export { formatEvalResults, runEvalCase, runEvalSuite } from './eval/harness';
 export type {

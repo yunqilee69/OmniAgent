@@ -308,8 +308,23 @@ profile: search-only
 - `default`：默认智能体，role `default`，usage `both`，profile `default`；
 - `creator`：创造智能体，role `default`，usage `primary`，profile `default`；
   - 用于通过对话调整 OmniAgent；
-  - 可使用 `schedule_*`、`list_agent_definitions`、`write_agent_definition`；
+  - 可使用 `schedule_*`、`list_agent_definitions`、`write_agent_definition`，以及模式、模型、通用设置和 MCP 配置工具；
+  - 模型来源只接受 `apiKeyEnv`，不接受或返回 API Key；MCP 密钥只接受 `${VAR}` 引用；
+  - `update_permission_default` 只能选择 `read-only` / `workspace-write`；
   - 禁止覆盖 `default` / `creator`，禁止手写配置文件。
+
+### 6.3.1 创造智能体的配置端口
+
+模型侧工具定义在 core 的 `creator/`，实际存储留在 Host。`SessionOptions.creator` 注入 `CreatorServices` 后才注册这些工具，Web 仅在交互式 `creator` 会话中注入：
+
+| 端口 | 工具 | 生效时机 |
+| --- | --- | --- |
+| `modes` | `list_modes`、`write_mode`、`delete_mode`、`set_default_mode`、`list_mode_options` | 新会话 |
+| `roles` / `modelSources` | `list_model_roles`、`write_model_role`、`delete_model_role`、`list_model_sources`、`write_model_source`、`delete_model_source`、`discover_models` | 下一回合或新会话 |
+| `settings` | `get_omniagent_settings`、`update_permission_default`、`update_archive_settings`、`update_ask_user_timeout` | 权限/ask 超时为新会话；归档立即生效 |
+| `mcp` | `list_mcp_servers`、`write_mcp_server`、`delete_mcp_server`、`test_mcp_server` | 新会话/新子代理 |
+
+所有写工具标记 `mutating: true`，plan 模式会拒绝；宿主错误转成 `{ code: "creator_settings_failed", message }` 的 `ok:false` 结果，让模型自行纠正。
 
 如果目录中存在 `default.md` / `creator.md` 但校验失败，**不会**回退到内置定义。这是 fail-closed 设计。
 
@@ -351,7 +366,7 @@ profile: search-only
 - `agent` 必须是可作为主智能体的有效 id；
 - `model` 省略等价于 `{ "version": 2, "kind": "agent" }`；
 - `tools` / `skills` 可以是 `"*"` 或字符串数组；
-- 未知工具让模式无效；
+- 未知工具让模式无效；`mcp__<server>__<tool>` 形式按结构接受，服务器是否可用由运行时决定；
 - 未知 skill 只产生 warning；
 - 内置 id `standard` / `creator` 可以被覆盖，删除覆盖项恢复内置定义；
 - `defaultMode` 只影响新会话选择器的默认项。
@@ -368,7 +383,8 @@ profile: search-only
 **creator**
 
 - agent `creator`；
-- tools 显式列表：`read_file`、`list_dir`、`glob`、`grep`、`web_fetch`、`skill`、`todo_write`、`exit_plan_mode`、`get_goal`、`create_goal`、`update_goal`、`schedule_create`、`schedule_list`、`schedule_view`、`schedule_edit`、`list_agent_definitions`、`write_agent_definition`；
+- tools 显式列表：`read_file`、`list_dir`、`glob`、`grep`、`web_fetch`、`skill`、`todo_write`、`exit_plan_mode`、`get_goal`、`create_goal`、`update_goal`、`schedule_create`、`schedule_list`、`schedule_view`、`schedule_edit`、`list_agent_definitions`、`write_agent_definition`，以及 6.3.1 中 20 个配置工具；
+- 配置工具只有在 Host 注入 `CreatorServices` 时才注册；非交互/定时 creator 会话不获得写配置能力；
 - 故意不包含 `write_file`、`edit_file`、`bash`；
 - skills `*`。
 
@@ -394,7 +410,7 @@ profile: search-only
 
 ### 7.4 实现备注
 
-`ModeStore` 的工具名校验只使用 `KNOWN_TOOL_NAMES`，不识别 `mcp__*` 名称；而 `RuntimeResolver` 允许 `isMcpToolName()`。因此把 MCP 工具名写进模式会在保存时被判无效，尽管运行时解析器本身接受这种写法。需要组合 MCP 工具时，目前应使用 `"*"` 或在 agent profile 中授权。
+`ModeStore` 的工具名校验接受 `KNOWN_TOOL_NAMES` 与 `mcp__<server>__<tool>` 形式的名称；`RuntimeResolver` 使用同一套 `isMcpToolName()` 规则。保存模式时只校验名称结构，服务器是否连接、工具是否仍存在由运行时解析；需要限制到具体 MCP 工具时可以直接写入该名称。
 
 ## 8. Skills
 

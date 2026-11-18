@@ -1,4 +1,4 @@
-import { ConfigSchema, isAskUserTimeout, resolveAskUserTimeout } from '@omniagent/core';
+import { isAskUserTimeout, resolveAskUserTimeout } from '@omniagent/core';
 import type { AskUserSettings } from '@omniagent/core';
 import type { PermissionSettings } from './permissions';
 
@@ -13,7 +13,7 @@ function record(value: unknown): Record<string, unknown> | undefined {
 
 /**
  * Persist `askUser.timeoutSec` without dropping the rest of the configuration.
- * The permission settings service owns the file write and the trusted-home checks.
+ * The merge starts from the latest raw document under the shared config lock.
  */
 export class AskUserConfigSettings {
   private revision = 0;
@@ -43,13 +43,14 @@ export class AskUserConfigSettings {
       throw new InvalidAskUserSettings();
     }
     const timeoutSec = body.timeoutSec;
-    const operation = this.pending.then(async () => {
-      const current = this.permissions.configSnapshot() as unknown as Record<string, unknown>;
-      const previous = record(current.askUser) ?? {};
-      const config = { ...current, askUser: { ...previous, timeoutSec } };
-      ConfigSchema.parse(config);
-      await this.permissions.replaceConfig(config);
-      this.value = { timeoutSec, requiresSelection: false };
+    const operation = this.permissions.mutate(async (raw) => {
+      const previous = record(raw.askUser) ?? {};
+      return {
+        raw: { ...raw, askUser: { ...previous, timeoutSec } },
+        result: { timeoutSec, requiresSelection: false },
+      };
+    }).then((value) => {
+      this.value = value;
       this.revision += 1;
       return { ...this.value };
     });

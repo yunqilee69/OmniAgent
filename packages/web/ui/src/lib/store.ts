@@ -2574,6 +2574,31 @@ export class AppStore {
           if (result.name === 'write_agent_definition') {
             void this.loadCatalogs();
           }
+          if (['write_mode', 'delete_mode', 'set_default_mode'].includes(result.name)) {
+            void this.loadModes();
+          }
+          if (['write_model_role', 'delete_model_role', 'write_model_source', 'delete_model_source'].includes(result.name)) {
+            void this.loadCatalogs();
+            void this.loadModelSources();
+            void this.loadRoleEntries();
+            void this.loadModes();
+          }
+          if (result.name === 'update_permission_default') {
+            void this.loadPermissions();
+          }
+          if (result.name === 'update_archive_settings') {
+            void this.loadArchiveSettings();
+          }
+          if (result.name === 'update_ask_user_timeout') {
+            void this.loadAskUserTimeout();
+          }
+          if (['write_mcp_server', 'delete_mcp_server'].includes(result.name)) {
+            void this.loadMcpServers();
+            void this.loadModeOptions();
+          }
+          if (result.name === 'test_mcp_server') {
+            void this.loadMcpServers();
+          }
         }
       }
       // Immutable snapshot so React sees a new run object for every event batch.
