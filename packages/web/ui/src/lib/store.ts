@@ -1960,7 +1960,11 @@ export class AppStore {
   private async persistDraftSession(
     workspaceId: string,
     entry: SessionEntry,
-  ): Promise<{ session: SessionSummary; setupError: Error | null }> {
+  ): Promise<{
+    session: SessionSummary;
+    setupError: Error | null;
+    setupStage: 'permission' | 'plan' | 'goal';
+  }> {
     const mode = entry.mode;
     if (mode === null) throw new Error(translator(this.state.locale)('The session mode is unavailable.'));
     // The mode supplies the default model. A binding the user changed in the
@@ -1982,6 +1986,7 @@ export class AppStore {
       }
       const session = body.session;
       let setupError: Error | null = null;
+      let setupStage: 'permission' | 'plan' | 'goal' = 'permission';
       // Creation already persisted the global default. Writing the same preset
       // again is a no-op the server rejects while another session's turn runs.
       if (isPermissionPreset(entry.permission) && entry.permission !== body.permission?.preset) {
@@ -1995,6 +2000,7 @@ export class AppStore {
         }
       }
       if (setupError === null && entry.plan.active) {
+        setupStage = 'plan';
         try {
           await this.api(
             sessionApiPath(workspaceId, session.id, 'plan'),
@@ -2004,7 +2010,17 @@ export class AppStore {
           setupError = error as Error;
         }
       }
-      return { session, setupError };
+      // Goal creation is armed before the first message so the model can call
+      // create_goal during that turn.
+      if (setupError === null && entry.goalGrant) {
+        setupStage = 'goal';
+        try {
+          await this.api(sessionApiPath(workspaceId, session.id, 'goal-grant'), jsonOptions('POST', {}));
+        } catch (error) {
+          setupError = error as Error;
+        }
+      }
+      return { session, setupError, setupStage };
     } finally {
       this.patch({ creatingSession: false });
     }
@@ -2264,12 +2280,25 @@ export class AppStore {
           request: 0,
           ...(created.setupError === null
             ? {}
-            : {
-              permission: null,
-              permissionError: translator(this.state.locale)('Could not change permission: {message}', {
-                message: created.setupError.message,
-              }),
-            }),
+            : created.setupStage === 'goal'
+              ? {
+                goalGrant: false,
+                goalError: translator(this.state.locale)('Could not grant a goal: {message}', {
+                  message: created.setupError.message,
+                }),
+              }
+              : created.setupStage === 'plan'
+                ? {
+                  planError: translator(this.state.locale)('Could not change plan mode: {message}', {
+                    message: created.setupError.message,
+                  }),
+                }
+                : {
+                  permission: null,
+                  permissionError: translator(this.state.locale)('Could not change permission: {message}', {
+                    message: created.setupError.message,
+                  }),
+                }),
         };
         this.state = {
           ...this.state,
@@ -2535,7 +2564,8 @@ export class AppStore {
       if (type === 'tool.result') {
         const result = (event as { result?: { name?: unknown } }).result;
         if (typeof result?.name === 'string') {
-          if (result.name === 'todo_write' || result.name === 'exit_plan_mode') {
+          if (result.name === 'todo_write' || result.name === 'exit_plan_mode'
+            || result.name === 'create_goal' || result.name === 'update_goal') {
             void this.refreshSessionBrief(workspaceId, sessionId);
           }
           if (['subagent', 'send_message', 'interrupt_agent'].includes(result.name)) {
@@ -2706,17 +2736,14 @@ export class AppStore {
     }
   }
 
-  async updateGoal(action: 'pause' | 'resume' | 'complete' | 'create', objective?: string): Promise<void> {
+  async updateGoal(action: 'pause' | 'resume' | 'complete'): Promise<void> {
     const { workspaceId, sessionId } = this.state;
     if (workspaceId === null || sessionId === null) return;
     const key = sessionKey(workspaceId, sessionId);
     const entry = this.state.entries[key];
     if (entry === undefined || entry.goal === null || entry.run !== undefined) return;
     try {
-      const body = await this.api<{ goal?: unknown }>(sessionApiPath(workspaceId, sessionId, 'goal'), jsonOptions('POST', {
-        action,
-        ...(objective === undefined ? {} : { objective }),
-      }));
+      const body = await this.api<{ goal?: unknown }>(sessionApiPath(workspaceId, sessionId, 'goal'), jsonOptions('POST', { action }));
       this.patchEntry(key, { goal: normalizeGoal(body.goal), goalGrant: false, goalError: '' });
     } catch (error) {
       this.patchEntry(key, {
@@ -2725,19 +2752,29 @@ export class AppStore {
     }
   }
 
-  async grantGoal(): Promise<void> {
+  /**
+   * Enable goal mode for the next direct message. A draft keeps the flag
+   * locally and applies it while creating the session.
+   */
+  async grantGoal(): Promise<boolean> {
     const { workspaceId, sessionId } = this.state;
-    if (workspaceId === null || sessionId === null) return;
+    if (workspaceId === null || sessionId === null) return false;
     const key = sessionKey(workspaceId, sessionId);
     const entry = this.state.entries[key];
-    if (entry === undefined || entry.draft === true || entry.run !== undefined) return;
+    if (entry === undefined || entry.run !== undefined || entry.running === true) return false;
+    if (entry.draft === true) {
+      this.patchEntry(key, { goalGrant: true, goalError: '' });
+      return true;
+    }
     try {
       await this.api(sessionApiPath(workspaceId, sessionId, 'goal-grant'), jsonOptions('POST', {}));
       this.patchEntry(key, { goalGrant: true, goalError: '' });
+      return true;
     } catch (error) {
       this.patchEntry(key, {
         goalError: translator(this.state.locale)('Could not grant a goal: {message}', { message: (error as Error).message }),
       });
+      return false;
     }
   }
 
@@ -2763,11 +2800,18 @@ export class AppStore {
 
   async refreshSessionBrief(workspaceId: string, sessionId: string): Promise<void> {
     try {
-      const body = await this.api<{ plan?: unknown; todos?: unknown }>(sessionApiPath(workspaceId, sessionId));
+      const body = await this.api<{ plan?: unknown; todos?: unknown; goal?: unknown; goalGrant?: unknown }>(
+        sessionApiPath(workspaceId, sessionId),
+      );
       const key = sessionKey(workspaceId, sessionId);
       const entry = this.state.entries[key];
       if (entry === undefined) return;
-      this.patchEntry(key, { plan: normalizePlan(body.plan), todos: normalizeTodos(body.todos) });
+      this.patchEntry(key, {
+        plan: normalizePlan(body.plan),
+        todos: normalizeTodos(body.todos),
+        goal: normalizeGoal(body.goal),
+        goalGrant: body.goalGrant === true,
+      });
     } catch {
       // A transient refresh failure leaves the previous brief in place.
     }

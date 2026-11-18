@@ -323,7 +323,6 @@ export function App(): ReactNode {
                   key={app.sessionId ?? 'session'}
                   entry={entry}
                   processDisplay={app.processDisplay}
-                  onOpenPlan={openPlanPreview}
                   onOpenFile={openFile}
                 />
                 {run?.approval !== undefined && run.stopping !== true && run.finishing !== true && (

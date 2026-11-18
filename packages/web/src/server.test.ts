@@ -1794,7 +1794,7 @@ describe('workspace web host', () => {
   });
 
   it('persists plan mode and todo state and exposes both in session details', async () => {
-    const { base, first, store } = await setup();
+    const { base, first, store } = await setup(undefined, undefined, undefined, new ApprovalBroker());
     const url = sessionsUrl(base, first.id);
     const { session } = await jsonResponse<{ session: { id: string } }>(await fetch(url, jsonRequest({})));
     const handle = await store.open(first.path, session.id);
@@ -1814,6 +1814,26 @@ describe('workspace web host', () => {
     expect(await (await fetch(`${url}/${session.id}/plan`, jsonRequest({ active: false }))).json()).toEqual({ plan: { active: false } });
     expect((await jsonResponse<{ plan: { active: boolean } }>(await fetch(`${url}/${session.id}`))).plan).toEqual({ active: false });
     expect((await store.open(first.path, session.id)).events.filter((event) => event.type === 'plan/mode')).toHaveLength(2);
+  });
+
+  it('requires a plan review handler before enabling plan mode', async () => {
+    const { base, first } = await setup();
+    const url = sessionsUrl(base, first.id);
+    const { session } = await jsonResponse<{ session: { id: string } }>(await fetch(url, jsonRequest({})));
+    const response = await fetch(`${url}/${session.id}/plan`, jsonRequest({ active: true }));
+    expect(response.status).toBe(409);
+    expect(await response.json()).toMatchObject({ error: expect.stringContaining('review handler') });
+  });
+
+  it('rejects direct goal creation and exposes an armed grant to the next message', async () => {
+    const { base, first } = await setup();
+    const url = sessionsUrl(base, first.id);
+    const { session } = await jsonResponse<{ session: { id: string } }>(await fetch(url, jsonRequest({})));
+    const created = await fetch(`${url}/${session.id}/goal`, jsonRequest({ action: 'create', objective: 'Ship it' }));
+    expect(created.status).toBe(409);
+    expect(await created.json()).toMatchObject({ error: expect.stringContaining('goal mode') });
+    expect((await fetch(`${url}/${session.id}/goal-grant`, jsonRequest({}))).status).toBe(200);
+    expect(await jsonResponse<{ goalGrant: boolean }>(await fetch(`${url}/${session.id}`))).toMatchObject({ goalGrant: true });
   });
 
   it('streams plan review prompts and resumes the turn after an approved decision', async () => {

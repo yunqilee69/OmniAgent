@@ -816,6 +816,9 @@ const zh: Record<string, string> = {
   'Member id': '成员 ID',
   'Member name': '成员名称',
   'Member agent': '成员智能体',
+  'Member instructions': '成员指令',
+  'Optional instructions prepended to every task delegated to this member.':
+    '可选：每次委派给该成员的任务前都会附加这段指令。',
   'Member {count}': '成员 {count}',
   'Max parallel members': '最大并行成员数',
   'A team mode needs at least one member.': '团队模式至少需要一名成员。',
@@ -825,7 +828,9 @@ const zh: Record<string, string> = {
     '允许下一条消息创建一个会话目标。普通工作不会自行创建目标。',
   'Could not grant a goal: {message}': '无法授权目标：{message}',
   'Goal is armed for your next message.': '下一条消息可以创建一个目标。',
-  'Armed for the next message': '下一条消息将创建目标',
+  'Wait for the current turn to finish before changing the goal.':
+    '请等待当前回合结束后再调整目标。',
+  'Armed for the next message': '下一条消息可创建目标',
   'Close goal': '关闭目标',
   'Goal: check {round} running': '目标：第{round}轮校验中',
   'Goal: check {round} failed, continuing': '目标：第{round}轮校验失败，继续执行',

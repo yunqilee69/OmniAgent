@@ -235,4 +235,26 @@ describe('Session goals', () => {
       await rm(cwd, { recursive: true, force: true });
     }
   });
+
+  it('tells the model that goal creation is authorized for the granted turn', async () => {
+    const cwd = await root();
+    try {
+      const session = new Session({
+        cwd,
+        dshPermissions: permissions,
+        model: { name: 'text', complete: async () => response(textResponse('ok')) },
+        modelId: 'text',
+      });
+      expect(session.systemPrompt).not.toContain('Goal mode is armed for this turn');
+
+      await session.grantGoalCreation();
+      expect(session.systemPrompt).toContain('Goal mode is armed for this turn');
+      expect(session.systemPrompt).toContain('call create_goal once');
+
+      await collect(session.send('ship the feature'));
+      expect(session.systemPrompt).not.toContain('Goal mode is armed for this turn');
+    } finally {
+      await rm(cwd, { recursive: true, force: true });
+    }
+  });
 });

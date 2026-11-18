@@ -49,7 +49,7 @@ import {
 } from './tools/builtin/ask-user';
 import type { AskUserAnswerItem, AskUserQuestion, AskUserToolResult } from './tools/builtin/ask-user';
 import { createSubagentTools, SUBAGENT_TOOL_NAME } from './tools/builtin/subagent';
-import { createTeamDelegationTool, DELEGATE_TEAM_MEMBER_TOOL_NAME } from './tools/builtin/team';
+import { createTeamDelegationTool, DELEGATE_TEAM_MEMBER_TOOL_NAME, renderTeamGuidance } from './tools/builtin/team';
 import type { TeamMemberSnapshot } from './session/mode-selection';
 import { createGoalTools, CREATE_GOAL_TOOL_NAME, GET_GOAL_TOOL_NAME, UPDATE_GOAL_TOOL_NAME } from './tools/builtin/goal';
 import { createScheduleTools, renderScheduleToolGuidance, SCHEDULE_TOOL_GROUP } from './schedule/tools';
@@ -67,6 +67,7 @@ import type { TodoItem } from './session/todo';
 import { GoalController, goalRefOf } from './session/goal-controller';
 import {
   GOAL_DEFAULT_BLOCKED_AFTER,
+  renderGoalGrantGuidance,
   renderGoalRoundPrompt,
   renderGoalToolGuidance,
 } from './session/goal';
@@ -167,6 +168,8 @@ export interface SessionOptions {
   teamMembers?: readonly TeamMemberSnapshot[];
   /** Step budget applied to each delegated team member. */
   teamMaxSteps?: number;
+  /** Maximum members of this team that may work at the same time. */
+  teamMaxActive?: number;
   /** Host-wide scheduled tasks; enables the schedule tools. */
   schedule?: ScheduleService;
   /** Optional persisted title plus background model title generation. */
@@ -220,6 +223,8 @@ export class Session {
   private readonly agentValue?: SessionAgent;
   private readonly modelCapabilities?: ModelCapabilities;
   private readonly subagents?: SubagentService;
+  private readonly teamMembers?: readonly TeamMemberSnapshot[];
+  private readonly teamMaxActive?: number;
   private readonly reviewPlanHandler?: SessionOptions['reviewPlan'];
   private readonly askUserHandler?: SessionOptions['askUser'];
   private readonly askUserTimeoutSec: number;
@@ -260,6 +265,8 @@ export class Session {
     this.agentValue = options.agent;
     this.modelCapabilities = options.modelCapabilities;
     this.subagents = options.subagents;
+    this.teamMembers = options.teamMembers;
+    this.teamMaxActive = options.teamMaxActive;
     this.reviewPlanHandler = options.reviewPlan;
     this.askUserHandler = options.askUser;
     this.askUserTimeoutSec = options.askUserTimeoutSec ?? ASK_USER_DEFAULT_TIMEOUT_SEC;
@@ -386,14 +393,23 @@ export class Session {
       this.trusted.add(tool);
     }
 
-    if (this.subagents && options.teamMembers !== undefined && options.teamMembers.length > 0) {
-      const teamTool = createTeamDelegationTool(this, this.subagents, options.teamMembers, options.teamMaxSteps);
+    if (this.subagents && this.teamMembers !== undefined && this.teamMembers.length > 0) {
+      const teamTool = createTeamDelegationTool(
+        this,
+        this.subagents,
+        this.teamMembers,
+        options.teamMaxSteps,
+        this.teamMaxActive,
+      );
       this.tools.register(teamTool);
       this.trusted.add(teamTool);
     }
 
     if (this.subagents) {
       for (const tool of createSubagentTools(this, this.subagents)) {
+        // Team mode delegates only through the configured member list; the
+        // generic subagent tool would bypass that snapshot.
+        if (this.teamMembers !== undefined && tool.name === SUBAGENT_TOOL_NAME) continue;
         if (!allows(tool.name)) continue;
         this.tools.register(tool);
         this.trusted.add(tool);
@@ -502,6 +518,10 @@ export class Session {
     const parts = [this.baseSystem, readWorkspaceInstructions(this.workspacePath ?? this.cwdValue)];
     if (this.planActive) parts.push(PLAN_MODE_GUIDANCE);
     if (this.hasGoalTools()) parts.push(renderGoalToolGuidance(GOAL_DEFAULT_BLOCKED_AFTER));
+    if (this.goalCreateGrant && this.allowsTool(CREATE_GOAL_TOOL_NAME)) parts.push(renderGoalGrantGuidance());
+    if (this.teamMembers !== undefined && this.teamMembers.length > 0) {
+      parts.push(renderTeamGuidance(this.teamMembers, this.teamMaxActive ?? this.teamMembers.length));
+    }
     if (this.hasScheduleTools()) parts.push(renderScheduleToolGuidance());
     if (this.depth === 0 && this.subagents !== undefined) {
       const guidance: string[] = [];

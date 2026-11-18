@@ -32,7 +32,6 @@ import { formatTokens } from '../lib/session-readings.ts';
 import { MarkdownDelegateProvider } from '../../vendor/primitives/index.ts';
 import { translator, type Locale, type Translate } from '../lib/i18n.ts';
 import { ToolView } from './ToolView.tsx';
-import { PlanReviewCard } from './PlanReview.tsx';
 import css from '../styles/app.module.css';
 import chatCss from '../styles/dsh/chat-view.module.css';
 import messageCss from '../styles/dsh/message-item.module.css';
@@ -456,10 +455,9 @@ function TurnView({ turn, processDisplay, reviewing, locale, t }: {
   );
 }
 
-export function ConversationView({ entry, processDisplay, onOpenPlan, onOpenFile }: {
+export function ConversationView({ entry, processDisplay, onOpenFile }: {
   entry: SessionEntry;
   processDisplay: 'collapsed' | 'expanded';
-  onOpenPlan?: () => void;
   /** Open a workspace file named by a Markdown link (`src/a.ts:12`) in the preview panel. */
   onOpenFile?: ((path: string, options?: { line?: number }) => void) | undefined;
 }): ReactNode {
@@ -559,9 +557,6 @@ export function ConversationView({ entry, processDisplay, onOpenPlan, onOpenFile
               t={t}
             />
           ))}
-          {live?.planReview !== undefined && (
-            <PlanReviewCard review={live.planReview} onOpen={() => { onOpenPlan?.(); }} />
-          )}
           {entry.run !== undefined && entry.run.planReview === undefined && (
             <RunningStatus run={entry.run} startedAt={openTurnStart(turns)} t={t} />
           )}

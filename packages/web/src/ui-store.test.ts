@@ -662,6 +662,39 @@ describe('workbench store', () => {
     await waitFor(() => store.currentEntry()?.run === undefined);
   });
 
+  it('applies a draft goal grant before the first message', async () => {
+    const posts: Array<{ url: string; body: unknown }> = [];
+    let controller!: ReadableStreamDefaultController<Uint8Array>;
+    const stream = new ReadableStream<Uint8Array>({ start(value) { controller = value; } });
+    const store = await boot(sessionFetcher((url, init) => {
+      if (url === '/api/modes') return json({ modes: [standardMode], defaultMode: 'standard' });
+      if (url === '/api/workspaces/a/sessions' && (init?.method ?? 'GET') === 'GET') return json({ sessions: [] });
+      if (init?.method === 'POST') {
+        posts.push({ url, body: JSON.parse(String(init.body)) });
+        if (url === '/api/workspaces/a/sessions') return json({ session: { id: 'fresh', updatedAt: 2 } }, 201);
+        if (url === '/api/workspaces/a/sessions/fresh/permission') return json({ permission: { preset: 'workspace-write' } });
+        if (url === '/api/workspaces/a/sessions/fresh/goal-grant') return json({ goalGrant: true });
+        if (url === '/api/workspaces/a/sessions/fresh/messages') return new Response(stream);
+      }
+      if (url === '/api/workspaces/a/sessions/fresh') return json(detail({ text: 'Hello' }));
+      return undefined;
+    }));
+
+    expect(store.getSnapshot().sessionId).toMatch(/^draft-/);
+    await expect(store.grantGoal()).resolves.toBe(true);
+    expect(store.currentEntry()).toMatchObject({ draft: true, goalGrant: true });
+    await expect(store.sendMessage('Hello')).resolves.toBe(true);
+    expect(posts).toEqual([
+      { url: '/api/workspaces/a/sessions', body: { mode: 'standard' } },
+      { url: '/api/workspaces/a/sessions/fresh/permission', body: { preset: 'workspace-write' } },
+      { url: '/api/workspaces/a/sessions/fresh/goal-grant', body: {} },
+      { url: '/api/workspaces/a/sessions/fresh/messages', body: { text: 'Hello' } },
+    ]);
+    controller.enqueue(new TextEncoder().encode('data: {"type":"turn.end","reason":"end_turn"}\n\n'));
+    controller.close();
+    await waitFor(() => store.currentEntry()?.run === undefined);
+  });
+
   it('restores the saved session when the workspace has existing sessions', async () => {
     const values = new Map([['omniagent.activeSessions', JSON.stringify({ a: 'older' })]]);
     vi.stubGlobal('localStorage', {

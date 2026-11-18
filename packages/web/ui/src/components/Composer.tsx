@@ -502,7 +502,7 @@ export function Composer({ hero = false, onOpenPlanPreview }: { hero?: boolean; 
       label: t('Set a goal'),
       description: t('Allow the next message to create one session goal. Ordinary work does not create a goal.'),
       icon: <IconGoalOutlineRegular />,
-      available: app.sessionId !== null && entry?.draft !== true,
+      available: app.sessionId !== null,
       run: () => { void store.grantGoal(); },
       insert: '/goal ',
     },
@@ -643,14 +643,30 @@ export function Composer({ hero = false, onOpenPlanPreview }: { hero?: boolean; 
     const text = draft.trim();
     if ((text === '' && attachments.length === 0) || !canSend || sendingRef.current) return;
     const goalCommand = text.match(/^\/goal(?:\s+([\s\S]+))?$/u);
-    if (goalCommand !== null && attachments.length === 0 && !busy) {
+    if (goalCommand !== null && attachments.length === 0) {
+      if (busy) {
+        store.showAlert(t('Wait for the current turn to finish before changing the goal.'));
+        return;
+      }
       const objective = goalCommand[1]?.trim() ?? '';
-      if (key !== null) clearComposerDraft(key);
-      if (drafts.current.key === key) drafts.current.text = '';
-      setDraft('');
-      setCaret(0);
-      if (objective === '') void store.grantGoal();
-      else void store.updateGoal('create', objective);
+      // Goal mode must be on before the model can create a goal. Arming it and
+      // sending the objective as a normal message keeps creation model-driven.
+      sendingRef.current = true;
+      setSending(true);
+      try {
+        const granted = await store.grantGoal();
+        if (!granted) return;
+        if (key !== null) clearComposerDraft(key);
+        if (drafts.current.key === key) drafts.current.text = '';
+        setDraft('');
+        setCaret(0);
+        if (objective !== '') {
+          await store.sendMessage(t('Create a session goal for this objective, then start working on it: ') + objective);
+        }
+      } finally {
+        sendingRef.current = false;
+        setSending(false);
+      }
       return;
     }
     const payload: SendAttachment[] = attachments.map(({ kind, name, mimeType, data }) => ({ kind, name, mimeType, data }));

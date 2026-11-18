@@ -11,6 +11,7 @@ export type PublicHistoryMessage = Message & { messageId: string; timestamp: num
 export function projectPublicHistory(identity: unknown, events: readonly SessionEvent[]): PublicHistoryMessage[] {
   const result: PublicHistoryMessage[] = [];
   for (const event of events) {
+    if (isInternalNotice(event)) continue;
     const message = projectMessages([event])[0];
     if (message === undefined) continue;
     const safe = safePublicMessages([message])[0]!;
@@ -31,6 +32,18 @@ export function projectPublicHistory(identity: unknown, events: readonly Session
     });
   }
   return result;
+}
+
+/**
+ * Model-facing notices are part of the provider history but not part of the
+ * conversation the user sees. Goal completion hints and subagent settlement
+ * reports are surfaced through dedicated UI instead of a pseudo user message.
+ */
+function isInternalNotice(event: SessionEvent): boolean {
+  if (event.type === 'subagent/notice') return true;
+  if (event.type !== 'message/notice') return false;
+  return typeof event.data === 'object' && event.data !== null
+    && (event.data as { source?: unknown }).source === 'tool-goal';
 }
 
 export function projectMessages(events: readonly SessionEvent[]): Message[] {

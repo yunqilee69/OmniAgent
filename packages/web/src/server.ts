@@ -201,7 +201,7 @@ export interface WebHostOptions {
     handle: SessionHandle,
     permissions: DshPermissionSnapshot,
     runtime: ResolvedSessionRuntime,
-    team?: { members: readonly TeamMemberSnapshot[]; maxSteps: number },
+    team?: { members: readonly TeamMemberSnapshot[]; maxSteps: number; maxActive: number },
   ) => WebSession | Promise<WebSession>;
   /** Synchronous, side-effect-free projection for a replayed session. */
   replayContext?: (workspace: Workspace, handle: SessionHandle, permissions: DshPermissionSnapshot,
@@ -1644,6 +1644,7 @@ async function route(
   if (request.method === 'POST' && parts.length === 6 && parts[5] === 'goal-grant') {
     await withPermissionLock(permissionLocks, key, async () => {
       if (removing.has(workspace.id)) throw new HttpError(409, 'Workspace is being unregistered');
+      if (running.has(key)) throw new HttpError(409, 'Cannot grant goal creation while a turn is active');
       const registered = await options.workspaces.get(workspace.id);
       if (!registered || registered.path !== workspace.path) throw new HttpError(404, 'Workspace not found');
       const handle = await openSession(options.store, workspace, sessionId);
@@ -1660,19 +1661,18 @@ async function route(
   if (request.method === 'POST' && parts.length === 6 && parts[5] === 'goal') {
     const body = await readJson(request);
     const action = body.action;
-    const objective = typeof body.objective === 'string' ? body.objective.trim() : '';
     if (action === 'create') {
-      if (objective.length === 0 || Object.keys(body).some((name) => name !== 'action' && name !== 'objective')) {
-        throw new HttpError(400, 'A goal objective is required');
-      }
-    } else if (Object.keys(body).length !== 1 || (action !== 'pause' && action !== 'resume' && action !== 'complete')) {
+      // Goals are created by the agent after goal mode is granted; a direct
+      // create would bypass the execution-mode gate.
+      throw new HttpError(409, 'Enable goal mode and let the agent create the goal');
+    }
+    if (Object.keys(body).length !== 1 || (action !== 'pause' && action !== 'resume' && action !== 'complete')) {
       throw new HttpError(400, 'A goal action is required');
     }
     const goal = await withPermissionLock(permissionLocks, key, async () => {
       if (running.has(key)) throw new HttpError(409, 'Cannot change the goal while a turn is active');
       const handle = await openSession(options.store, workspace, sessionId);
       const controller = new GoalController({ events: handle.events, append: (event) => handle.append(event) });
-      if (action === 'create') return controller.create({ objective });
       const current = controller.view();
       if (current === undefined) throw new HttpError(409, 'This session has no goal');
       const ref = { id: current.id, revision: current.revision };
@@ -2589,10 +2589,18 @@ function resolvedModelSummary(runtime: ResolvedSessionRuntime): Record<string, u
   };
 }
 
-function teamSnapshot(handle: SessionHandle): { members: readonly TeamMemberSnapshot[]; maxSteps: number } | undefined {
+function teamSnapshot(handle: SessionHandle): {
+  members: readonly TeamMemberSnapshot[];
+  maxSteps: number;
+  maxActive: number;
+} | undefined {
   const mode = projectModeSelection(handle.events);
   if (mode.status !== 'selected' || mode.selection.version !== 2) return undefined;
-  return { members: mode.selection.members, maxSteps: mode.selection.policy.maxSteps };
+  return {
+    members: mode.selection.members,
+    maxSteps: mode.selection.policy.maxSteps,
+    maxActive: mode.selection.policy.maxActive,
+  };
 }
 
 function modeRuntimeOverride(handle: SessionHandle): {

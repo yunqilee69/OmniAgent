@@ -100,7 +100,13 @@ function ModeEditor({ editing, onClose }: ModeEditorProps): ReactNode {
       skills: allSkills ? '*' : [...skills].sort(),
       ...(kind === 'team' ? {
         members,
-        policy: { maxActive: Number(maxActive) || 3, maxSteps: editing?.policy.maxSteps ?? 100, failure: 'continue', allowPlan: false, allowGoal: false },
+        policy: {
+          maxActive: Math.min(8, Math.max(1, Math.floor(Number(maxActive)) || 3)),
+          maxSteps: editing?.policy.maxSteps ?? 100,
+          failure: editing?.policy.failure ?? 'continue',
+          allowPlan: editing?.policy.allowPlan ?? false,
+          allowGoal: editing?.policy.allowGoal ?? false,
+        },
       } : {}),
     });
     setSaving(false);
@@ -214,26 +220,39 @@ function ModeEditor({ editing, onClose }: ModeEditorProps): ReactNode {
               <Input value={maxActive} onChange={(event) => { setMaxActive(event.target.value); }} />
             </label>
             {members.map((member, index) => (
-              <div key={`${member.id}-${index}`} className={css.editorGrid}>
-                <Input value={member.id} aria-label={t('Member id')} onChange={(event) => {
-                  const value = event.target.value;
-                  setMembers((current) => current.map((item, itemIndex) => itemIndex === index ? { ...item, id: value } : item));
-                }} />
-                <Input value={member.name} aria-label={t('Member name')} onChange={(event) => {
-                  const value = event.target.value;
-                  setMembers((current) => current.map((item, itemIndex) => itemIndex === index ? { ...item, name: value } : item));
-                }} />
-                <SelectMenu
-                  value={member.agent}
-                  items={app.agents.filter((item) => item.valid && item.usage !== 'primary').map((item) => ({ id: item.id, label: item.name }))}
-                  onSelect={(value) => { setMembers((current) => current.map((item, itemIndex) => itemIndex === index ? { ...item, agent: value } : item)); }}
-                  ariaLabel={t('Member agent')}
-                  title={t('Member agent')}
-                  triggerClassName={css.editorSelect}
-                >
-                  {agentName(member.agent, app)}
-                </SelectMenu>
-                <Button variant="outline" size="sm" onClick={() => { setMembers((current) => current.filter((_, itemIndex) => itemIndex !== index)); }}>{t('Remove')}</Button>
+              <div key={`${member.id}-${index}`} className={css.memberEditor}>
+                <div className={css.editorGrid}>
+                  <Input value={member.id} aria-label={t('Member id')} onChange={(event) => {
+                    const value = event.target.value;
+                    setMembers((current) => current.map((item, itemIndex) => itemIndex === index ? { ...item, id: value } : item));
+                  }} />
+                  <Input value={member.name} aria-label={t('Member name')} onChange={(event) => {
+                    const value = event.target.value;
+                    setMembers((current) => current.map((item, itemIndex) => itemIndex === index ? { ...item, name: value } : item));
+                  }} />
+                  <SelectMenu
+                    value={member.agent}
+                    items={app.agents.filter((item) => item.valid && item.usage !== 'primary').map((item) => ({ id: item.id, label: item.name }))}
+                    onSelect={(value) => { setMembers((current) => current.map((item, itemIndex) => itemIndex === index ? { ...item, agent: value } : item)); }}
+                    ariaLabel={t('Member agent')}
+                    title={t('Member agent')}
+                    triggerClassName={css.editorSelect}
+                  >
+                    {agentName(member.agent, app)}
+                  </SelectMenu>
+                  <Button variant="outline" size="sm" onClick={() => { setMembers((current) => current.filter((_, itemIndex) => itemIndex !== index)); }}>{t('Remove')}</Button>
+                </div>
+                <textarea
+                  className={css.memberPrompt}
+                  rows={2}
+                  value={member.prompt}
+                  aria-label={t('Member instructions')}
+                  placeholder={t('Optional instructions prepended to every task delegated to this member.')}
+                  onChange={(event) => {
+                    const value = event.target.value;
+                    setMembers((current) => current.map((item, itemIndex) => itemIndex === index ? { ...item, prompt: value } : item));
+                  }}
+                />
               </div>
             ))}
             <p className={css.fieldHint}>{t('Members keep the tools and skills of their agent unless a later edit narrows them. The team cannot widen access.')}</p>

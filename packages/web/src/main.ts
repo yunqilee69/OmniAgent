@@ -157,7 +157,7 @@ async function main(): Promise<void> {
     permissions: DshPermissionSnapshot,
     resolved: ResolvedSessionRuntime,
     interactive: boolean,
-    team?: { members: readonly TeamMemberSnapshot[]; maxSteps: number },
+    team?: { members: readonly TeamMemberSnapshot[]; maxSteps: number; maxActive: number },
   ): Session {
     const config = configStore.snapshot.config;
     return new Session({
@@ -192,7 +192,11 @@ async function main(): Promise<void> {
         }),
       },
       subagents,
-      ...(team === undefined ? {} : { teamMembers: team.members, teamMaxSteps: team.maxSteps }),
+      ...(team === undefined ? {} : {
+        teamMembers: team.members,
+        teamMaxSteps: team.maxSteps,
+        teamMaxActive: team.maxActive,
+      }),
       mcpTools: mcp.tools(),
       schedule: schedules,
       ...(interactive && resolved.agent.id === 'creator' ? { agentAuthoring } : {}),

@@ -292,6 +292,33 @@ describe('web client protocol', () => {
   });
 
 
+  it('leaves an outstanding plan review to the composer instead of repeating it in the conversation', () => {
+    const run = createLiveState();
+    applyAgentEvent(run, {
+      type: 'plan.review.requested',
+      requestId: 'review-1',
+      plan: '# Rename plan\nDo it',
+    }, 1000);
+    const entry = { agent: null, transcript: [], turns: [], run } as unknown as SessionEntry;
+    const snapshot = store.getSnapshot();
+    const getSnapshot = vi.spyOn(store, 'getSnapshot').mockReturnValue({ ...snapshot, locale: 'zh' });
+    const originalConsoleError = console.error;
+    const consoleError = vi.spyOn(console, 'error').mockImplementation((message, ...args) => {
+      if (typeof message !== 'string' || !message.includes('useLayoutEffect does nothing on the server')) {
+        originalConsoleError(message, ...args);
+      }
+    });
+    try {
+      const markup = renderToStaticMarkup(createElement(ConversationView, { entry, processDisplay: 'expanded' }));
+      expect(markup).not.toContain('查看计划');
+      expect(markup).not.toContain('计划已准备好，等待审阅');
+    } finally {
+      getSnapshot.mockRestore();
+      consoleError.mockRestore();
+    }
+  });
+
+
   it('moves a streamed answer into the process without its actions and retains user and final actions', () => {
     const run = createLiveState();
     run.transcript.push({ kind: 'user', id: 'user', turn: 0, text: 'Question', timestamp: 1000 });

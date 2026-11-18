@@ -60,7 +60,7 @@ export interface ScheduleHostOptions {
     handle: SessionHandle,
     permissions: DshPermissionSnapshot,
     runtime: ResolvedSessionRuntime,
-    team?: { members: readonly TeamMemberSnapshot[]; maxSteps: number },
+    team?: { members: readonly TeamMemberSnapshot[]; maxSteps: number; maxActive: number },
   ) => Session;
   log?: (message: string) => void;
 }
@@ -222,7 +222,11 @@ export class SessionScheduleHost implements ScheduleDeliveryHost {
     });
     const selected = projectModeSelection(handle.events);
     const team = selected.status === 'selected' && selected.selection.version === 2
-      ? { members: selected.selection.members, maxSteps: selected.selection.policy.maxSteps }
+      ? {
+        members: selected.selection.members,
+        maxSteps: selected.selection.policy.maxSteps,
+        maxActive: selected.selection.policy.maxActive,
+      }
       : undefined;
     const session = this.options.compose(workspacePath, handle, permissions, runtime, team);
     this.options.liveSessions?.set(key, {

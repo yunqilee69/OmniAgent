@@ -39,6 +39,24 @@ describe('projectMessages', () => {
     expect(publicHistory[1]).not.toHaveProperty('requestDurationMs');
     expect(publicHistory[2]).not.toHaveProperty('requestDurationMs');
   });
+  it('hides model-facing goal and subagent notices from public history', () => {
+    const events: SessionEvent[] = [
+      { seq: 0, ts: 1, type: 'message/user', data: { text: 'start' } },
+      { seq: 1, ts: 2, type: 'message/notice', data: { text: '<goal_complete>', source: 'tool-goal' } },
+      { seq: 2, ts: 3, type: 'subagent/notice', data: { childId: 'child-1', status: 'completed', result: 'done' } },
+      { seq: 3, ts: 4, type: 'message/notice', data: { text: 'external reminder', source: 'schedule' } },
+      { seq: 4, ts: 5, type: 'message/user', data: { text: 'goal round', source: { kind: 'goal', round: 2 } } },
+    ];
+    const publicHistory = projectPublicHistory('session', events);
+    expect(publicHistory.map((message) => message.role)).toEqual(['user', 'user', 'user']);
+    expect(JSON.stringify(publicHistory)).not.toContain('goal_complete');
+    expect(JSON.stringify(publicHistory)).not.toContain('Subagent');
+    expect(publicHistory[1]).toMatchObject({ content: [{ type: 'text', text: 'external reminder' }] });
+    expect(publicHistory[2]).toMatchObject({ goalRound: 2 });
+    // The model still receives the notices.
+    expect(projectMessages(events)).toHaveLength(5);
+  });
+
   it('projects stable session-scoped identities and persisted timestamps without replay data', () => {
     const events: SessionEvent[] = [
       { seq: 0, ts: 100, type: 'message/user', data: { text: 'hello' } },

@@ -59,7 +59,7 @@
 | 事件 | 投影 |
 | --- | --- |
 | `message/user` / `user/message` | `role: 'user'` |
-| `message/notice` / `subagent/notice` | 合成为 `role: 'user'` 的系统通知文本 |
+| `message/notice` / `subagent/notice` | 合成为 `role: 'user'` 的系统通知文本；这是模型可见历史 |
 | `message/assistant` / `assistant/message` | `role: 'assistant'` |
 | `message/tool-result` / `tool/result` | 合并进上一条 `role: 'tool'`，没有则新建 |
 
@@ -89,7 +89,7 @@
 - 会话日志仍然精确记录「有调用、没有结果」的真实状态；
 - 下一次读取会话时，修复会重新发生，而不是把合成结果永久写进日志。
 
-`projectPublicHistory()` 在 `projectMessages()` 之上为每条消息生成稳定的 `messageId`（身份 + 事件哈希）和 `timestamp`（事件时间），供 Web 复制消息、显示时间和对账；它还会合并连续的 tool 消息。这些元数据只出现在 API / UI，不进入 provider 请求。
+`projectPublicHistory()` 在 `projectMessages()` 之上为每条消息生成稳定的 `messageId`（身份 + 事件哈希）和 `timestamp`（事件时间），供 Web 复制消息、显示时间和对账；它还会合并连续的 tool 消息。模型内部通知（`source: 'tool-goal'` 的 `message/notice` 和全部 `subagent/notice`）只保留在 `projectMessages()` 中，公开展示的历史会跳过它们，避免目标完成提示或子代理回报被渲染成用户消息。这些元数据只出现在 API / UI，不进入 provider 请求。
 
 ### 3.4 `/init`、工作区指令与图片投影
 
@@ -328,6 +328,8 @@ type GoalActivation = 'armed' | 'disarmed';
 | `update_goal blocked` | 允许 | 允许，但要求 `roundsStarted >= 3` |
 
 `direct human` 指顶层智能体上的真实用户 turn；goal 自动续轮不算。
+
+`create_goal` 还要求一次性授权。`goal/grant`（`session/goal-grant.ts`）记录授权时的用户消息数，下一条直接用户消息会消费它；Session 重建时只有未消费的 grant 才让 `create_goal` 出现在工具列表中，调用后内存标记清零。授权生效的那一轮，系统提示会明确告知模型目标创建已获准：用户消息描述目标或期望产出时，先调用 `create_goal` 再开始工作；单纯提问或状态查询不会创建目标。Web 的 `/goal <目标>` 先写 grant，再把目标作为普通消息交给模型创建；未开启目标模式时模型看不到 `create_goal`，`POST .../goal` 的 `action: "create"` 也返回 409。子代理不能授权或创建目标。
 
 ### 8.4 自动续轮
 

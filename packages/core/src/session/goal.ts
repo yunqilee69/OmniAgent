@@ -472,3 +472,10 @@ export function renderGoalToolGuidance(blockedAfter = GOAL_DEFAULT_BLOCKED_AFTER
     + 'consecutive goal rounds, and report that concrete condition in blocked_reason; difficulty, uncertainty, '
     + 'or useful remaining work is not blocked.';
 }
+
+export function renderGoalGrantGuidance(): string {
+  return 'Goal mode is armed for this turn: the user explicitly authorized creating one session goal. '
+    + 'If their message states an objective or asks to work toward an outcome, call create_goal once '
+    + 'with a concrete objective before starting the work, then pursue it. '
+    + 'Do not create a goal when the message is only a question, a status check, or unrelated to an objective.';
+}
