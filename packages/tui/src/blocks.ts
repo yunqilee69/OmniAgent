@@ -295,6 +295,7 @@ export function helpGroups(): readonly HelpGroup[] {
         { command: '/model [序号|agent|role <id>|<provider> <model>]', description: '查看或切换模型来源' },
         { command: '/permission <preset>', description: 'read-only / workspace-write / danger-full-access' },
         { command: '/plan [on|off]', description: '切换计划模式' },
+        { command: '/goal', description: '授权下一条消息创建一个目标' },
       ],
     },
     {

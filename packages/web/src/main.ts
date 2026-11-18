@@ -18,7 +18,7 @@ import {
   supportedReasoningEfforts,
   textResponse,
 } from '@omniagent/core';
-import type { DshPermissionSnapshot, ResolvedSessionRuntime, SessionHandle } from '@omniagent/core';
+import type { DshPermissionSnapshot, ResolvedSessionRuntime, SessionHandle, TeamMemberSnapshot } from '@omniagent/core';
 import { prepareLinuxSandbox } from '../../../scripts/prepare-linux-sandbox.ts';
 import type { AgentSummary, RoleSummary } from './server';
 import { readWorkspaceAudit, recordWorkspaceAudit } from './audit';
@@ -137,8 +137,8 @@ async function main(): Promise<void> {
       permissionSettings,
       modes,
       liveSessions,
-      compose: (workspacePath, handle, permissions, resolved) =>
-        composeSession(workspacePath, handle, permissions, resolved, false),
+      compose: (workspacePath, handle, permissions, resolved, team) =>
+        composeSession(workspacePath, handle, permissions, resolved, false, team),
       log: (message) => console.error(message),
     }),
     log: (message) => console.error(message),
@@ -157,6 +157,7 @@ async function main(): Promise<void> {
     permissions: DshPermissionSnapshot,
     resolved: ResolvedSessionRuntime,
     interactive: boolean,
+    team?: { members: readonly TeamMemberSnapshot[]; maxSteps: number },
   ): Session {
     const config = configStore.snapshot.config;
     return new Session({
@@ -191,6 +192,7 @@ async function main(): Promise<void> {
         }),
       },
       subagents,
+      ...(team === undefined ? {} : { teamMembers: team.members, teamMaxSteps: team.maxSteps }),
       mcpTools: mcp.tools(),
       schedule: schedules,
       ...(interactive && resolved.agent.id === 'creator' ? { agentAuthoring } : {}),
@@ -229,8 +231,8 @@ async function main(): Promise<void> {
     readAudit: (workspace, sessionId) => readWorkspaceAudit(configDir, workspace.path, sessionId),
     liveSessions,
     schedule: schedules,
-    createRuntimeSession: async (workspace, handle, permissions, resolved) =>
-      composeSession(workspace.path, handle, permissions, resolved, true),
+    createRuntimeSession: async (workspace, handle, permissions, resolved, team) =>
+      composeSession(workspace.path, handle, permissions, resolved, true, team),
     // Session construction is synchronous and only builds in-memory tools;
     // no turn, listener, persistence or registry entry is created here.
     replayContext: (workspace, handle, permissions, resolved) =>

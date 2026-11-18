@@ -6,8 +6,10 @@ export {
 } from './store';
 export type {
   ModeDefinition,
+  ModeMember,
   ModeSelector,
   ModeStoreOptions,
   ModeSummary,
   ModeWrite,
+  TeamPolicy,
 } from './store';

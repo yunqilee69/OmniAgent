@@ -7,6 +7,7 @@ import type { AgentEvent } from '../protocol/events';
 import type { PermissionGate } from '../protocol/permission';
 import { ProviderRequestError } from '../providers/errors';
 import { FakeModel, textResponse, toolCallResponse } from '../providers/fake';
+import type { ModelClient, ModelResponse } from '../providers/types';
 import { ToolRegistry } from '../tools/registry';
 import { AgentLoop } from './agent-loop';
 
@@ -159,12 +160,13 @@ describe('AgentLoop', () => {
     vi.useFakeTimers();
     try {
       let calls = 0;
-      const model = {
+      const model: ModelClient = {
         name: 'flaky',
         async complete() {
           calls += 1;
           if (calls < 3) throw new ProviderRequestError('HTTP 503', { status: 503, code: 'overloaded' });
-          return textResponse('recovered');
+          const response = textResponse('recovered');
+          return { message: response.message, stopReason: response.stopReason ?? 'end_turn', usage: { inputTokens: 0, outputTokens: 0 } };
         },
       };
       const loop = new AgentLoop({
@@ -184,14 +186,18 @@ describe('AgentLoop', () => {
   });
 
   it('does not retry a request that already streamed text, or a non-retryable failure', async () => {
-    const streamed = {
+    const streamed: ModelClient = {
       name: 'streamed',
-      async *stream() {
+      async complete() {
+        const response = textResponse('unused');
+        return { message: response.message, stopReason: response.stopReason ?? 'end_turn', usage: { inputTokens: 0, outputTokens: 0 } };
+      },
+      async *stream(): AsyncGenerator<{ type: 'text'; text: string }, ModelResponse> {
         yield { type: 'text' as const, text: 'partial' };
         throw new ProviderRequestError('HTTP 503', { status: 503 });
       },
     };
-    const denied = {
+    const denied: ModelClient = {
       name: 'denied',
       async complete() {
         throw new ProviderRequestError('HTTP 401', { status: 401, code: 'auth' });

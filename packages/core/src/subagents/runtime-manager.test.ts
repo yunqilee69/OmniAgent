@@ -132,6 +132,33 @@ describe('SubagentManager with RuntimeResolver', () => {
     ]);
   });
 
+  it('starts a team member with the snapshot model and narrowed tools', async () => {
+    const { cwd, store, parent, runtime } = await fixture();
+    const childModel = new FakeModel([textResponse('done')]);
+    const manager = new SubagentManager({ store, runtime, createModel: () => childModel });
+    managers.push(manager);
+    const started = await manager.start(parent, {
+      description: 'Read',
+      prompt: 'Read the notes',
+      agent: 'explorer',
+      binding: { version: 2, kind: 'agent' },
+      tools: ['read_file', 'grep'],
+      skills: [],
+      maxSteps: 4,
+    });
+    await manager.wait(parent, started.id, 4_000, new AbortController().signal);
+    const child = await store.open(cwd, started.id);
+    expect(child.events).toContainEqual(expect.objectContaining({
+      type: 'model/selected',
+      data: { version: 2, kind: 'agent' },
+    }));
+    expect(child.events).toContainEqual(expect.objectContaining({
+      type: 'mode/selected',
+      data: expect.objectContaining({ tools: ['read_file'], skills: [] }),
+    }));
+    expect(childModel.requests[0]!.tools.map((tool) => tool.name)).toEqual(['read_file']);
+  });
+
   it('rejects agents that are not available as subagents', async () => {
     const { store, parent, runtime } = await fixture();
     const manager = new SubagentManager({

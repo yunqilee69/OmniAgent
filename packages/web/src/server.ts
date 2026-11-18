@@ -65,6 +65,7 @@ import {
   projectAgentSelection,
   projectModeSelection,
   projectModelSelection,
+  type TeamMemberSnapshot,
   usageAllowsRoot,
 } from '@omniagent/core';
 import type { ReasoningEffort } from '@omniagent/core';
@@ -84,6 +85,9 @@ import {
   projectPlanMode,
 } from '../../core/src/session/plan';
 import { projectPendingAskUser } from '../../core/src/session/ask-user';
+import { countUserMessages, createGoalGrantEvent, projectGoalGrant } from '../../core/src/session/goal-grant';
+import { projectGoal } from '../../core/src/session/goal';
+import { GoalController } from '../../core/src/session/goal-controller';
 import { validateAskUserAnswers } from '../../core/src/tools/builtin/ask-user';
 import type { AskUserAnswerItem } from '../../core/src/tools/builtin/ask-user';
 import type { ApprovalBroker, ApprovalTurn } from './approval';
@@ -197,6 +201,7 @@ export interface WebHostOptions {
     handle: SessionHandle,
     permissions: DshPermissionSnapshot,
     runtime: ResolvedSessionRuntime,
+    team?: { members: readonly TeamMemberSnapshot[]; maxSteps: number },
   ) => WebSession | Promise<WebSession>;
   /** Synchronous, side-effect-free projection for a replayed session. */
   replayContext?: (workspace: Workspace, handle: SessionHandle, permissions: DshPermissionSnapshot,
@@ -1293,14 +1298,28 @@ async function route(
           } catch (error) {
             throw new HttpError(409, error instanceof Error ? error.message : 'The selected mode is unavailable');
           }
-          modeSelection = {
-            version: 1,
-            mode: mode.id,
-            agent: agentId,
-            model: runtime.modelBinding,
-            tools: runtime.sessionAgent.tools === '*' ? '*' : [...runtime.sessionAgent.tools].sort(),
-            skills: runtime.sessionAgent.skills === '*' ? '*' : [...runtime.sessionAgent.skills].sort(),
-          };
+          const tools = runtime.sessionAgent.tools === '*' ? '*' : [...runtime.sessionAgent.tools].sort();
+          const skills = runtime.sessionAgent.skills === '*' ? '*' : [...runtime.sessionAgent.skills].sort();
+          modeSelection = mode.type === 'team'
+            ? {
+              version: 2,
+              type: 'team',
+              mode: mode.id,
+              agent: agentId,
+              model: runtime.modelBinding,
+              tools,
+              skills,
+              members: mode.members.map((member) => ({ ...member })),
+              policy: { ...mode.policy },
+            }
+            : {
+              version: 1,
+              mode: mode.id,
+              agent: agentId,
+              model: runtime.modelBinding,
+              tools,
+              skills,
+            };
         } else {
           if (body.agent !== undefined && (typeof body.agent !== 'string' || body.agent.length === 0)) {
             throw new HttpError(400, 'A valid agent id is required');
@@ -1382,6 +1401,8 @@ async function route(
       ...selection,
       plan: projectPlanMode(handle.events),
       planReview: projectPendingPlanReview(handle.events),
+      goal: projectGoal(handle.events).current,
+      goalGrant: projectGoalGrant(handle.events)?.consumed === false,
       askUser: projectPendingAskUser(handle.events),
       pendingApproval: projectPendingPermission(handle.events),
       todos: projectTodos(handle.events),
@@ -1620,6 +1641,51 @@ async function route(
     if (changed) retireSessionRuntime(sessions, options.liveSessions, running, key);
     return json(response, 200, result);
   }
+  if (request.method === 'POST' && parts.length === 6 && parts[5] === 'goal-grant') {
+    await withPermissionLock(permissionLocks, key, async () => {
+      if (removing.has(workspace.id)) throw new HttpError(409, 'Workspace is being unregistered');
+      const registered = await options.workspaces.get(workspace.id);
+      if (!registered || registered.path !== workspace.path) throw new HttpError(404, 'Workspace not found');
+      const handle = await openSession(options.store, workspace, sessionId);
+      if (handle.header.parentSessionId !== undefined || (handle.header.depth ?? 0) > 0) {
+        throw new HttpError(409, 'A team member cannot grant goal creation');
+      }
+      const current = projectGoalGrant(handle.events);
+      if (current?.consumed === false) return;
+      await handle.append(createGoalGrantEvent(countUserMessages(handle.events)));
+    });
+    retireSessionRuntime(sessions, options.liveSessions, running, key);
+    return json(response, 200, { goalGrant: true });
+  }
+  if (request.method === 'POST' && parts.length === 6 && parts[5] === 'goal') {
+    const body = await readJson(request);
+    const action = body.action;
+    const objective = typeof body.objective === 'string' ? body.objective.trim() : '';
+    if (action === 'create') {
+      if (objective.length === 0 || Object.keys(body).some((name) => name !== 'action' && name !== 'objective')) {
+        throw new HttpError(400, 'A goal objective is required');
+      }
+    } else if (Object.keys(body).length !== 1 || (action !== 'pause' && action !== 'resume' && action !== 'complete')) {
+      throw new HttpError(400, 'A goal action is required');
+    }
+    const goal = await withPermissionLock(permissionLocks, key, async () => {
+      if (running.has(key)) throw new HttpError(409, 'Cannot change the goal while a turn is active');
+      const handle = await openSession(options.store, workspace, sessionId);
+      const controller = new GoalController({ events: handle.events, append: (event) => handle.append(event) });
+      if (action === 'create') return controller.create({ objective });
+      const current = controller.view();
+      if (current === undefined) throw new HttpError(409, 'This session has no goal');
+      const ref = { id: current.id, revision: current.revision };
+      const next = action === 'pause'
+        ? await controller.pause(ref)
+        : action === 'resume'
+          ? await controller.resume(ref)
+          : await controller.complete(ref);
+      return next;
+    });
+    retireSessionRuntime(sessions, options.liveSessions, running, key);
+    return json(response, 200, { goal });
+  }
   if (request.method === 'POST' && parts.length === 6 && parts[5] === 'plan') {
     const body = await readJson(request);
     const active = body.active;
@@ -1632,6 +1698,12 @@ async function route(
       const registered = await options.workspaces.get(workspace.id);
       if (!registered || registered.path !== workspace.path) throw new HttpError(404, 'Workspace not found');
       const handle = await openSession(options.store, workspace, sessionId);
+      if (projectPendingPlanReview(handle.events) !== null) {
+        throw new HttpError(409, 'Plan mode cannot change while a plan review is pending');
+      }
+      if (active && options.approvalBroker === undefined) {
+        throw new HttpError(409, 'Plan mode requires a review handler');
+      }
       if (projectPlanMode(handle.events).active !== active) {
         await handle.append(createPlanModeEvent(active));
       }
@@ -2461,7 +2533,7 @@ async function getSession(
     pending = Promise.resolve(options.createSession(workspace, handle, permissions));
   } else {
     if (!options.createRuntimeSession) throw new HttpError(500, 'Runtime session composition is unavailable');
-    pending = Promise.resolve(options.createRuntimeSession(workspace, handle, permissions, runtime));
+    pending = Promise.resolve(options.createRuntimeSession(workspace, handle, permissions, runtime, teamSnapshot(handle)));
   }
   pending = pending.then((session) => {
     options.liveSessions?.set(key, {
@@ -2515,6 +2587,12 @@ function resolvedModelSummary(runtime: ResolvedSessionRuntime): Record<string, u
     ...(model.maxTokens === undefined ? {} : { maxTokens: model.maxTokens }),
     capabilities: model.capabilities,
   };
+}
+
+function teamSnapshot(handle: SessionHandle): { members: readonly TeamMemberSnapshot[]; maxSteps: number } | undefined {
+  const mode = projectModeSelection(handle.events);
+  if (mode.status !== 'selected' || mode.selection.version !== 2) return undefined;
+  return { members: mode.selection.members, maxSteps: mode.selection.policy.maxSteps };
 }
 
 function modeRuntimeOverride(handle: SessionHandle): {

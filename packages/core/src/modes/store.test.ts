@@ -42,7 +42,7 @@ describe('ModeStore', () => {
     const modes = await store.list();
     expect(modes.map((mode) => mode.id)).toEqual(['standard', 'creator']);
     expect(modes[0]).toMatchObject({
-      name: '标准模式', agent: 'default', builtIn: true, customized: false, valid: true,
+      type: 'single', name: '标准模式', agent: 'default', builtIn: true, customized: false, valid: true,
     });
     expect(modes[1]).toMatchObject({
       name: '创造模式', agent: 'creator', builtIn: true, customized: false, valid: true,
@@ -86,6 +86,34 @@ describe('ModeStore', () => {
       .rejects.toThrow(/Unknown tool/);
     expect(await readFile(modesPath, 'utf8')).toBe(before);
     expect((await store.list()).some((mode) => mode.id === 'unsafe')).toBe(false);
+  });
+
+  it('reads an old mode without type as a single-agent mode and saves a team', async () => {
+    const { modesPath, store } = await fixture();
+    await writeFile(modesPath, JSON.stringify({
+      version: 1,
+      modes: { legacy: { name: 'Legacy', agent: 'default', tools: ['read_file'], skills: [] } },
+    }));
+    expect(await store.get('legacy')).toMatchObject({ type: 'single', members: [], policy: { maxDepth: 1 } });
+
+    const team = await store.save('analysis', {
+      type: 'team',
+      name: 'Analysis team',
+      agent: 'default',
+      members: [{ id: 'reader', name: 'Reader', agent: 'default', tools: ['read_file'], skills: [] }],
+      policy: { maxActive: 2, failure: 'stop' },
+    });
+    expect(team).toMatchObject({
+      type: 'team',
+      members: [{ id: 'reader', agent: 'default', tools: ['read_file'] }],
+      policy: { maxActive: 2, maxDepth: 1, failure: 'stop', allowGoal: false },
+    });
+  });
+
+  it('rejects a team that has no members', async () => {
+    const { store } = await fixture();
+    await expect(store.save('empty-team', { type: 'team', name: 'Empty', agent: 'default', members: [] }))
+      .rejects.toThrow(/at least one member/);
   });
 
   it('supports overriding a built-in mode and restoring it on remove', async () => {

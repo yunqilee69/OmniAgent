@@ -6,7 +6,7 @@ import {
 import type { SessionEvent } from './types';
 import { isInitCommand } from './init-command';
 
-export type PublicHistoryMessage = Message & { messageId: string; timestamp: number };
+export type PublicHistoryMessage = Message & { messageId: string; timestamp: number; goalRound?: number };
 
 export function projectPublicHistory(identity: unknown, events: readonly SessionEvent[]): PublicHistoryMessage[] {
   const result: PublicHistoryMessage[] = [];
@@ -19,10 +19,15 @@ export function projectPublicHistory(identity: unknown, events: readonly Session
       previous.results.push(...safe.results);
       continue;
     }
+    const source = typeof event.data === 'object' && event.data !== null
+      ? (event.data as { source?: { kind?: unknown; round?: unknown } }).source
+      : undefined;
+    const goalRound = source?.kind === 'goal' && typeof source.round === 'number' ? source.round : undefined;
     result.push({
       ...safe,
       messageId: createHash('sha256').update(JSON.stringify([identity, event])).digest('hex'),
       timestamp: event.ts,
+      ...(goalRound === undefined ? {} : { goalRound }),
     });
   }
   return result;

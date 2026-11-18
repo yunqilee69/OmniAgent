@@ -624,6 +624,29 @@
   margin-bottom: 8px;
 }
 
+.goalDivider {
+  display: flex;
+  align-items: center;
+  gap: 12px;
+  margin: 18px 0 14px;
+  color: var(--dsw-alias-label-secondary);
+  font-size: 12px;
+  font-weight: 600;
+  letter-spacing: 0.01em;
+}
+
+.goalDivider::before,
+.goalDivider::after {
+  content: "";
+  flex: 1 1 auto;
+  height: 1px;
+  background: var(--dsw-alias-border-l2);
+}
+
+.goalDivider[data-state="running"] { color: var(--dsw-alias-state-business-primary); }
+.goalDivider[data-state="failed"] { color: var(--dsw-alias-state-danger-primary, #c2410c); }
+.goalDivider[data-state="passed"] { color: var(--dsw-alias-state-success-primary, #15803d); }
+
 .response {
   margin-top: 6px;
 }

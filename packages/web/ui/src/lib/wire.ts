@@ -133,28 +133,62 @@ export interface RoleEntry {
 
 export type ModeSelector = '*' | string[];
 
+export interface ModeMember {
+  id: string;
+  name: string;
+  agent: string;
+  model: ModelBinding;
+  prompt: string;
+  tools: ModeSelector;
+  skills: ModeSelector;
+}
+
+export interface TeamPolicy {
+  maxActive: number;
+  maxDepth: 1;
+  maxSteps: number;
+  failure: 'stop' | 'continue';
+  allowPlan: boolean;
+  allowGoal: boolean;
+}
+
 export interface ModeSummary {
   id: string;
+  type: 'single' | 'team';
   name: string;
   description: string;
   agent: string;
   model: ModelBinding;
   tools: ModeSelector;
   skills: ModeSelector;
+  members: ModeMember[];
+  policy: TeamPolicy;
   builtIn: boolean;
   customized: boolean;
   valid: boolean;
   warnings: string[];
 }
 
-export interface ModeSelection {
-  version: 1;
-  mode: string;
-  agent: string;
-  model: ModelBinding;
-  tools: ModeSelector;
-  skills: ModeSelector;
-}
+export type ModeSelection =
+  | {
+    version: 1;
+    mode: string;
+    agent: string;
+    model: ModelBinding;
+    tools: ModeSelector;
+    skills: ModeSelector;
+  }
+  | {
+    version: 2;
+    type: 'team';
+    mode: string;
+    agent: string;
+    model: ModelBinding;
+    tools: ModeSelector;
+    skills: ModeSelector;
+    members: ModeMember[];
+    policy: TeamPolicy;
+  };
 
 export interface ModeOptions {
   tools: string[];
@@ -629,6 +663,7 @@ export interface PublicMessage {
   toolCalls?: ToolCall[];
   results?: ToolResult[];
   usage?: { inputTokens: number; outputTokens: number };
+  goalRound?: number;
 }
 
 export interface ContextEstimate {
@@ -1147,6 +1182,51 @@ function validateModeSelector(value: unknown): ModeSelector {
   throw new Error('Invalid mode selector.');
 }
 
+function defaultPolicy(): TeamPolicy {
+  return { maxActive: 3, maxDepth: 1, maxSteps: 100, failure: 'continue', allowPlan: false, allowGoal: false };
+}
+
+function validateMembers(value: unknown): ModeMember[] {
+  if (value === undefined) return [];
+  if (!Array.isArray(value)) throw new Error('Invalid mode response.');
+  return value.map((item) => {
+    if (typeof item !== 'object' || item === null) throw new Error('Invalid mode response.');
+    const member = item as Record<string, unknown>;
+    if (typeof member.id !== 'string' || !member.id.trim()
+      || typeof member.name !== 'string' || !member.name.trim()
+      || typeof member.agent !== 'string' || !member.agent.trim()
+      || (member.prompt !== undefined && typeof member.prompt !== 'string')) {
+      throw new Error('Invalid mode response.');
+    }
+    const model = validateBinding(member.model);
+    if (model === null) throw new Error('Invalid mode response.');
+    return {
+      id: member.id,
+      name: member.name,
+      agent: member.agent,
+      model,
+      prompt: typeof member.prompt === 'string' ? member.prompt : '',
+      tools: validateModeSelector(member.tools ?? '*'),
+      skills: validateModeSelector(member.skills ?? '*'),
+    };
+  });
+}
+
+function validatePolicy(value: unknown): TeamPolicy {
+  if (value === undefined) return defaultPolicy();
+  if (typeof value !== 'object' || value === null) throw new Error('Invalid mode response.');
+  const policy = value as Record<string, unknown>;
+  const fallback = defaultPolicy();
+  return {
+    maxActive: typeof policy.maxActive === 'number' ? policy.maxActive : fallback.maxActive,
+    maxDepth: 1,
+    maxSteps: typeof policy.maxSteps === 'number' ? policy.maxSteps : fallback.maxSteps,
+    failure: policy.failure === 'stop' ? 'stop' : 'continue',
+    allowPlan: policy.allowPlan === true,
+    allowGoal: policy.allowGoal === true,
+  };
+}
+
 export function validateModeSummary(value: unknown): ModeSummary {
   if (typeof value !== 'object' || value === null) throw new Error('Invalid mode response.');
   const mode = value as Record<string, unknown>;
@@ -1164,12 +1244,15 @@ export function validateModeSummary(value: unknown): ModeSummary {
   if (model === null) throw new Error('Invalid mode response.');
   return {
     id: mode.id,
+    type: mode.type === 'team' ? 'team' : 'single',
     name: mode.name,
     description: mode.description,
     agent: mode.agent,
     model,
     tools: validateModeSelector(mode.tools),
     skills: validateModeSelector(mode.skills),
+    members: validateMembers(mode.members),
+    policy: validatePolicy(mode.policy),
     builtIn: mode.builtIn,
     customized: mode.customized,
     valid: mode.valid,
@@ -1181,20 +1264,24 @@ export function validateModeSelection(value: unknown): ModeSelection | null {
   if (value === null || value === undefined) return null;
   if (typeof value !== 'object' || Array.isArray(value)) throw new Error('Invalid session mode response.');
   const mode = value as Record<string, unknown>;
-  if (mode.version !== 1 || typeof mode.mode !== 'string' || !mode.mode.trim()
+  if ((mode.version !== 1 && mode.version !== 2) || typeof mode.mode !== 'string' || !mode.mode.trim()
     || typeof mode.agent !== 'string' || !mode.agent.trim()) {
     throw new Error('Invalid session mode response.');
   }
   const model = validateBinding(mode.model);
   if (model === null) throw new Error('Invalid session mode response.');
-  return {
-    version: 1,
+  const shared = {
     mode: mode.mode,
     agent: mode.agent,
     model,
     tools: validateModeSelector(mode.tools),
     skills: validateModeSelector(mode.skills),
   };
+  if (mode.version === 2) {
+    if (mode.type !== 'team') throw new Error('Invalid session mode response.');
+    return { version: 2, type: 'team', ...shared, members: validateMembers(mode.members), policy: validatePolicy(mode.policy) };
+  }
+  return { version: 1, ...shared };
 }
 
 export function validateModeOptions(value: unknown): ModeOptions {

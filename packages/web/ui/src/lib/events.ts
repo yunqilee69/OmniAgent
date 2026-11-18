@@ -37,6 +37,7 @@ export interface UserItem {
   text: string;
   timestamp?: number;
   attachments?: UserAttachment[];
+  goalRound?: number;
 }
 
 /** Token accounting a provider reported for one model call. */
@@ -824,6 +825,7 @@ export function hydrateTranscript(messages: readonly PublicMessage[], events: re
         transcript.push({
           kind: 'user', id: itemId('user'), turn: index, text,
           ...(typeof message.timestamp === 'number' && Number.isFinite(message.timestamp) ? { timestamp: message.timestamp } : {}),
+          ...(typeof message.goalRound === 'number' ? { goalRound: message.goalRound } : {}),
           ...(attachments.length === 0 ? {} : { attachments }),
         });
       }
@@ -904,6 +906,8 @@ function messagesFromEvents(events: readonly unknown[]): PublicMessage[] {
 export interface DisplayTurn {
   index: number;
   user?: UserItem;
+  goalRound?: number;
+  goalState?: 'running' | 'failed' | 'passed';
   process: TranscriptItem[];
   final?: AssistantItem;
   extras: TranscriptItem[];
@@ -961,9 +965,16 @@ export function groupTurns(transcript: readonly TranscriptItem[], turns: readonl
       process.push(item);
     }
     const user = items.find((item): item is UserItem => item.kind === 'user');
+    const goalRound = user?.goalRound;
+    const goalState = goalRound === undefined
+      ? undefined
+      : final === undefined
+        ? 'running'
+        : /完成|通过|achieved|complete/i.test(final.text) ? 'passed' : 'failed';
     result.push({
       index,
       ...(user === undefined ? {} : { user }),
+      ...(goalRound === undefined ? {} : { goalRound, goalState }),
       process,
       ...(final === undefined ? {} : { final }),
       extras,

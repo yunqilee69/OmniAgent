@@ -63,6 +63,8 @@ export interface ResolveSessionInput {
   isRoot: boolean;
   /** Immutable mode composition copied from the session's `mode/selected` event. */
   mode?: SessionModeOverride;
+  /** When true, the mode snapshot can only narrow the agent profile. */
+  narrowMode?: boolean;
 }
 
 export interface RuntimeResolverOptions {
@@ -87,6 +89,14 @@ function toolsForSelector(
 
 function skillsForSelector(selector: '*' | readonly string[]): '*' | Set<string> {
   return selector === '*' ? '*' : new Set(selector);
+}
+
+/** A mode snapshot can only narrow an agent profile, never widen it. */
+function intersectSelector(profile: '*' | readonly string[], mode: '*' | readonly string[]): '*' | string[] {
+  if (mode === '*') return profile === '*' ? '*' : [...profile];
+  if (profile === '*') return [...mode];
+  const allowed = new Set(profile);
+  return mode.filter((name) => allowed.has(name));
 }
 
 export class RuntimeResolver {
@@ -114,10 +124,20 @@ export class RuntimeResolver {
 
     const profile = catalog.profiles.get(agent.profile);
     if (!profile) throw new Error(`Agent "${agent.id}" references unknown profile "${agent.profile}"`);
-    const tools = input.mode === undefined
-      ? toolsForSelector(profile.tools, `Agent profile "${profile.id}"`)
-      : toolsForSelector(input.mode.tools, `Mode "${input.mode.id}"`);
-    const skills = skillsForSelector(input.mode?.skills ?? profile.skills);
+    const selectedTools = input.mode === undefined
+      ? profile.tools
+      : input.narrowMode === true
+        ? intersectSelector(profile.tools, input.mode.tools)
+        : input.mode.tools;
+    const selectedSkills = input.mode === undefined
+      ? profile.skills
+      : input.narrowMode === true
+        ? intersectSelector(profile.skills, input.mode.skills)
+        : input.mode.skills;
+    const tools = toolsForSelector(selectedTools, input.mode === undefined
+      ? `Agent profile "${profile.id}"`
+      : `Mode "${input.mode.id}"`);
+    const skills = skillsForSelector(selectedSkills);
 
     const warnings = [...configSnapshot.catalog.warnings];
     const instructions = readWorkspaceInstructions(input.workspace ?? input.cwd, warnings);

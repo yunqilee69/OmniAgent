@@ -1,5 +1,7 @@
 import type { ReasoningEffort } from '../protocol/reasoning';
 import type { Session } from '../session';
+import type { ModelBinding } from '../session/model-binding';
+import type { ModeSelector } from '../session/mode-selection';
 
 export const SUBAGENT_START_EVENT = 'subagent/start';
 export const SUBAGENT_END_EVENT = 'subagent/end';
@@ -18,6 +20,14 @@ export interface SubagentStartRequest {
   provider?: string;
   model?: string;
   reasoningEffort?: ReasoningEffort;
+  /** Resolved model binding. Overrides role, provider, and model when set. */
+  binding?: ModelBinding;
+  /** Tool allowlist copied from an immutable team snapshot. */
+  tools?: ModeSelector;
+  /** Skill allowlist copied from an immutable team snapshot. */
+  skills?: ModeSelector;
+  /** Step budget for this child. Falls back to the manager default. */
+  maxSteps?: number;
 }
 
 export interface SubagentStartResult {

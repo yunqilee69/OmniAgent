@@ -133,6 +133,7 @@ describe('Session goals', () => {
         modelId: 'goal-flow',
         session: handle,
       });
+      await session.grantGoalCreation();
 
       const events = await collect(session.send('start goal'));
       const results = events.filter((event) => event.type === 'tool.result');
@@ -179,6 +180,7 @@ describe('Session goals', () => {
         modelId: 'goal-flow',
         session: handle,
       });
+      await session.grantGoalCreation();
 
       const events = await collect(session.send('start goal'));
       const blockedTool = events.find((event) =>

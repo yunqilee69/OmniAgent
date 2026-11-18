@@ -272,6 +272,8 @@ export type {
   GoalView,
 } from './session/goal';
 export { GoalController, goalRefOf } from './session/goal-controller';
+export { GOAL_GRANT_EVENT, countUserMessages, createGoalGrantEvent, projectGoalGrant } from './session/goal-grant';
+export type { GoalGrant } from './session/goal-grant';
 export type { CreateGoalRequest, EditGoalRequest, GoalControllerOptions } from './session/goal-controller';
 export {
   DSH_DEFAULT_PRESET,
@@ -407,10 +409,10 @@ export { AGENT_SELECTION_EVENT, AGENT_SELECTION_VERSION, AGENT_USAGES, AgentSele
 export type { AgentSelection, AgentSelectionProjection, AgentUsage } from './session/agent-selection';
 export { MODEL_SELECTION_EVENT, MODEL_SELECTION_VERSION, ModelBindingSchema, createModelSelectionEvent, createModelSwitch, defaultModelBinding, projectModelSelection, resolveModelBinding } from './session/model-binding';
 export type { ModelBinding, ModelSelectionProjection, ResolvedModelBinding } from './session/model-binding';
-export { MODE_SELECTION_EVENT, MODE_SELECTION_VERSION, ModeSelectionSchema, createModeSelectionEvent, hasModeSelection, projectModeSelection } from './session/mode-selection';
-export type { ModeSelection, ModeSelectionProjection } from './session/mode-selection';
+export { MODE_SELECTION_EVENT, MODE_SELECTION_VERSION, TEAM_MODE_SELECTION_VERSION, ModeSelectionSchema, createModeSelectionEvent, hasModeSelection, projectModeSelection } from './session/mode-selection';
+export type { ModeSelection, ModeSelectionProjection, TeamMemberSnapshot } from './session/mode-selection';
 export { ModeConfigError, ModeStore } from './modes';
-export type { ModeDefinition, ModeSelector, ModeStoreOptions, ModeSummary, ModeWrite } from './modes';
+export type { ModeDefinition, ModeMember, ModeSelector, ModeStoreOptions, ModeSummary, ModeWrite, TeamPolicy } from './modes';
 export { RuntimeResolver } from './session/runtime';
 export type { ResolvedSessionRuntime, ResolveSessionInput, RuntimeResolverOptions, SessionAgent } from './session/runtime';
 export { ConfigError, ConfigStore } from './config/store';

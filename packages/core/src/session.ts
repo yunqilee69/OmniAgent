@@ -49,10 +49,12 @@ import {
 } from './tools/builtin/ask-user';
 import type { AskUserAnswerItem, AskUserQuestion, AskUserToolResult } from './tools/builtin/ask-user';
 import { createSubagentTools, SUBAGENT_TOOL_NAME } from './tools/builtin/subagent';
+import { createTeamDelegationTool, DELEGATE_TEAM_MEMBER_TOOL_NAME } from './tools/builtin/team';
+import type { TeamMemberSnapshot } from './session/mode-selection';
 import { createGoalTools, CREATE_GOAL_TOOL_NAME, GET_GOAL_TOOL_NAME, UPDATE_GOAL_TOOL_NAME } from './tools/builtin/goal';
 import { createScheduleTools, renderScheduleToolGuidance, SCHEDULE_TOOL_GROUP } from './schedule/tools';
 import type { ScheduleService } from './schedule/service';
-import { createAgentAuthoringTools } from './agents/authoring';
+import { createAgentAuthoringTools, WRITE_AGENT_DEFINITION_TOOL_NAME } from './agents/authoring';
 import type { AgentAuthoringService } from './agents/authoring';
 import { TODO_WRITE_EVENT } from './session/todo';
 import {
@@ -68,6 +70,7 @@ import {
   renderGoalRoundPrompt,
   renderGoalToolGuidance,
 } from './session/goal';
+import { createGoalGrantEvent, projectGoalGrant } from './session/goal-grant';
 import type { GoalView } from './session/goal';
 import {
   createPlanModeEvent,
@@ -160,6 +163,10 @@ export interface SessionOptions {
   planActive?: boolean;
   /** Shared subagent runtime; enables delegation tools. */
   subagents?: SubagentService;
+  /** Immutable team snapshot. Members can only be delegated from this list. */
+  teamMembers?: readonly TeamMemberSnapshot[];
+  /** Step budget applied to each delegated team member. */
+  teamMaxSteps?: number;
   /** Host-wide scheduled tasks; enables the schedule tools. */
   schedule?: ScheduleService;
   /** Optional persisted title plus background model title generation. */
@@ -240,6 +247,7 @@ export class Session {
   private pendingAskUser?: { requestId: string; callId: string };
   private turnSource: 'human' | 'goal' | 'external' | 'notice' | 'system' = 'system';
   private currentGoalRound?: GoalRoundContext;
+  private goalCreateGrant = false;
 
   constructor(options: SessionOptions) {
     this.session = options.session;
@@ -264,6 +272,9 @@ export class Session {
     this.planActive = options.session === undefined
       ? options.planActive ?? false
       : projectPlanMode(options.session.events).active;
+    this.goalCreateGrant = options.session === undefined
+      ? false
+      : projectGoalGrant(options.session.events)?.consumed === false;
     if (options.session) this.history = projectMessages(options.session.events);
     this.goalController = new GoalController({
       ...(options.session === undefined ? {} : {
@@ -373,6 +384,12 @@ export class Session {
       if (!allows(tool.name)) continue;
       this.tools.register(tool);
       this.trusted.add(tool);
+    }
+
+    if (this.subagents && options.teamMembers !== undefined && options.teamMembers.length > 0) {
+      const teamTool = createTeamDelegationTool(this, this.subagents, options.teamMembers, options.teamMaxSteps);
+      this.tools.register(teamTool);
+      this.trusted.add(teamTool);
     }
 
     if (this.subagents) {
@@ -546,6 +563,26 @@ export class Session {
     }
   }
 
+  /** Allow the next direct human turn to create one goal, then consume the grant. */
+  async grantGoalCreation(): Promise<void> {
+    if (this.depth !== 0 || this.parentSessionId !== undefined) {
+      throw new Error('A team member cannot grant goal creation');
+    }
+    if (this.session) {
+      const messageSeq = this.session.events.filter((event) => event.type === 'message/user').length;
+      await this.session.append(createGoalGrantEvent(messageSeq));
+    }
+    this.goalCreateGrant = true;
+  }
+
+  assertGoalCreateGrant(): void {
+    this.assertGoalDirectHuman();
+    if (!this.goalCreateGrant) {
+      throw new Error('create_goal requires an explicit user goal grant');
+    }
+    this.goalCreateGrant = false;
+  }
+
   goalCompletionAuthority(): GoalCompletionAuthority {
     const goal = this.goals.view();
     if (this.directHumanTurn) {
@@ -617,6 +654,12 @@ export class Session {
   async setPlanMode(active: boolean): Promise<void> {
     if (typeof active !== 'boolean') throw new TypeError('Plan mode state must be a boolean');
     if (this.executing) throw new Error('Plan mode cannot change during an active turn');
+    if (this.session !== undefined && projectPendingPlanReview(this.session.events) !== null) {
+      throw new Error('Plan mode cannot change while a plan review is pending');
+    }
+    if (active && this.reviewPlanHandler === undefined) {
+      throw new Error('Plan mode requires a review handler');
+    }
     await this.applyPlanMode(active);
   }
 
@@ -648,7 +691,12 @@ export class Session {
       await this.appendMessage('message/user', typeof input === 'string' ? { text: input } : { content });
       const title = await this.ensureTitle();
       if (title !== undefined) yield { type: 'session.title', title };
-      yield* this.runGoalChain(false, 'human');
+      const granted = this.goalCreateGrant;
+      try {
+        yield* this.runGoalChain(false, 'human');
+      } finally {
+        if (granted) this.goalCreateGrant = false;
+      }
     } finally {
       this.executing = false;
       this.interruptRequested = false;
@@ -668,6 +716,7 @@ export class Session {
     if (this.executing || this.session === undefined) return false;
     const pending = projectPendingPlanReview(this.session.events);
     if (pending === null || pending.requestId !== decision.requestId) return false;
+    if (projectPlanMode(this.session.events).active !== true) return false;
     if (this.history.some((message) => message.role === 'tool'
       && message.results.some((result) => result.callId === pending.callId))) return false;
     const feedback = decision.feedback?.trim() ?? '';
@@ -1152,9 +1201,20 @@ export class Session {
     }
   }
 
+  private planDenies(name: string): boolean {
+    const tool = this.tools.get(name);
+    return name === 'bash'
+      || name === SUBAGENT_TOOL_NAME
+      || name === DELEGATE_TEAM_MEMBER_TOOL_NAME
+      || name === WRITE_AGENT_DEFINITION_TOOL_NAME
+      || tool?.mutating === true;
+  }
+
   private visibleToolSpecs(): ToolSpec[] {
     return this.tools.specs().filter((tool) => {
       if (tool.name === EXIT_PLAN_MODE_TOOL_NAME) return this.planActive;
+      if (this.planActive && this.planDenies(tool.name)) return false;
+      if (tool.name === CREATE_GOAL_TOOL_NAME) return this.goalCreateGrant;
       if (tool.name === SUBAGENT_TOOL_NAME) return this.subagents?.canStart(this) ?? false;
       return true;
     });
@@ -1174,6 +1234,7 @@ export class Session {
 
     const tool = tools.get(call.name);
     if (tool && !this.allowsTool(tool.name)) return deny('Tool is not available to this agent');
+    if (this.planActive && this.planDenies(call.name)) return deny('This tool is unavailable while plan mode is active');
     let cleanCall: ToolCall = call;
     let mode = snapshot.sandbox;
     const args = call.arguments;

@@ -36,9 +36,8 @@ const UpdateParams = z.object({
 }).strict();
 
 const CREATE_DESCRIPTION =
-  'Create a persisted goal that keeps this session working across automatic continuation rounds. '
-  + 'Use it when the direct human request is a long-running objective, even if the user did not say "goal"; '
-  + 'not for single-turn work.';
+  'Create a persisted goal from an explicit user goal grant. '
+  + 'Do not infer a goal from ordinary work; call it only after the user explicitly asks to set a goal.';
 
 const GET_DESCRIPTION = 'Read the current session goal, including the id and revision that update_goal requires.';
 
@@ -118,7 +117,7 @@ export function createGoalTools(session: Session): Tool[] {
       mutating: false,
       async execute(args) {
         const parsed = CreateParams.parse(args);
-        session.assertGoalDirectHuman();
+        session.assertGoalCreateGrant();
         const goal = await session.goals.create({
           objective: parsed.objective,
           ...(parsed.max_goal_rounds === undefined ? {} : { maxGoalRounds: parsed.max_goal_rounds }),

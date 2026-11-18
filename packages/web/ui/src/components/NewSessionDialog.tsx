@@ -81,6 +81,7 @@ export function NewSessionDialog(): ReactNode {
                     <span className={css.presetName}>{mode.name}</span>
                     <span className={css.badgeRow}>
                       {mode.id === app.defaultMode && <Tag tone="solid">{t('Default')}</Tag>}
+                      {mode.type === 'team' && <Tag tone="outline">{t('Team')}</Tag>}
                       {mode.builtIn && <Tag tone="outline">{t('Built-in')}</Tag>}
                     </span>
                   </span>
@@ -91,7 +92,7 @@ export function NewSessionDialog(): ReactNode {
                     <span>{modelLabel(mode, app, t)}</span>
                   </span>
                   <span className={css.presetMeta}>
-                    <span>{mode.tools === '*' ? t('All tools') : t('{count} tools', { count: mode.tools.length })}</span>
+                    <span>{mode.type === 'team' ? t('{count} members', { count: mode.members.length }) : mode.tools === '*' ? t('All tools') : t('{count} tools', { count: mode.tools.length })}</span>
                     <span className={css.presetDot} aria-hidden>·</span>
                     <span>{mode.skills === '*' ? t('All skills') : t('{count} skills', { count: mode.skills.length })}</span>
                   </span>

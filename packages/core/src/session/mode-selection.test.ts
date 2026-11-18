@@ -36,7 +36,7 @@ describe('mode selection', () => {
     const valid = createModeSelectionEvent(selection);
     expect(projectModeSelection([
       valid,
-      { type: MODE_SELECTION_EVENT, data: { ...selection, version: 2 } },
+      { type: MODE_SELECTION_EVENT, data: { ...selection, version: 99 } },
     ])).toEqual({ status: 'invalid', selection: null });
   });
 
@@ -45,5 +45,23 @@ describe('mode selection', () => {
       .toThrow();
     expect(() => createModeSelectionEvent({ ...selection, agent: '' })).toThrow();
     expect(() => createModeSelectionEvent({ ...selection, tools: [''] })).toThrow();
+  });
+
+  it('keeps a resolved team snapshot immutable', () => {
+    const team: ModeSelection = {
+      version: 2,
+      type: 'team',
+      mode: 'analysis',
+      agent: 'default',
+      model: { version: 2, kind: 'agent' },
+      tools: ['read_file'],
+      skills: [],
+      members: [{
+        id: 'reader', name: 'Reader', agent: 'default', model: { version: 2, kind: 'agent' },
+        prompt: 'Read only.', tools: ['read_file'], skills: [],
+      }],
+      policy: { maxActive: 2, maxDepth: 1, maxSteps: 50, failure: 'continue', allowPlan: false, allowGoal: false },
+    };
+    expect(projectModeSelection([createModeSelectionEvent(team)])).toEqual({ status: 'selected', selection: team });
   });
 });

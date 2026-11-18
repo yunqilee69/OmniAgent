@@ -11,6 +11,7 @@ import { Session } from '../session';
 import { createAgentSelectionEvent, projectAgentSelection } from '../session/agent-selection';
 import { createModelSelectionEvent as createBindingEvent, defaultModelBinding, ModelBindingSchema, projectModelSelection as projectBinding } from '../session/model-binding';
 import type { ModelBinding } from '../session/model-binding';
+import { createModeSelectionEvent } from '../session/mode-selection';
 import type { ResolvedSessionRuntime, RuntimeResolver } from '../session/runtime';
 import { resolveInsidePhysical } from '../tools/paths';
 import type { SessionHandle, SessionStore } from '../session/store';
@@ -150,7 +151,21 @@ export class SubagentManager implements SubagentService {
         : parent.cwd;
       const agentId = request.agent ?? parent.agent?.id ?? 'default';
       const binding = this.selectBinding(request);
-      const runtime = await this.options.runtime.resolve({ cwd, workspace, agentId, binding, isRoot: false });
+      const memberMode = request.tools === undefined && request.skills === undefined
+        ? undefined
+        : {
+          id: `team-member:${agentId}`,
+          tools: request.tools ?? '*',
+          skills: request.skills ?? '*',
+        };
+      const runtime = await this.options.runtime.resolve({
+        cwd,
+        workspace,
+        agentId,
+        binding,
+        isRoot: false,
+        ...(memberMode === undefined ? {} : { mode: memberMode, narrowMode: true }),
+      });
 
       const depth = parent.depth + 1;
       const handle = await this.options.store.create({
@@ -163,8 +178,20 @@ export class SubagentManager implements SubagentService {
       await handle.append(createInitialDshPermissionEvent(permissions.preset));
       await handle.append(createAgentSelectionEvent(agentId));
       await handle.append(createBindingEvent(binding));
+      if (memberMode !== undefined) {
+        const tools = runtime.sessionAgent.tools === '*' ? '*' : [...runtime.sessionAgent.tools].sort();
+        const skills = runtime.sessionAgent.skills === '*' ? '*' : [...runtime.sessionAgent.skills].sort();
+        await handle.append(createModeSelectionEvent({
+          version: 1,
+          mode: memberMode.id,
+          agent: agentId,
+          model: binding,
+          tools,
+          skills,
+        }));
+      }
 
-      const child = await this.createSession(handle, permissions, depth, parent, runtime);
+      const child = await this.createSession(handle, permissions, depth, parent, runtime, request.maxSteps);
       const info: SubagentInfo = {
         id: handle.id,
         parentId: parent.id,
@@ -335,6 +362,12 @@ export class SubagentManager implements SubagentService {
   }
 
   private selectBinding(request: SubagentStartRequest): ModelBinding {
+    if (request.binding !== undefined) {
+      if (request.role !== undefined || request.provider !== undefined || request.model !== undefined || request.reasoningEffort !== undefined) {
+        throw new Error('binding cannot be combined with role, provider, model, or reasoning effort');
+      }
+      return ModelBindingSchema.parse(request.binding);
+    }
     if (request.role !== undefined && (request.provider !== undefined || request.model !== undefined)) {
       throw new Error('role cannot be combined with provider/model');
     }
@@ -363,6 +396,7 @@ export class SubagentManager implements SubagentService {
     depth: number,
     parent: Session | undefined,
     runtime: ResolvedSessionRuntime,
+    maxSteps?: number,
   ): Promise<Session> {
     const model = runtime.model ?? this.options.createModel();
     let session!: Session;
@@ -381,7 +415,7 @@ export class SubagentManager implements SubagentService {
       todoAllowParallelInProgress: runtime.todoAllowParallelInProgress,
       system,
       dshPermissions: snapshotDshPermissions({ status: 'ready', preset: permissions.preset }),
-      maxSteps: this.options.maxSteps,
+      maxSteps: maxSteps ?? this.options.maxSteps,
       ...(runtime.contextWindowTokens === undefined ? {} : { contextWindowTokens: runtime.contextWindowTokens }),
       ...(this.options.retainContextTokens === undefined ? {} : { retainContextTokens: this.options.retainContextTokens }),
       ...(this.options.approve === undefined ? {} : { approve: this.options.approve }),

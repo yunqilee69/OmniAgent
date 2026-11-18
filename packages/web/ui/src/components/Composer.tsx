@@ -27,6 +27,7 @@ import {
   IconGoalOutlineRegular,
   IconPaperclipOutlineRegular,
   IconPlanOutlineRegular,
+  IconPlayOutlineRegular,
   IconPlusOutlineMedium,
   IconQueueOutlineRegular,
   IconSendOutlineRegular,
@@ -145,6 +146,44 @@ function readBase64(file: File): Promise<string> {
     };
     reader.readAsDataURL(file);
   });
+}
+
+export function GoalDock({ entry, t }: { entry: Pick<SessionEntry, 'goal' | 'goalGrant'> | null; t: Translate }): ReactNode {
+  const goal = entry?.goal ?? null;
+  if (entry?.goalGrant === true && (goal === null || goal.phase === 'complete')) {
+    return (
+      <section className={todoCss.root} aria-label={t('Goal')}>
+        <div className={todoCss.body}>
+          <div className={todoCss.header}>
+            <span className={todoCss.lead} aria-hidden><IconGoalOutlineRegular /></span>
+            <span className={todoCss.title}>{t('Goal')}</span>
+            <span className={todoCss.progress}>{t('Armed for the next message')}</span>
+          </div>
+        </div>
+      </section>
+    );
+  }
+  if (goal === null || goal.phase === 'complete') return null;
+  const paused = goal.phase === 'paused' || goal.activation === 'disarmed';
+  return (
+    <section className={todoCss.root} aria-label={t('Goal')}>
+      <div className={todoCss.body}>
+        <div className={todoCss.header}>
+          <span className={todoCss.lead} aria-hidden><IconGoalOutlineRegular /></span>
+          <span className={todoCss.title}>{t('Goal')}</span>
+          <span className={todoCss.progress}>{paused ? `${t('Paused')} · ${goal.objective}` : goal.objective}</span>
+          <button type="button" className={todoCss.iconButton} aria-label={paused ? t('Resume') : t('Pause')} title={paused ? t('Resume') : t('Pause')}
+            onClick={() => { void store.updateGoal(paused ? 'resume' : 'pause'); }}>
+            {paused ? <IconPlayOutlineRegular /> : <IconStopFillRegular />}
+          </button>
+          <button type="button" className={todoCss.iconButton} aria-label={t('Close goal')} title={t('Close goal')}
+            onClick={() => { void store.updateGoal('complete'); }}>
+            <IconCloseOutlineRegular />
+          </button>
+        </div>
+      </div>
+    </section>
+  );
 }
 
 export function TodoDock({ entry, t }: { entry: Pick<SessionEntry, 'todos' | 'run' | 'running'> | null; t: Translate }): ReactNode {
@@ -461,10 +500,11 @@ export function Composer({ hero = false, onOpenPlanPreview }: { hero?: boolean; 
     {
       id: 'goal',
       label: t('Set a goal'),
-      description: t('Ask the agent to create a session goal for an objective you type next.'),
+      description: t('Allow the next message to create one session goal. Ordinary work does not create a goal.'),
       icon: <IconGoalOutlineRegular />,
-      available: app.sessionId !== null,
-      insert: t('Create a session goal for this objective, then start working on it: '),
+      available: app.sessionId !== null && entry?.draft !== true,
+      run: () => { void store.grantGoal(); },
+      insert: '/goal ',
     },
     {
       id: 'compact',
@@ -602,6 +642,17 @@ export function Composer({ hero = false, onOpenPlanPreview }: { hero?: boolean; 
   const submit = async (complementary = false): Promise<void> => {
     const text = draft.trim();
     if ((text === '' && attachments.length === 0) || !canSend || sendingRef.current) return;
+    const goalCommand = text.match(/^\/goal(?:\s+([\s\S]+))?$/u);
+    if (goalCommand !== null && attachments.length === 0 && !busy) {
+      const objective = goalCommand[1]?.trim() ?? '';
+      if (key !== null) clearComposerDraft(key);
+      if (drafts.current.key === key) drafts.current.text = '';
+      setDraft('');
+      setCaret(0);
+      if (objective === '') void store.grantGoal();
+      else void store.updateGoal('create', objective);
+      return;
+    }
     const payload: SendAttachment[] = attachments.map(({ kind, name, mimeType, data }) => ({ kind, name, mimeType, data }));
     const sendMode: BusySendMode = complementary ? (busySend === 'queue' ? 'steer' : 'queue') : busySend;
     sendingRef.current = true;
@@ -820,6 +871,7 @@ export function Composer({ hero = false, onOpenPlanPreview }: { hero?: boolean; 
           )}
         </div>
       )}
+      <GoalDock entry={entry} t={t} />
       <TodoDock entry={entry} t={t} />
       {/* Queued messages stack above the input, like the task dock, so the
           input keeps its place while a turn is running. */}
@@ -977,6 +1029,7 @@ export function Composer({ hero = false, onOpenPlanPreview }: { hero?: boolean; 
                 </button>
               )}
             </div>
+            {entry?.goalError !== undefined && entry.goalError !== '' && <span className={appCss.composerError}>{entry.goalError}</span>}
             {entry?.planError !== undefined && entry.planError !== '' && <span className={appCss.composerError}>{entry.planError}</span>}
             {attachmentError !== '' && <span className={appCss.composerError}>{attachmentError}</span>}
           </div>

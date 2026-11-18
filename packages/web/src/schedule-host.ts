@@ -30,6 +30,7 @@ import type {
   ScheduleSessionCreateSpec,
   Session,
   SessionHandle,
+  TeamMemberSnapshot,
   SessionStore,
   SubagentService,
 } from '@omniagent/core';
@@ -59,6 +60,7 @@ export interface ScheduleHostOptions {
     handle: SessionHandle,
     permissions: DshPermissionSnapshot,
     runtime: ResolvedSessionRuntime,
+    team?: { members: readonly TeamMemberSnapshot[]; maxSteps: number },
   ) => Session;
   log?: (message: string) => void;
 }
@@ -153,14 +155,26 @@ export class SessionScheduleHost implements ScheduleDeliveryHost {
     await handle.append(createAgentSelectionEvent(spec.agentPreset ?? mode?.agent ?? 'default'));
     await handle.append(createModelSelectionEvent(spec.agentPreset === undefined && mode !== undefined ? mode.model : defaultModelBinding()));
     if (spec.agentPreset === undefined && mode !== undefined) {
-      await handle.append(createModeSelectionEvent({
-        version: 1,
-        mode: mode.id,
-        agent: mode.agent,
-        model: mode.model,
-        tools: mode.tools,
-        skills: mode.skills,
-      }));
+      await handle.append(createModeSelectionEvent(mode.type === 'team'
+        ? {
+          version: 2,
+          type: 'team',
+          mode: mode.id,
+          agent: mode.agent,
+          model: mode.model,
+          tools: mode.tools,
+          skills: mode.skills,
+          members: mode.members.map((member) => ({ ...member })),
+          policy: { ...mode.policy },
+        }
+        : {
+          version: 1,
+          mode: mode.id,
+          agent: mode.agent,
+          model: mode.model,
+          tools: mode.tools,
+          skills: mode.skills,
+        }));
     }
     if (title !== undefined) {
       const normalized = normalizeSessionTitle(title, DEFAULT_SESSION_TITLE_LIMITS.maxTitleBytes);
@@ -206,7 +220,11 @@ export class SessionScheduleHost implements ScheduleDeliveryHost {
         ? { mode: { id: selectedMode.selection.mode, tools: selectedMode.selection.tools, skills: selectedMode.selection.skills } }
         : {}),
     });
-    const session = this.options.compose(workspacePath, handle, permissions, runtime);
+    const selected = projectModeSelection(handle.events);
+    const team = selected.status === 'selected' && selected.selection.version === 2
+      ? { members: selected.selection.members, maxSteps: selected.selection.policy.maxSteps }
+      : undefined;
+    const session = this.options.compose(workspacePath, handle, permissions, runtime, team);
     this.options.liveSessions?.set(key, {
       session,
       preset: permissions.preset,

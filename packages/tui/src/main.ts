@@ -16,6 +16,8 @@ import {
   createModelSelectionEvent,
   createModelSwitch,
   createPlanModeEvent,
+  countUserMessages,
+  createGoalGrantEvent,
   defaultConfigDir,
   defaultModelBinding,
   resolveAskUserTimeout,
@@ -23,7 +25,9 @@ import {
   listCatalogModels,
   projectAgentSelection,
   projectModelSelection,
+  projectPendingPlanReview,
   projectPlanMode,
+  projectGoalGrant,
   projectTodos,
   textResponse,
   toolCallResponse,
@@ -599,6 +603,10 @@ async function main(): Promise<void> {
       }
       try {
         handle = await store.open(cwd, handle.id);
+        if (projectPendingPlanReview(handle.events) !== null) {
+          sayIndented(paintWarn('还有待审阅的计划，不能切换 plan 模式。'));
+          continue;
+        }
         if (active !== next) await handle.append(createPlanModeEvent(next));
         resetSession();
         sayIndented(next
@@ -606,6 +614,24 @@ async function main(): Promise<void> {
           : paintOk('计划模式已关闭。'));
       } catch (error) {
         sayIndented(paintError(`计划模式切换失败：${errorMessage(error)}`));
+      }
+      continue;
+    }
+    if (line === '/goal') {
+      if (session?.activeTurn) {
+        sayIndented(paintWarn('当前回合运行中，不能授权创建目标。'));
+        continue;
+      }
+      try {
+        handle = await store.open(cwd, handle.id);
+        const current = projectGoalGrant(handle.events);
+        if (current?.consumed !== false) {
+          await handle.append(createGoalGrantEvent(countUserMessages(handle.events)));
+        }
+        resetSession();
+        sayIndented(paintOk('下一条消息可以创建一个目标。普通消息不会自行创建目标。'));
+      } catch (error) {
+        sayIndented(paintError(`目标授权失败：${errorMessage(error)}`));
       }
       continue;
     }

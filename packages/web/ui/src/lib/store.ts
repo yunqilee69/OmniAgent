@@ -88,6 +88,31 @@ export type ProcessDisplay = 'collapsed' | 'expanded';
 export type BusySendMode = 'queue' | 'steer';
 export type Tab = 'conversation' | 'automation' | 'settings';
 
+function normalizeGoal(value: unknown): SessionGoal | null {
+  if (typeof value !== 'object' || value === null) return null;
+  const goal = value as Record<string, unknown>;
+  const nested = typeof goal.goal === 'object' && goal.goal !== null ? goal.goal as Record<string, unknown> : goal;
+  if (typeof nested.id !== 'string' || typeof nested.objective !== 'string' || typeof nested.revision !== 'number') return null;
+  const phase = nested.phase === 'paused' || nested.phase === 'blocked' || nested.phase === 'complete' ? nested.phase : 'active';
+  return {
+    id: nested.id,
+    revision: nested.revision,
+    objective: nested.objective,
+    phase,
+    roundsStarted: typeof goal.roundsStarted === 'number' ? goal.roundsStarted : 0,
+    ...(goal.activation === 'armed' || goal.activation === 'disarmed' ? { activation: goal.activation } : {}),
+  };
+}
+
+export interface SessionGoal {
+  id: string;
+  revision: number;
+  objective: string;
+  phase: 'active' | 'paused' | 'blocked' | 'complete';
+  roundsStarted: number;
+  activation?: 'armed' | 'disarmed';
+}
+
 export interface QueuedMessage {
   id: string;
   text: string;
@@ -119,6 +144,10 @@ export interface SessionEntry {
   plan: PlanState;
   planSaving: boolean;
   planError: string;
+  /** The next user message may create one goal. */
+  goalGrant: boolean;
+  goal: SessionGoal | null;
+  goalError: string;
   todos: TodoItem[] | null;
   transcript: TranscriptItem[];
   turns: TurnMeta[];
@@ -334,6 +363,9 @@ function emptyEntry(): SessionEntry {
     plan: { active: false },
     planSaving: false,
     planError: '',
+    goalGrant: false,
+    goal: null,
+    goalError: '',
     todos: null,
     transcript: [],
     turns: [],
@@ -1719,6 +1751,9 @@ export class AppStore {
         modelError: '',
         plan: normalizePlan(body.plan),
         planError: '',
+        goalGrant: body.goalGrant === true,
+        goal: normalizeGoal(body.goal),
+        goalError: '',
         todos: normalizeTodos(body.todos),
         transcript: hydrated.transcript,
         turns: hydrated.turns,
@@ -2668,6 +2703,41 @@ export class AppStore {
           run: { ...latest, planReview: { ...review, pending: false, error: translator(this.state.locale)('Could not submit plan review: {message}', { message }) } },
         });
       }
+    }
+  }
+
+  async updateGoal(action: 'pause' | 'resume' | 'complete' | 'create', objective?: string): Promise<void> {
+    const { workspaceId, sessionId } = this.state;
+    if (workspaceId === null || sessionId === null) return;
+    const key = sessionKey(workspaceId, sessionId);
+    const entry = this.state.entries[key];
+    if (entry === undefined || entry.goal === null || entry.run !== undefined) return;
+    try {
+      const body = await this.api<{ goal?: unknown }>(sessionApiPath(workspaceId, sessionId, 'goal'), jsonOptions('POST', {
+        action,
+        ...(objective === undefined ? {} : { objective }),
+      }));
+      this.patchEntry(key, { goal: normalizeGoal(body.goal), goalGrant: false, goalError: '' });
+    } catch (error) {
+      this.patchEntry(key, {
+        goalError: translator(this.state.locale)('Could not update the goal: {message}', { message: (error as Error).message }),
+      });
+    }
+  }
+
+  async grantGoal(): Promise<void> {
+    const { workspaceId, sessionId } = this.state;
+    if (workspaceId === null || sessionId === null) return;
+    const key = sessionKey(workspaceId, sessionId);
+    const entry = this.state.entries[key];
+    if (entry === undefined || entry.draft === true || entry.run !== undefined) return;
+    try {
+      await this.api(sessionApiPath(workspaceId, sessionId, 'goal-grant'), jsonOptions('POST', {}));
+      this.patchEntry(key, { goalGrant: true, goalError: '' });
+    } catch (error) {
+      this.patchEntry(key, {
+        goalError: translator(this.state.locale)('Could not grant a goal: {message}', { message: (error as Error).message }),
+      });
     }
   }
 

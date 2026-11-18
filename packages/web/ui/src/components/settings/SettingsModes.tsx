@@ -10,7 +10,7 @@ import {
 } from '../../../vendor/primitives/index.ts';
 import { store, useApp } from '../../lib/store.ts';
 import { translator, type Translate } from '../../lib/i18n.ts';
-import type { ModeSummary } from '../../lib/wire.ts';
+import type { ModeMember, ModeSummary } from '../../lib/wire.ts';
 import { SelectMenu } from '../SelectMenu.tsx';
 import { ModelPicker } from '../ModelPicker.tsx';
 import css from '../../styles/settings.module.css';
@@ -41,8 +41,11 @@ function ModeEditor({ editing, onClose }: ModeEditorProps): ReactNode {
   const app = useApp();
   const t = translator(app.locale);
   const [id, setId] = useState(editing?.id ?? '');
+  const [kind, setKind] = useState<'single' | 'team'>(editing?.type ?? 'single');
   const [name, setName] = useState(editing?.name ?? '');
   const [description, setDescription] = useState(editing?.description ?? '');
+  const [members, setMembers] = useState<ModeMember[]>(editing?.members ?? []);
+  const [maxActive, setMaxActive] = useState(String(editing?.policy.maxActive ?? 3));
   const [agent, setAgent] = useState(editing?.agent ?? app.agents.find((item) => item.id === 'default' && item.valid)?.id ?? app.agents[0]?.id ?? '');
   const [binding, setBinding] = useState<ModeSummary['model']>(editing?.model ?? { version: 2, kind: 'agent' });
   const initialTools = editing?.tools ?? '*';
@@ -82,14 +85,23 @@ function ModeEditor({ editing, onClose }: ModeEditorProps): ReactNode {
       setError(t('Choose an agent for this mode.'));
       return;
     }
+    if (kind === 'team' && members.length === 0) {
+      setError(t('A team mode needs at least one member.'));
+      return;
+    }
     setSaving(true);
     const failure = await store.saveMode(id, {
+      type: kind,
       name: name.trim(),
       description: description.trim(),
       agent,
       model: binding,
       tools: allTools ? '*' : [...tools].sort(),
       skills: allSkills ? '*' : [...skills].sort(),
+      ...(kind === 'team' ? {
+        members,
+        policy: { maxActive: Number(maxActive) || 3, maxSteps: editing?.policy.maxSteps ?? 100, failure: 'continue', allowPlan: false, allowGoal: false },
+      } : {}),
     });
     setSaving(false);
     if (failure === null) onClose();
@@ -141,7 +153,20 @@ function ModeEditor({ editing, onClose }: ModeEditorProps): ReactNode {
           <Input value={description} placeholder={t('What this mode is for.')} onChange={(event) => { setDescription(event.target.value); }} />
         </label>
         <div className={css.field}>
-          <span className={css.fieldLabel}>{t('Agent')}</span>
+          <span className={css.fieldLabel}>{t('Mode type')}</span>
+          <SelectMenu
+            value={kind}
+            items={[{ id: 'single', label: t('Single agent') }, { id: 'team', label: t('Team') }]}
+            onSelect={(value) => { if (value === 'single' || value === 'team') setKind(value); }}
+            ariaLabel={t('Mode type')}
+            title={t('Mode type')}
+            triggerClassName={css.editorSelect}
+          >
+            {kind === 'team' ? t('Team') : t('Single agent')}
+          </SelectMenu>
+        </div>
+        <div className={css.field}>
+          <span className={css.fieldLabel}>{kind === 'team' ? t('Coordinator') : t('Agent')}</span>
           <SelectMenu
             value={agent}
             items={agentItems}
@@ -166,6 +191,54 @@ function ModeEditor({ editing, onClose }: ModeEditorProps): ReactNode {
           />
           <span className={css.fieldHint}>{t('Follow the agent role, a named role, or one model directly. The effort level is chosen with the model.')}</span>
         </div>
+
+        {kind === 'team' && (
+          <section className={css.choiceGroup}>
+            <div className={css.choiceHead}>
+              <span className={css.fieldLabel}>{t('Team members')}</span>
+              <Button variant="outline" size="sm" onClick={() => {
+                const memberAgent = app.agents.find((item) => item.valid && item.usage !== 'primary')?.id ?? agent;
+                setMembers((current) => [...current, {
+                  id: `member-${current.length + 1}`,
+                  name: t('Member {count}', { count: current.length + 1 }),
+                  agent: memberAgent,
+                  model: { version: 2, kind: 'agent' },
+                  prompt: '',
+                  tools: '*',
+                  skills: '*',
+                }]);
+              }}>{t('Add member')}</Button>
+            </div>
+            <label className={css.field}>
+              <span className={css.fieldLabel}>{t('Max parallel members')}</span>
+              <Input value={maxActive} onChange={(event) => { setMaxActive(event.target.value); }} />
+            </label>
+            {members.map((member, index) => (
+              <div key={`${member.id}-${index}`} className={css.editorGrid}>
+                <Input value={member.id} aria-label={t('Member id')} onChange={(event) => {
+                  const value = event.target.value;
+                  setMembers((current) => current.map((item, itemIndex) => itemIndex === index ? { ...item, id: value } : item));
+                }} />
+                <Input value={member.name} aria-label={t('Member name')} onChange={(event) => {
+                  const value = event.target.value;
+                  setMembers((current) => current.map((item, itemIndex) => itemIndex === index ? { ...item, name: value } : item));
+                }} />
+                <SelectMenu
+                  value={member.agent}
+                  items={app.agents.filter((item) => item.valid && item.usage !== 'primary').map((item) => ({ id: item.id, label: item.name }))}
+                  onSelect={(value) => { setMembers((current) => current.map((item, itemIndex) => itemIndex === index ? { ...item, agent: value } : item)); }}
+                  ariaLabel={t('Member agent')}
+                  title={t('Member agent')}
+                  triggerClassName={css.editorSelect}
+                >
+                  {agentName(member.agent, app)}
+                </SelectMenu>
+                <Button variant="outline" size="sm" onClick={() => { setMembers((current) => current.filter((_, itemIndex) => itemIndex !== index)); }}>{t('Remove')}</Button>
+              </div>
+            ))}
+            <p className={css.fieldHint}>{t('Members keep the tools and skills of their agent unless a later edit narrows them. The team cannot widen access.')}</p>
+          </section>
+        )}
 
         <section className={css.choiceGroup}>
           <div className={css.choiceHead}>
@@ -235,6 +308,7 @@ function ModeCard({ mode, isDefault, t, app, onEdit }: ModeCardProps): ReactNode
           <span className={css.presetName}>{mode.name}</span>
           <span className={css.badgeRow}>
             {isDefault && <Tag tone="solid">{t('Default')}</Tag>}
+            {mode.type === 'team' && <Tag tone="outline">{t('Team')}</Tag>}
             {mode.builtIn && <Tag tone="outline">{t('Built-in')}</Tag>}
             {mode.customized && <Tag tone="outline">{t('Customized')}</Tag>}
           </span>
@@ -246,7 +320,7 @@ function ModeCard({ mode, isDefault, t, app, onEdit }: ModeCardProps): ReactNode
           <span>{bindingLabel(mode.model, app, t)}</span>
         </span>
         <span className={css.presetMeta}>
-          <span>{mode.tools === '*' ? t('All tools') : t('{count} tools', { count: mode.tools.length })}</span>
+          <span>{mode.type === 'team' ? t('{count} members', { count: mode.members.length }) : mode.tools === '*' ? t('All tools') : t('{count} tools', { count: mode.tools.length })}</span>
           <span className={css.presetDot} aria-hidden>·</span>
           <span>{mode.skills === '*' ? t('All skills') : t('{count} skills', { count: mode.skills.length })}</span>
         </span>

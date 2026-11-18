@@ -61,14 +61,36 @@ export const ModeSelectorSchema = z.union([
 ]);
 export type ModeSelector = z.infer<typeof ModeSelectorSchema>;
 
+export interface ModeMember {
+  id: string;
+  name: string;
+  agent: string;
+  model: ModelBinding;
+  prompt: string;
+  tools: ModeSelector;
+  skills: ModeSelector;
+}
+
+export interface TeamPolicy {
+  maxActive: number;
+  maxDepth: 1;
+  maxSteps: number;
+  failure: 'stop' | 'continue';
+  allowPlan: boolean;
+  allowGoal: boolean;
+}
+
 export interface ModeDefinition {
   id: string;
+  type: 'single' | 'team';
   name: string;
   description: string;
   agent: string;
   model: ModelBinding;
   tools: ModeSelector;
   skills: ModeSelector;
+  members: ModeMember[];
+  policy: TeamPolicy;
   builtIn: boolean;
   customized: boolean;
 }
@@ -78,13 +100,34 @@ export interface ModeSummary extends ModeDefinition {
   warnings: string[];
 }
 
+const ModeMemberSchema = z.object({
+  id: nonEmpty,
+  name: z.string().trim().min(1).max(120),
+  agent: nonEmpty,
+  model: ModelBindingSchema.optional(),
+  prompt: z.string().max(20_000).optional(),
+  tools: ModeSelectorSchema.optional(),
+  skills: ModeSelectorSchema.optional(),
+}).strict();
+
+const TeamPolicySchema = z.object({
+  maxActive: z.number().int().min(1).max(8).optional(),
+  maxSteps: z.number().int().min(1).max(500).optional(),
+  failure: z.enum(['stop', 'continue']).optional(),
+  allowPlan: z.boolean().optional(),
+  allowGoal: z.boolean().optional(),
+}).strict();
+
 const ModeWriteSchema = z.object({
+  type: z.enum(['single', 'team']).optional(),
   name: z.string().trim().min(1).max(120),
   description: z.string().max(2_000).optional(),
   agent: nonEmpty,
   model: ModelBindingSchema.optional(),
   tools: ModeSelectorSchema.optional(),
   skills: ModeSelectorSchema.optional(),
+  members: z.array(ModeMemberSchema).max(8).optional(),
+  policy: TeamPolicySchema.optional(),
 }).strict();
 
 export type ModeWrite = z.infer<typeof ModeWriteSchema>;
@@ -101,6 +144,9 @@ const ModeFileSchema = z.object({
       model: ModelBindingSchema.optional().default(defaultModelBinding()),
       tools: ModeSelectorSchema.optional().default('*'),
       skills: ModeSelectorSchema.optional().default('*'),
+      type: z.enum(['single', 'team']).optional(),
+      members: z.array(ModeMemberSchema).max(8).optional(),
+      policy: TeamPolicySchema.optional(),
     }).strict(),
   ).optional().default({}),
 }).strict();
@@ -111,16 +157,52 @@ function cloneBinding(binding: ModelBinding): ModelBinding {
   return structuredClone(binding);
 }
 
+export function defaultTeamPolicy(): TeamPolicy {
+  return { maxActive: 3, maxDepth: 1, maxSteps: 100, failure: 'continue', allowPlan: false, allowGoal: false };
+}
+
+function normalizeMembers(members: readonly z.infer<typeof ModeMemberSchema>[] | undefined): ModeMember[] {
+  return (members ?? []).map((member) => ({
+    id: member.id,
+    name: member.name,
+    agent: member.agent,
+    model: cloneBinding(member.model ?? defaultModelBinding()),
+    prompt: member.prompt?.trim() ?? '',
+    tools: normalizeSelector(member.tools ?? '*'),
+    skills: normalizeSelector(member.skills ?? '*'),
+  }));
+}
+
+function storedPolicy(policy: TeamPolicy): Omit<TeamPolicy, 'maxDepth'> {
+  const { maxDepth: _depth, ...stored } = policy;
+  return stored;
+}
+
+function normalizePolicy(policy: z.infer<typeof TeamPolicySchema> | undefined): TeamPolicy {
+  const defaults = defaultTeamPolicy();
+  return {
+    ...defaults,
+    ...(policy?.maxActive === undefined ? {} : { maxActive: policy.maxActive }),
+    ...(policy?.maxSteps === undefined ? {} : { maxSteps: policy.maxSteps }),
+    ...(policy?.failure === undefined ? {} : { failure: policy.failure }),
+    ...(policy?.allowPlan === undefined ? {} : { allowPlan: policy.allowPlan }),
+    ...(policy?.allowGoal === undefined ? {} : { allowGoal: policy.allowGoal }),
+  };
+}
+
 function builtinModes(): ModeDefinition[] {
   return [
     {
       id: 'standard',
       name: '标准模式',
       description: '处理日常任务：编码、文件修改、调研和执行命令。适合大多数会话。',
+      type: 'single',
       agent: 'default',
       model: defaultModelBinding(),
       tools: '*',
       skills: '*',
+      members: [],
+      policy: defaultTeamPolicy(),
       builtIn: true,
       customized: false,
     },
@@ -128,6 +210,7 @@ function builtinModes(): ModeDefinition[] {
       id: 'creator',
       name: '创造模式',
       description: '通过对话创建自动化任务、智能体定义并调整 OmniAgent 配置。',
+      type: 'single',
       agent: 'creator',
       model: defaultModelBinding(),
       tools: [
@@ -150,6 +233,8 @@ function builtinModes(): ModeDefinition[] {
         WRITE_AGENT_DEFINITION_TOOL_NAME,
       ],
       skills: '*',
+      members: [],
+      policy: defaultTeamPolicy(),
       builtIn: true,
       customized: false,
     },
@@ -233,12 +318,15 @@ export class ModeStore {
       const base = modes.get(id);
       modes.set(id, {
         id,
+        type: value.type ?? 'single',
         name: value.name,
         description: value.description ?? '',
         agent: value.agent,
         model: cloneBinding(value.model ?? defaultModelBinding()),
         tools: normalizeSelector(value.tools ?? '*'),
         skills: normalizeSelector(value.skills ?? '*'),
+        members: normalizeMembers(value.members),
+        policy: normalizePolicy(value.policy),
         builtIn: base !== undefined,
         customized: true,
       });
@@ -262,6 +350,7 @@ export class ModeStore {
     agents: readonly { id: string; role: string; profile: string; usage: 'primary' | 'subagent' | 'both' }[],
   ): ModeSummary {
     const warnings: string[] = [];
+    if (mode.type === 'team') this.validateTeam(mode, catalog, agents, warnings);
     const agent = agents.find((entry) => entry.id === mode.agent);
     if (agent === undefined) {
       warnings.push(`Unknown agent "${mode.agent}"`);
@@ -282,7 +371,35 @@ export class ModeStore {
         if (skill.trim().length === 0) warnings.push('Skill names must not be empty');
       }
     }
-    return { ...mode, valid: warnings.length === 0, warnings };
+    return { ...mode, members: mode.members.map((member) => ({ ...member, model: cloneBinding(member.model) })), policy: { ...mode.policy }, valid: warnings.length === 0, warnings };
+  }
+
+  private validateTeam(
+    mode: ModeDefinition,
+    catalog: ConfigCatalog,
+    agents: readonly { id: string; role: string; profile: string; usage: 'primary' | 'subagent' | 'both' }[],
+    warnings: string[],
+  ): void {
+    if (mode.members.length === 0) warnings.push('A team mode requires at least one member');
+    const seen = new Set<string>();
+    for (const member of mode.members) {
+      if (seen.has(member.id)) warnings.push(`Duplicate team member "${member.id}"`);
+      seen.add(member.id);
+      const agent = agents.find((entry) => entry.id === member.agent);
+      if (agent === undefined) {
+        warnings.push(`Unknown team member agent "${member.agent}"`);
+        continue;
+      }
+      if (agent.usage === 'primary') warnings.push(`Agent "${member.agent}" is not available as a team member`);
+      try {
+        resolveModelBinding(catalog, agent.role, member.model);
+      } catch (error) {
+        warnings.push(error instanceof Error ? error.message : String(error));
+      }
+      const unknown = unknownTools(member.tools);
+      if (unknown.length > 0) warnings.push(`Unknown tool(s): ${unknown.join(', ')}`);
+    }
+    if (mode.policy.maxDepth !== 1) warnings.push('Team delegation depth is fixed at 1');
   }
 
   async list(): Promise<ModeSummary[]> {
@@ -359,12 +476,15 @@ export class ModeStore {
         modes: {
           ...file.modes,
           [id]: {
+            type: parsed.type ?? 'single',
             name: parsed.name,
             description: parsed.description ?? '',
             agent: parsed.agent,
             model: parsed.model ?? defaultModelBinding(),
             tools: normalizeSelector(parsed.tools ?? '*'),
             skills: normalizeSelector(parsed.skills ?? '*'),
+            ...(parsed.members === undefined ? {} : { members: normalizeMembers(parsed.members) }),
+            ...(parsed.policy === undefined ? {} : { policy: storedPolicy(normalizePolicy(parsed.policy)) }),
           },
         },
       };

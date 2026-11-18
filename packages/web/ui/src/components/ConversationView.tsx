@@ -382,7 +382,18 @@ function TurnView({ turn, processDisplay, reviewing, locale, t }: {
   const duration = !turn.live && turn.final !== undefined ? recordedSeconds(turn.startedAt, turn.endedAt) : undefined;
   return (
     <div className={css.turn} data-live={turn.live || undefined}>
-      {turn.user !== undefined && (
+      {turn.goalRound !== undefined && (
+        <div className={css.goalDivider} data-state={turn.goalState} role="separator">
+          <span>
+            {turn.goalState === 'passed'
+              ? t('Goal: check {round} passed', { round: turn.goalRound })
+              : turn.goalState === 'failed'
+                ? t('Goal: check {round} failed, continuing', { round: turn.goalRound })
+                : t('Goal: check {round} running', { round: turn.goalRound })}
+          </span>
+        </div>
+      )}
+      {turn.user !== undefined && turn.goalRound === undefined && (
         <div className={clsx(messageCss.userRow, messageCss.message)}>
           <div className={messageCss.userStack}>
             <UserContent user={turn.user} />

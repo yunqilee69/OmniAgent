@@ -8,7 +8,7 @@ export type GoalPhase = (typeof GOAL_PHASES)[number];
 export const GOAL_ACTIVATIONS = ['armed', 'disarmed'] as const;
 export type GoalActivation = (typeof GOAL_ACTIVATIONS)[number];
 
-export const GOAL_DEFAULT_MAX_ROUNDS = 256;
+export const GOAL_DEFAULT_MAX_ROUNDS = 3;
 export const GOAL_DEFAULT_BLOCKED_AFTER = 3;
 
 export interface GoalBlockReason {
@@ -464,7 +464,7 @@ export function renderGoalWrapup(objective: string, blockedReason?: string): str
 }
 
 export function renderGoalToolGuidance(blockedAfter = GOAL_DEFAULT_BLOCKED_AFTER): string {
-  return 'create_goal may infer goal intent from a direct human request in any language. '
+  return 'create_goal requires an explicit user request to set a goal. Do not infer one from ordinary work. '
     + 'After session resume or fork, an active goal is disarmed: when '
     + 'a human asks to continue or resume in any wording or language, use update_goal action '
     + 'resume to rearm it. Mark complete only when the objective is actually achieved. Mark '
