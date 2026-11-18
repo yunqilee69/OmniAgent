@@ -13,7 +13,7 @@
   --dsh-composer-dock-inset: 8px;
   --dsh-sidebar-width: 280px;
   display: grid;
-  grid-template-columns: var(--dsh-sidebar-track, 280px) minmax(400px, 1fr) var(--dsh-rightbar-width, 0px);
+  grid-template-columns: var(--dsh-sidebar-track, 280px) minmax(0, 1fr) var(--dsh-rightbar-width, 0px);
   height: 100%;
   min-height: 0;
   background: var(--dsw-alias-bg-base);
@@ -27,6 +27,13 @@
   overflow: hidden;
   border-right: 0.5px solid var(--dsw-alias-border-l3);
   background: var(--dsw-specific-sidebar-fill);
+}
+
+/* An open sidebar keeps its track. Content that cannot shrink (a long
+   unbreakable question, for example) must wrap inside the conversation
+   column instead of stealing this width. */
+.app:not([data-mobile])[data-sidebar='open'] .sidebarCol {
+  min-width: var(--dsh-sidebar-width);
 }
 
 .app[data-sidebar='closed'] .sidebarCol {

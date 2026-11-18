@@ -3,6 +3,8 @@
   display: flex;
   flex-direction: column;
   align-items: center;
+  min-width: 0;
+  max-width: 100%;
   /* Side pads ride the shared clearance (figma Input_Bottom drew L32/R32/B8;
      the sides narrow with the shared width axis); the bottom gradient mask
      is owned by the chat scroller. No top pad: the composer stack's gap owns

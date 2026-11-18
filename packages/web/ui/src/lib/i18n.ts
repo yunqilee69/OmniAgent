@@ -280,6 +280,9 @@ const zh: Record<string, string> = {
   'The wait expired. An answer still continues the work; skipping is not permission.':
     '等待已结束。回答仍会继续这项工作；跳过不是许可。',
   'Custom answer': '自定义回答',
+  'Recommended': '推荐',
+  'Previous question': '上一题',
+  'Next question': '下一题',
   'Submit answers': '提交回答',
   'Could not submit answer: {message}': '无法提交回答：{message}',
   'Could not save question timeout: {message}': '无法保存提问等待：{message}',

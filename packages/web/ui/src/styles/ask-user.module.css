@@ -4,25 +4,72 @@
   flex-direction: column;
   gap: 10px;
   width: 100%;
+  min-width: 0;
+  /* One question at a time still needs a cap: a long question scrolls inside
+     the card while the pager and actions stay put. */
+  max-height: min(60vh, 520px);
+  overflow: hidden;
   max-width: var(--dsh-composer-card-max-width);
-  padding: 12px 14px;
+  padding: 12px 14px 10px;
   border: 0.5px solid var(--dsw-alias-border-l2);
   border-radius: var(--dsw-radius-panel);
   background: var(--dsw-specific-input-major);
   color: var(--dsw-alias-label-primary);
   font-size: var(--dsh-content-font-size, 14px);
+  overflow-wrap: anywhere;
 }
 
-.header { display: flex; gap: 10px; align-items: flex-start; }
+.header { display: flex; flex: none; gap: 10px; align-items: flex-start; }
 .heading { display: flex; flex: 1; flex-direction: column; gap: 2px; min-width: 0; }
 .title { color: var(--dsw-alias-label-primary); font-size: 13px; font-weight: 500; line-height: 18px; }
 .subtitle { color: var(--dsw-alias-label-tertiary); font-size: 12px; line-height: 17px; }
-.question { display: flex; flex-direction: column; gap: 7px; padding-top: 3px; }
-.questionText { margin: 0; line-height: 20px; }
+.pager { display: flex; flex: none; align-items: center; gap: 2px; }
+.pagerButton {
+  display: grid;
+  place-items: center;
+  width: 24px;
+  height: 24px;
+  padding: 0;
+  border: none;
+  border-radius: var(--dsw-radius-sm);
+  background: transparent;
+  color: var(--dsw-alias-label-secondary);
+  cursor: pointer;
+}
+.pagerButton:disabled { color: var(--dsw-alias-label-dimmed); cursor: default; }
+.progress {
+  min-width: 3.2em;
+  color: var(--dsw-alias-label-secondary);
+  font-size: 13px;
+  font-weight: 500;
+  line-height: 18px;
+  font-variant-numeric: tabular-nums;
+  text-align: center;
+  white-space: nowrap;
+}
+
+.question {
+  display: flex;
+  flex: 1 1 auto;
+  flex-direction: column;
+  gap: 8px;
+  min-width: 0;
+  min-height: 0;
+  overflow-x: hidden;
+  overflow-y: auto;
+  overscroll-behavior: contain;
+}
+.questionText { margin: 0; min-width: 0; line-height: 22px; overflow-wrap: anywhere; }
+.options { display: flex; flex-direction: column; gap: 6px; min-width: 0; }
 .option {
-  display: block;
+  display: flex;
+  align-items: flex-start;
+  gap: 8px;
+  box-sizing: border-box;
   width: 100%;
-  padding: 7px 9px;
+  min-width: 0;
+  padding: 8px 10px;
+  overflow-wrap: anywhere;
   border: 0.5px solid var(--dsw-alias-border-l3);
   border-radius: var(--dsw-radius-sm);
   background: transparent;
@@ -31,7 +78,49 @@
   cursor: pointer;
 }
 .option[data-selected='true'] { border-color: var(--dsw-alias-state-business-primary); background: var(--dsw-alias-state-business-tertiary); }
-.option span { color: var(--dsw-alias-label-tertiary); font-size: 12px; }
-.custom { box-sizing: border-box; width: 100%; min-height: 34px; padding: 7px 9px; border: 0.5px solid var(--dsw-alias-border-l3); border-radius: var(--dsw-radius-sm); background: transparent; color: inherit; font: inherit; }
-.error { margin: 0; color: var(--dsw-alias-state-error-primary); font-size: 12px; }
-.actions { display: flex; justify-content: flex-end; gap: 8px; padding-top: 2px; }
+.option:disabled { cursor: default; }
+.marker {
+  display: grid;
+  flex: none;
+  place-items: center;
+  width: 20px;
+  height: 20px;
+  margin-top: 1px;
+  border-radius: var(--dsw-radius-xs);
+  background: var(--dsw-alias-bg-overlay);
+  color: var(--dsw-alias-label-secondary);
+  font-size: 12px;
+  font-weight: 500;
+  line-height: 18px;
+}
+.optionCopy { display: flex; flex: 1; flex-direction: column; gap: 2px; min-width: 0; }
+.optionLabel { font-weight: 500; line-height: 20px; }
+.badge {
+  margin-left: 6px;
+  padding: 0 4px;
+  border-radius: var(--dsw-radius-xs);
+  background: var(--dsw-specific-sidebar-nav-item-active-accent);
+  color: var(--dsw-alias-button-info-fill);
+  font-size: 11px;
+  font-weight: 600;
+  line-height: 18px;
+  vertical-align: 1px;
+}
+.optionDescription { color: var(--dsw-alias-label-tertiary); font-size: 12px; line-height: 18px; }
+.custom { box-sizing: border-box; width: 100%; min-width: 0; min-height: 34px; padding: 7px 9px; border: 0.5px solid var(--dsw-alias-border-l3); border-radius: var(--dsw-radius-sm); background: transparent; color: inherit; font: inherit; }
+.error { flex: none; margin: 0; min-width: 0; color: var(--dsw-alias-state-error-primary); font-size: 12px; overflow-wrap: anywhere; }
+
+.actions {
+  display: flex;
+  flex: none;
+  align-items: center;
+  justify-content: flex-end;
+  gap: 8px;
+  min-width: 0;
+}
+.actionButtons { display: flex; flex: none; align-items: center; gap: 8px; }
+
+@media (hover: hover) {
+  .option:hover:not(:disabled) { background: var(--dsw-alias-interactive-bg-hover); }
+  .pagerButton:hover:not(:disabled) { background: var(--dsw-alias-interactive-bg-hover); color: var(--dsw-alias-label-primary); }
+}
