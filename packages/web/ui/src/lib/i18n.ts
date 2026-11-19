@@ -279,6 +279,7 @@ const zh: Record<string, string> = {
   'Waiting for an answer': '等待回答',
   'Question wait': '提问等待',
   'Question wait in minutes': '提问等待（分钟）',
+  'minutes': '分钟',
   'How long a question waits before the agent continues. The question stays answerable. The default is 5 minutes.':
     '提问等待多久后智能体继续工作。问题仍然可以回答。默认 5 分钟。',
   'Wait until answered': '一直等待回答',

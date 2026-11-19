@@ -1,6 +1,8 @@
-import { useState, type ReactNode } from 'react';
+import { useId, useState, type ReactNode } from 'react';
 import {
   Button,
+  Checkbox,
+  Input,
   RiskConfirmation,
   SegmentedControl,
   type MenuEntry,
@@ -12,6 +14,7 @@ import { SelectMenu } from '../SelectMenu.tsx';
 import { permissionIcon } from '../permission-icon.tsx';
 import permissionCss from '../../styles/dsh/permission-row.module.css';
 import css from '../../styles/app.module.css';
+import generalCss from '../../styles/settings.module.css';
 
 /**
  * Foreground wait for ask_user. A blank or illegal stored value shows the
@@ -25,6 +28,9 @@ function WebSearchSettings(): ReactNode {
   const [apiKeyEnv, setApiKeyEnv] = useState(stored?.apiKeyEnv ?? '');
   const [maxResults, setMaxResults] = useState(String(stored?.maxResults ?? 5));
   const [seen, setSeen] = useState(stored?.apiKeyEnv);
+  const apiKeyId = useId();
+  const apiKeyEnvId = useId();
+  const maxResultsId = useId();
   if (stored !== null && stored.apiKeyEnv !== seen) {
     setSeen(stored.apiKeyEnv);
     setApiKeyEnv(stored.apiKeyEnv ?? '');
@@ -39,42 +45,57 @@ function WebSearchSettings(): ReactNode {
     }).then(() => setApiKey(''));
   };
   return (
-    <div className={css.settingsRow}>
+    <div className={`${css.settingsRow} ${generalCss.generalSearchRow}`}>
       <div>
-        <span className={css.settingsLabel}>{t('Web search')}</span>
         <span className={css.settingsDescription}>
           {t('Tavily powers the global web_search tool. A stored key is write-only; an environment variable is used when no key is stored.')}
         </span>
       </div>
-      <div>
-        <input
-          aria-label={t('Tavily API key')}
-          type="password"
-          value={apiKey}
-          placeholder={stored?.apiKeyConfigured === true ? t('Key configured') : t('Not configured')}
-          disabled={app.webSearchSaving}
-          onChange={(event) => setApiKey(event.target.value)}
-        />
-        <input
-          aria-label={t('Tavily API key environment variable')}
-          value={apiKeyEnv}
-          placeholder="TAVILY_API_KEY"
-          disabled={app.webSearchSaving}
-          onChange={(event) => setApiKeyEnv(event.target.value)}
-        />
-        <input
-          aria-label={t('Maximum search results')}
-          inputMode="numeric"
-          value={maxResults}
-          disabled={app.webSearchSaving}
-          onChange={(event) => setMaxResults(event.target.value)}
-        />
-        <Button variant="outline" size="sm" disabled={app.webSearchSaving} onClick={save}>{t('Save')}</Button>
-        {stored?.apiKeyConfigured === true && (
-          <Button variant="outline" size="sm" disabled={app.webSearchSaving} onClick={() => { void store.saveWebSearch({ clearApiKey: true }); }}>
-            {t('Clear stored key')}
-          </Button>
-        )}
+      <div className={generalCss.generalSearchFields}>
+        <div className={generalCss.generalField}>
+          <label className={generalCss.generalFieldLabel} htmlFor={apiKeyId}>{t('Tavily API key')}</label>
+          <Input
+            id={apiKeyId}
+            aria-label={t('Tavily API key')}
+            type="password"
+            autoComplete="new-password"
+            value={apiKey}
+            placeholder={stored?.apiKeyConfigured === true ? t('Key configured') : t('Not configured')}
+            disabled={app.webSearchSaving}
+            onChange={(event) => setApiKey(event.target.value)}
+          />
+        </div>
+        <div className={generalCss.generalField}>
+          <label className={generalCss.generalFieldLabel} htmlFor={apiKeyEnvId}>{t('Tavily API key environment variable')}</label>
+          <Input
+            id={apiKeyEnvId}
+            aria-label={t('Tavily API key environment variable')}
+            value={apiKeyEnv}
+            placeholder="TAVILY_API_KEY"
+            disabled={app.webSearchSaving}
+            onChange={(event) => setApiKeyEnv(event.target.value)}
+          />
+        </div>
+        <div className={`${generalCss.generalField} ${generalCss.generalShortField}`}>
+          <label className={generalCss.generalFieldLabel} htmlFor={maxResultsId}>{t('Maximum search results')}</label>
+          <Input
+            id={maxResultsId}
+            className={generalCss.generalShortInput}
+            aria-label={t('Maximum search results')}
+            inputMode="numeric"
+            value={maxResults}
+            disabled={app.webSearchSaving}
+            onChange={(event) => setMaxResults(event.target.value)}
+          />
+        </div>
+        <div className={generalCss.generalActions}>
+          <Button variant="outline" size="sm" disabled={app.webSearchSaving} onClick={save}>{t('Save')}</Button>
+          {stored?.apiKeyConfigured === true && (
+            <Button variant="outline" size="sm" disabled={app.webSearchSaving} onClick={() => { void store.saveWebSearch({ clearApiKey: true }); }}>
+              {t('Clear stored key')}
+            </Button>
+          )}
+        </div>
       </div>
     </div>
   );
@@ -88,6 +109,7 @@ function QuestionTimeout(): ReactNode {
   const minutes = stored === null || indefinite ? 5 : Math.max(1, Math.round(stored.timeoutSec / 60));
   const [draft, setDraft] = useState(String(minutes));
   const [seen, setSeen] = useState(stored?.timeoutSec);
+  const minutesId = useId();
   if (stored !== null && stored.timeoutSec !== seen) {
     setSeen(stored.timeoutSec);
     setDraft(String(minutes));
@@ -98,33 +120,35 @@ function QuestionTimeout(): ReactNode {
     void store.saveAskUserTimeout(value * 60);
   };
   return (
-    <div className={css.settingsRow}>
+    <div className={`${css.settingsRow} ${generalCss.generalWaitRow}`}>
       <div>
         <span className={css.settingsLabel}>{t('Question wait')}</span>
         <span className={css.settingsDescription}>
           {t('How long a question waits before the agent continues. The question stays answerable. The default is 5 minutes.')}
         </span>
       </div>
-      <div>
-        <input
-          aria-label={t('Question wait in minutes')}
-          inputMode="numeric"
-          value={indefinite ? '' : draft}
-          disabled={indefinite || app.askUserTimeoutSaving}
-          onChange={(event) => setDraft(event.target.value)}
-          onBlur={saveMinutes}
-        />
-        <label>
-          <input
-            type="checkbox"
-            checked={indefinite}
-            disabled={app.askUserTimeoutSaving}
-            onChange={(event) => {
-              void store.saveAskUserTimeout(event.target.checked ? -1 : Math.max(1, minutes) * 60);
-            }}
+      <div className={generalCss.generalWaitControls}>
+        <div className={generalCss.generalMinuteField}>
+          <Input
+            id={minutesId}
+            className={generalCss.generalShortInput}
+            aria-label={t('Question wait in minutes')}
+            inputMode="numeric"
+            value={indefinite ? '' : draft}
+            disabled={indefinite || app.askUserTimeoutSaving}
+            onChange={(event) => setDraft(event.target.value)}
+            onBlur={saveMinutes}
           />
-          {t('Wait until answered')}
-        </label>
+          <label className={generalCss.generalUnit} htmlFor={minutesId}>{t('minutes')}</label>
+        </div>
+        <Checkbox
+          checked={indefinite}
+          disabled={app.askUserTimeoutSaving}
+          label={t('Wait until answered')}
+          onChange={(checked) => {
+            void store.saveAskUserTimeout(checked ? -1 : Math.max(1, minutes) * 60);
+          }}
+        />
         {stored?.requiresSelection === true && (
           <p className={css.settingsHint}>{t('The saved wait is invalid. Saving replaces it with the value shown here.')}</p>
         )}

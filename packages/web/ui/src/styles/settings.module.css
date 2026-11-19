@@ -101,6 +101,8 @@
 .content {
   min-width: 0;
   min-height: 0;
+  container-type: inline-size;
+  container-name: settings-content;
   overflow-y: auto;
   padding-right: 4px;
   padding-bottom: 8px;
@@ -1243,6 +1245,132 @@
   .kvRow > :nth-child(2) {
     grid-column: 1 / -1;
     grid-row: 2;
+  }
+}
+
+/* General settings: web search and question wait only. */
+.generalSearchRow,
+.generalWaitRow {
+  align-items: flex-start;
+}
+
+.generalSearchFields {
+  display: grid;
+  grid-template-columns: repeat(2, minmax(0, 1fr));
+  gap: 10px 12px;
+  width: min(100%, 460px);
+  min-width: 0;
+}
+
+.generalField {
+  display: flex;
+  flex-direction: column;
+  gap: 6px;
+  min-width: 0;
+}
+
+.generalField > span {
+  width: 100%;
+}
+
+.generalFieldLabel {
+  color: var(--dsw-alias-label-secondary);
+  font-size: 12px;
+  line-height: 18px;
+  overflow-wrap: anywhere;
+}
+
+.generalShortField {
+  grid-column: 1;
+  justify-self: start;
+  width: 148px;
+  max-width: 100%;
+}
+
+.generalShortInput {
+  width: 148px;
+  max-width: 100%;
+}
+
+.generalShortInput input:disabled {
+  color: var(--dsw-alias-label-tertiary);
+  cursor: default;
+  opacity: 0.55;
+}
+
+.generalActions {
+  grid-column: 1 / -1;
+  display: flex;
+  flex-wrap: wrap;
+  justify-content: flex-end;
+  gap: 8px;
+}
+
+.generalWaitControls {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  justify-content: flex-end;
+  gap: 8px 14px;
+  min-width: 0;
+  max-width: 100%;
+}
+
+.generalMinuteField {
+  display: inline-flex;
+  align-items: center;
+  gap: 8px;
+  min-width: 0;
+  max-width: 100%;
+}
+
+.generalUnit {
+  color: var(--dsw-alias-label-secondary);
+  font-size: 13px;
+  line-height: 20px;
+  white-space: nowrap;
+}
+
+.generalWaitControls > p {
+  flex-basis: 100%;
+  text-align: right;
+}
+
+@container settings-content (max-width: 560px) {
+  .content .generalSearchRow,
+  .content .generalWaitRow {
+    flex-direction: column;
+    align-items: stretch;
+    gap: 10px;
+  }
+
+  .content .generalSearchFields,
+  .content .generalWaitControls {
+    width: 100%;
+  }
+
+  .content .generalWaitControls,
+  .content .generalWaitControls > p {
+    justify-content: flex-start;
+    text-align: left;
+  }
+}
+
+@container settings-content (max-width: 420px) {
+  .content .generalSearchFields {
+    grid-template-columns: minmax(0, 1fr);
+    width: 100%;
+  }
+
+  .content .generalShortField {
+    grid-column: auto;
+    width: 100%;
+  }
+}
+
+@media (max-width: 767px) {
+  .generalSearchFields {
+    width: 100%;
   }
 }
 
