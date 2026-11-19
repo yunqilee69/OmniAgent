@@ -177,7 +177,7 @@ describe('RuntimeResolver', () => {
     expect(resolved.modelId).toBe('deepseek-v4-pro');
     expect(resolved.reasoningEffort).toBe('low');
     expect([...resolved.sessionAgent.tools as ReadonlySet<string>].sort())
-      .toEqual(['interrupt_agent', 'list_agents', 'read_file', 'send_message', 'skill', 'subagent', 'wait_agent']);
+      .toEqual(['interrupt_agent', 'list_agents', 'read_file', 'send_message', 'skill', 'subagent']);
     expect([...resolved.sessionAgent.skills as ReadonlySet<string>]).toEqual(['allowed-skill']);
     expect(resolved.system).toContain('EXPLORER BODY');
     expect(resolved.system).toContain('allowed-skill');

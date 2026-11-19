@@ -170,8 +170,8 @@ function normalizeMembers(members: readonly z.infer<typeof ModeMemberSchema>[] |
     agent: member.agent,
     model: cloneBinding(member.model ?? defaultModelBinding()),
     prompt: member.prompt?.trim() ?? '',
-    tools: normalizeSelector(member.tools ?? '*'),
-    skills: normalizeSelector(member.skills ?? '*'),
+    tools: '*',
+    skills: '*',
   }));
 }
 
@@ -326,8 +326,8 @@ export class ModeStore {
         description: value.description ?? '',
         agent: value.agent,
         model: cloneBinding(value.model ?? defaultModelBinding()),
-        tools: normalizeSelector(value.tools ?? '*'),
-        skills: normalizeSelector(value.skills ?? '*'),
+        tools: '*',
+        skills: '*',
         members: normalizeMembers(value.members),
         policy: normalizePolicy(value.policy),
         builtIn: base !== undefined,
@@ -367,13 +367,6 @@ export class ModeStore {
         warnings.push(error instanceof Error ? error.message : String(error));
       }
     }
-    const unknown = unknownTools(mode.tools);
-    if (unknown.length > 0) warnings.push(`Unknown tool(s): ${unknown.join(', ')}`);
-    if (mode.skills !== '*') {
-      for (const skill of mode.skills) {
-        if (skill.trim().length === 0) warnings.push('Skill names must not be empty');
-      }
-    }
     return { ...mode, members: mode.members.map((member) => ({ ...member, model: cloneBinding(member.model) })), policy: { ...mode.policy }, valid: warnings.length === 0, warnings };
   }
 
@@ -399,8 +392,7 @@ export class ModeStore {
       } catch (error) {
         warnings.push(error instanceof Error ? error.message : String(error));
       }
-      const unknown = unknownTools(member.tools);
-      if (unknown.length > 0) warnings.push(`Unknown tool(s): ${unknown.join(', ')}`);
+
     }
     if (mode.policy.maxDepth !== 1) warnings.push('Team delegation depth is fixed at 1');
   }
@@ -484,8 +476,8 @@ export class ModeStore {
             description: parsed.description ?? '',
             agent: parsed.agent,
             model: parsed.model ?? defaultModelBinding(),
-            tools: normalizeSelector(parsed.tools ?? '*'),
-            skills: normalizeSelector(parsed.skills ?? '*'),
+            tools: '*',
+            skills: '*',
             ...(parsed.members === undefined ? {} : { members: normalizeMembers(parsed.members) }),
             ...(parsed.policy === undefined ? {} : { policy: storedPolicy(normalizePolicy(parsed.policy)) }),
           },

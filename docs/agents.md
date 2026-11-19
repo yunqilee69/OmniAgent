@@ -90,7 +90,7 @@ Web 的「模型配置」页直接编辑 `providers` 和 `roles`，规则如下�
 
 `agentProfiles` 未配置时，内置一个 `{ "tools": "*", "skills": "*" }` 的 `default`。一旦配置了 `agentProfiles`，就不会再隐式合并 `default`；引用不存在的 profile 的 agent 会失效。
 
-`tools` 可以是 `"*"` 或精确列表。`subagent` 是组名，展开为 `subagent`、`send_message`、`list_agents`、`wait_agent`、`interrupt_agent`；`todo_write`、`exit_plan_mode`、`get_goal`、`create_goal`、`update_goal` 都是独立的精确工具名，需要逐项授权。未知工具名是配置错误。`skills` 可以是 `"*"`、数组；省略等价于 `[]`。
+`tools` 可以是 `"*"` 或精确列表。`subagent` 是组名，展开为 `subagent`、`send_message`、`list_agents`、`interrupt_agent`；旧配置中的 `wait_agent` 会被忽略。`todo_write`、`exit_plan_mode`、`get_goal`、`create_goal`、`update_goal` 都是独立的精确工具名，需要逐项授权。未知工具名是配置错误。`skills` 可以是 `"*"`、数组；省略等价于 `[]`。
 
 工具 profile 只是 allowlist，不能扩大 DSH 权限预设或沙盒。它最终与权限预设取交集，因此 `tools: ["bash"]` 在 `read-only` 下仍然不能写文件。
 

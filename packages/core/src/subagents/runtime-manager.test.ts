@@ -132,7 +132,7 @@ describe('SubagentManager with RuntimeResolver', () => {
     ]);
   });
 
-  it('starts a team member with the snapshot model and narrowed tools', async () => {
+  it('starts a team member with its model override and the agent capabilities', async () => {
     const { cwd, store, parent, runtime } = await fixture();
     const childModel = new FakeModel([textResponse('done')]);
     const manager = new SubagentManager({ store, runtime, createModel: () => childModel });
@@ -142,8 +142,6 @@ describe('SubagentManager with RuntimeResolver', () => {
       prompt: 'Read the notes',
       agent: 'explorer',
       binding: { version: 2, kind: 'agent' },
-      tools: ['read_file', 'grep'],
-      skills: [],
       maxSteps: 4,
     });
     await manager.wait(parent, started.id, 4_000, new AbortController().signal);
@@ -152,10 +150,7 @@ describe('SubagentManager with RuntimeResolver', () => {
       type: 'model/selected',
       data: { version: 2, kind: 'agent' },
     }));
-    expect(child.events).toContainEqual(expect.objectContaining({
-      type: 'mode/selected',
-      data: expect.objectContaining({ tools: ['read_file'], skills: [] }),
-    }));
+    expect(child.events.some((event) => event.type === 'mode/selected')).toBe(false);
     expect(childModel.requests[0]!.tools.map((tool) => tool.name)).toEqual(['read_file']);
   });
 

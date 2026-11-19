@@ -7,7 +7,6 @@ import { ReasoningEffortSchema } from '../../protocol/reasoning';
 export const SUBAGENT_TOOL_NAME = 'subagent';
 export const SEND_MESSAGE_TOOL_NAME = 'send_message';
 export const LIST_AGENTS_TOOL_NAME = 'list_agents';
-export const WAIT_AGENT_TOOL_NAME = 'wait_agent';
 export const INTERRUPT_AGENT_TOOL_NAME = 'interrupt_agent';
 
 const StartParams = z.object({
@@ -53,12 +52,6 @@ const AgentIdParams = z.object({
   ),
 }).strict();
 
-const WaitParams = z.object({
-  timeout_ms: z.number().describe(
-    'Wait duration in milliseconds, from 10000 through 3600000. Defaults to 30000.',
-  ).optional(),
-}).strict();
-
 const EmptyParams = z.object({}).strict();
 
 function renderList(entries: readonly SubagentListEntry[]): string {
@@ -79,10 +72,10 @@ export function createSubagentTools(session: Session, service: SubagentService):
         'Delegate a self-contained task to a subagent (a separate agent that works in its own context) '
         + 'to offload focused, independent work — research, a scoped implementation, an analysis — '
         + "so it does not consume this conversation's context. The subagent returns its result, not its "
-        + 'intermediate steps. This tool starts an independently managed subagent and immediately returns '
-        + 'its id. If you are still online when it finishes, the runtime automatically delivers its '
-        + 'completion notice. Use `send_message` to steer it while running or continue its conversation '
-        + 'after it finishes. Pass `agent` to choose a configured subagent; omit it to inherit your agent.',
+        + 'intermediate steps. Start independent subagents together in one assistant message; the platform '
+        + 'waits for that batch and returns every result before your next step. Use `send_message` to steer '
+        + 'a child while it runs or continue its conversation after it finishes. Pass `agent` to choose a '
+        + 'configured subagent; omit it to inherit your agent.',
       parameters: StartParams,
       mutating: false,
       async execute(args, ctx) {
@@ -98,6 +91,7 @@ export function createSubagentTools(session: Session, service: SubagentService):
           ...(parsed.model === undefined ? {} : { model: parsed.model }),
           ...(parsed.reasoning_effort === undefined ? {} : { reasoningEffort: parsed.reasoning_effort }),
         });
+        session.trackStartedChild?.(result.id);
         return { content: `started subagent ${result.id}` };
       },
     },
@@ -122,31 +116,13 @@ export function createSubagentTools(session: Session, service: SubagentService):
         + 'Rows carry ids, descriptions, and status; descendant rows carry parent ids and depth from the root. '
         + 'You can message any other agent in the subagent tree listed as running or inactive. '
         + 'running means it is working; inactive means no turn is executing; it does not indicate task completion, success, or failure. '
-        + 'While you remain active, you will be notified when a direct child finishes; there is no need to keep checking its status. '
+        + 'The platform joins children you start in the current message before your next step. '
         + 'Use send_message to continue the conversation.',
       parameters: EmptyParams,
       mutating: false,
       async execute(_args, ctx) {
         ctx.signal.throwIfAborted();
         return { content: renderList(await service.list(session)) };
-      },
-    },
-    {
-      name: WAIT_AGENT_TOOL_NAME,
-      description:
-        'Wait for input at your next step, including agent messages, completion notifications, and user steering. '
-        + 'Returns immediately when that input is already pending.',
-      parameters: WaitParams,
-      mutating: false,
-      async execute(args, ctx) {
-        const parsed = WaitParams.parse(args);
-        const timeoutMs = parsed.timeout_ms ?? 30_000;
-        if (!Number.isSafeInteger(timeoutMs) || timeoutMs < 10_000 || timeoutMs > 3_600_000) {
-          throw new Error('timeout_ms must be an integer from 10000 through 3600000');
-        }
-        ctx.signal.throwIfAborted();
-        const outcome = await service.waitForInput(session, timeoutMs, ctx.signal);
-        return { content: JSON.stringify(outcome) };
       },
     },
     {

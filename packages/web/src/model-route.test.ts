@@ -521,8 +521,7 @@ describe('configured session API', () => {
       agent: 'creator',
       model: { version: 2, kind: 'agent' },
     });
-    expect(mode.selection.tools).not.toBe('*');
-    expect(mode.selection.tools).not.toContain('write_file');
+    expect(mode.selection.tools).toBe('*');
     expect(mode.selection.skills).toBe('*');
 
     const detail = await (await fetch(sessionUrl)).json() as { mode: unknown };
@@ -541,7 +540,6 @@ describe('configured session API', () => {
     await completed.text();
     expect(captured).toHaveLength(1);
     expect(captured[0]!.agent.id).toBe('creator');
-    expect(captured[0]!.sessionAgent.tools).not.toBe('*');
     expect(captured[0]!.sessionAgent.tools).not.toContain('write_file');
     expect(captured[0]!.modelId).toBe('deepseek-v4-pro');
   });
@@ -561,8 +559,7 @@ describe('configured session API', () => {
     expect(mode.status).toBe('selected');
     if (mode.status !== 'selected') throw new Error('mode selection missing');
     expect(mode.selection).toMatchObject({ mode: 'creator', agent: 'creator', model: binding });
-    expect(mode.selection.tools).not.toBe('*');
-    expect(mode.selection.tools).not.toContain('write_file');
+    expect(mode.selection.tools).toBe('*');
 
     const detail = await (await fetch(sessionUrl)).json() as {
       model: unknown;

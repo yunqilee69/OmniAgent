@@ -124,16 +124,8 @@ export class RuntimeResolver {
 
     const profile = catalog.profiles.get(agent.profile);
     if (!profile) throw new Error(`Agent "${agent.id}" references unknown profile "${agent.profile}"`);
-    const selectedTools = input.mode === undefined
-      ? profile.tools
-      : input.narrowMode === true
-        ? intersectSelector(profile.tools, input.mode.tools)
-        : input.mode.tools;
-    const selectedSkills = input.mode === undefined
-      ? profile.skills
-      : input.narrowMode === true
-        ? intersectSelector(profile.skills, input.mode.skills)
-        : input.mode.skills;
+    const selectedTools = profile.tools;
+    const selectedSkills = profile.skills;
     const tools = toolsForSelector(selectedTools, input.mode === undefined
       ? `Agent profile "${profile.id}"`
       : `Mode "${input.mode.id}"`);

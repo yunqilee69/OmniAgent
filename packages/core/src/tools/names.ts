@@ -20,7 +20,6 @@ export const BASH_TOOL_NAME = 'bash';
 export const SUBAGENT_TOOL_NAME = 'subagent';
 export const SEND_MESSAGE_TOOL_NAME = 'send_message';
 export const LIST_AGENTS_TOOL_NAME = 'list_agents';
-export const WAIT_AGENT_TOOL_NAME = 'wait_agent';
 export const INTERRUPT_AGENT_TOOL_NAME = 'interrupt_agent';
 export {
   SCHEDULE_CREATE_TOOL_NAME,
@@ -35,7 +34,6 @@ export const SUBAGENT_TOOL_GROUP = [
   SUBAGENT_TOOL_NAME,
   SEND_MESSAGE_TOOL_NAME,
   LIST_AGENTS_TOOL_NAME,
-  WAIT_AGENT_TOOL_NAME,
   INTERRUPT_AGENT_TOOL_NAME,
 ] as const;
 
@@ -67,8 +65,10 @@ export function expandToolSelector(selector: '*' | readonly string[]): '*' | str
   if (selector === '*') return '*';
   const expanded = new Set<string>();
   for (const name of selector) {
-    if (name === SUBAGENT_TOOL_NAME) {
-      for (const tool of SUBAGENT_TOOL_GROUP) expanded.add(tool);
+    if (name === SUBAGENT_TOOL_NAME || name === 'wait_agent') {
+      if (name === SUBAGENT_TOOL_NAME) {
+        for (const tool of SUBAGENT_TOOL_GROUP) expanded.add(tool);
+      }
     } else {
       expanded.add(name);
     }

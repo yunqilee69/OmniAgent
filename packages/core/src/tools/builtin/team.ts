@@ -3,8 +3,7 @@ import type { Tool } from '../../domain/tool';
 import type { SubagentService } from '../../domain/subagent';
 import type { Session } from '../../session';
 import type { TeamMemberSnapshot } from '../../session/mode-selection';
-
-export const DELEGATE_TEAM_MEMBER_TOOL_NAME = 'delegate_team_member';
+import { SUBAGENT_TOOL_NAME } from './subagent';
 
 /** Coordinator guidance injected into the team mode system prompt. */
 export function renderTeamGuidance(
@@ -18,15 +17,15 @@ export function renderTeamGuidance(
   });
   return [
     'Team mode is active. You are the coordinator, not a worker.',
-    'Every unit of work a configured member can perform MUST be delegated with delegate_team_member, '
+    'Every unit of work a configured member can perform MUST be delegated with subagent, '
       + 'including creating or editing files, running commands, and searching the workspace. Do not '
       + 'call write_file, edit_file, or bash yourself while a capable member is available. Use your '
       + 'own tools only to inspect outcomes and integrate the final answer.',
     'Configured members:',
     ...catalog,
-    `At most ${maxActive} member(s) may run at once. After delegating, wait for the settlement `
-      + 'notice, then verify the reported result before relying on it. Do not start agents that are '
-      + 'not in this list.',
+    `At most ${maxActive} member(s) may run at once. Start independent members together in one message; `
+      + 'the platform returns every result before your next step. Verify each reported result before relying on it. '
+      + 'Do not start agents that are not in this list.',
   ].join('\n');
 }
 
@@ -46,7 +45,7 @@ export function createTeamDelegationTool(
   const catalog = new Map(members.map((member) => [member.id, member]));
   let starting = 0;
   return {
-    name: DELEGATE_TEAM_MEMBER_TOOL_NAME,
+    name: SUBAGENT_TOOL_NAME,
     description: 'Delegate work to one configured team member. Members: '
       + members.map((member) => `${member.id} (${member.name})`).join(', ') + '.',
     parameters: Params,
@@ -76,10 +75,10 @@ export function createTeamDelegationTool(
           prompt,
           agent: member.agent,
           binding: member.model,
-          tools: member.tools,
-          skills: member.skills,
+
           ...(maxSteps === undefined ? {} : { maxSteps }),
         });
+        session.trackStartedChild?.(started.id);
         return { content: `started team member ${member.id} as ${started.id}` };
       } finally {
         starting -= 1;

@@ -208,7 +208,7 @@ Session 内部有一个 `inbox` 和等待者表：
 | `deliverUserMessage()` | 运行中用户插话（steer） | 追加 `message/user`，push 到 history 和 inbox |
 | `deliverExternalMessage()` | 其他 agent / 计划任务消息 | 追加 `message/notice`；运行中进 inbox，空闲时启动后台 turn |
 | `receiveSubagentNotice()` | 子代理完成通知 | 追加 `subagent/notice`；运行中进 inbox，空闲时启动后台 turn |
-| `waitForInput()` | `wait_agent` 工具 | 等待 inbox 有消息、超时或 abort |
+| `waitForStartedChildren()` | 平台批次等待 | 等待当前模型消息启动的直接子代理全部进入终态 |
 
 `AgentLoop` 在每个 step 顶部调用 `takeQueuedMessages()`，所以运行中的消息在**下一个模型请求前**被模型看到。
 

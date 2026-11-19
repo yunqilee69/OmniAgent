@@ -11,7 +11,7 @@ import { Session } from '../session';
 import { createAgentSelectionEvent, projectAgentSelection } from '../session/agent-selection';
 import { createModelSelectionEvent as createBindingEvent, defaultModelBinding, ModelBindingSchema, projectModelSelection as projectBinding } from '../session/model-binding';
 import type { ModelBinding } from '../session/model-binding';
-import { createModeSelectionEvent } from '../session/mode-selection';
+
 import type { ResolvedSessionRuntime, RuntimeResolver } from '../session/runtime';
 import { resolveInsidePhysical } from '../tools/paths';
 import type { SessionHandle, SessionStore } from '../session/store';
@@ -114,6 +114,7 @@ function lastAssistant(events: readonly { type: string; data: unknown }[]): stri
 export class SubagentManager implements SubagentService {
   private readonly children = new Map<string, ManagedChild>();
   private readonly live = new Map<string, Session>();
+  private readonly startedByCaller = new WeakMap<Session, string[]>();
   private readonly maxDepth: number;
   private readonly maxActive: number;
   private activeRuns = 0;
@@ -151,20 +152,12 @@ export class SubagentManager implements SubagentService {
         : parent.cwd;
       const agentId = request.agent ?? parent.agent?.id ?? 'default';
       const binding = this.selectBinding(request);
-      const memberMode = request.tools === undefined && request.skills === undefined
-        ? undefined
-        : {
-          id: `team-member:${agentId}`,
-          tools: request.tools ?? '*',
-          skills: request.skills ?? '*',
-        };
       const runtime = await this.options.runtime.resolve({
         cwd,
         workspace,
         agentId,
         binding,
         isRoot: false,
-        ...(memberMode === undefined ? {} : { mode: memberMode, narrowMode: true }),
       });
 
       const depth = parent.depth + 1;
@@ -178,18 +171,6 @@ export class SubagentManager implements SubagentService {
       await handle.append(createInitialDshPermissionEvent(permissions.preset));
       await handle.append(createAgentSelectionEvent(agentId));
       await handle.append(createBindingEvent(binding));
-      if (memberMode !== undefined) {
-        const tools = runtime.sessionAgent.tools === '*' ? '*' : [...runtime.sessionAgent.tools].sort();
-        const skills = runtime.sessionAgent.skills === '*' ? '*' : [...runtime.sessionAgent.skills].sort();
-        await handle.append(createModeSelectionEvent({
-          version: 1,
-          mode: memberMode.id,
-          agent: agentId,
-          model: binding,
-          tools,
-          skills,
-        }));
-      }
 
       const child = await this.createSession(handle, permissions, depth, parent, runtime, request.maxSteps);
       const info: SubagentInfo = {
@@ -298,8 +279,28 @@ export class SubagentManager implements SubagentService {
     return live?.activeTurn ? 'running' : 'inactive';
   }
 
-  waitForInput(caller: Session, timeoutMs: number, signal: AbortSignal): Promise<{ timedOut: boolean }> {
-    return caller.waitForInput(timeoutMs, signal);
+  trackChild(caller: Session, targetId: string): void {
+    const pending = this.startedByCaller.get(caller) ?? [];
+    pending.push(targetId);
+    this.startedByCaller.set(caller, pending);
+  }
+
+  async waitForStartedChildren(caller: Session, signal: AbortSignal): Promise<SubagentOutcome[]> {
+    const pending = this.startedByCaller.get(caller) ?? [];
+    this.startedByCaller.delete(caller);
+    return Promise.all(pending.map(async (targetId) => {
+      const child = this.children.get(targetId);
+      if (child?.settled) {
+        await Promise.race([
+          child.settled,
+          new Promise<never>((_resolve, reject) => {
+            if (signal.aborted) reject(signal.reason ?? new Error('Wait aborted'));
+            else signal.addEventListener('abort', () => reject(signal.reason ?? new Error('Wait aborted')), { once: true });
+          }),
+        ]);
+      }
+      return this.wait(caller, targetId, Number.POSITIVE_INFINITY, signal);
+    }));
   }
 
   async wait(caller: Session, targetId: string, timeoutMs: number, signal: AbortSignal): Promise<SubagentOutcome> {
@@ -530,7 +531,7 @@ export class SubagentManager implements SubagentService {
         await parentHandle?.append({ type: SUBAGENT_NOTICE_EVENT, data: { ...notice } });
       }
     } catch {
-      // The child result is still available through wait_agent/list_agents.
+      // The child result remains available through list_agents and the parent batch join.
     }
   }
 

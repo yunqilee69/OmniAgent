@@ -94,8 +94,10 @@ export interface SubagentService {
   send(caller: Session, targetId: string, message: string): Promise<{ messageId: string }>;
   list(caller: Session): Promise<SubagentListEntry[]>;
   wait(caller: Session, targetId: string, timeoutMs: number, signal: AbortSignal): Promise<SubagentOutcome>;
-  /** Wait for the caller's next-step input, including messages and notices. */
-  waitForInput(caller: Session, timeoutMs: number, signal: AbortSignal): Promise<{ timedOut: boolean }>;
+  /** Wait until every child started by the caller in the current tool batch settles. */
+  waitForStartedChildren(caller: Session, signal: AbortSignal): Promise<SubagentOutcome[]>;
+  /** Track a child for joining after the caller's current model tool batch. */
+  trackChild(caller: Session, targetId: string): void;
   interrupt(caller: Session, targetId: string): Promise<boolean>;
   canStart(parent: Session): boolean;
 }

@@ -358,7 +358,6 @@ export {
   LIST_AGENTS_TOOL_NAME,
   SEND_MESSAGE_TOOL_NAME,
   SUBAGENT_TOOL_NAME,
-  WAIT_AGENT_TOOL_NAME,
   createSubagentTools,
 } from './tools/builtin/subagent';
 export {

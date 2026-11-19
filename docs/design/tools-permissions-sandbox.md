@@ -77,7 +77,7 @@ export interface ToolOutput {
 
 会话相关工具由 `Session` 根据权限和 profile 追加：
 
-`bash`、`todo_write`、`exit_plan_mode`、`get_goal`、`create_goal`、`update_goal`、`subagent`、`send_message`、`list_agents`、`wait_agent`、`interrupt_agent`、`schedule_*`、`list_agent_definitions`、`write_agent_definition`。
+`bash`、`todo_write`、`exit_plan_mode`、`get_goal`、`create_goal`、`update_goal`、`subagent`、`send_message`、`list_agents`、`interrupt_agent`、`schedule_*`、`list_agent_definitions`、`write_agent_definition`。
 
 ### 3.2 文件与搜索
 
@@ -147,7 +147,7 @@ Web 附件不写进工作区，而是写到工作区外、Git worktree 之外的
 | `todo_write` | 整份替换任务清单，持久化 `todo/write` |
 | `exit_plan_mode` | 提交计划并请求审批；只在 plan 模式可用 |
 | `get_goal` / `create_goal` / `update_goal` | 目标读取、创建、编辑、暂停、恢复、完成、阻塞 |
-| `subagent` / `send_message` / `list_agents` / `wait_agent` / `interrupt_agent` | 子代理协作 |
+| `subagent` / `send_message` / `list_agents` / `interrupt_agent` | 子代理协作 |
 | `schedule_create` / `schedule_list` / `schedule_view` / `schedule_edit` | 计划任务；主会话可用，子代理不可用 |
 | `list_agent_definitions` / `write_agent_definition` | 只在创造模式会话注册 |
 | `list_modes` / `write_mode` / `delete_mode` / `set_default_mode` / `list_mode_options` | 创造模式配置工具；由 Host 注入模式服务后注册 |

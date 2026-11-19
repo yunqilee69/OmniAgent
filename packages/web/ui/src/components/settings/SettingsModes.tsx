@@ -2,7 +2,6 @@ import { useEffect, useState, type ReactNode } from 'react';
 import clsx from 'clsx';
 import {
   Button,
-  Checkbox,
   Input,
   Modal,
   Tag,
@@ -48,28 +47,12 @@ function ModeEditor({ editing, onClose }: ModeEditorProps): ReactNode {
   const [maxActive, setMaxActive] = useState(String(editing?.policy.maxActive ?? 3));
   const [agent, setAgent] = useState(editing?.agent ?? app.agents.find((item) => item.id === 'default' && item.valid)?.id ?? app.agents[0]?.id ?? '');
   const [binding, setBinding] = useState<ModeSummary['model']>(editing?.model ?? { version: 2, kind: 'agent' });
-  const initialTools = editing?.tools ?? '*';
-  const initialSkills = editing?.skills ?? '*';
-  const [allTools, setAllTools] = useState(initialTools === '*');
-  const [tools, setTools] = useState<Set<string>>(new Set(initialTools === '*' ? [] : initialTools));
-  const [allSkills, setAllSkills] = useState(initialSkills === '*');
-  const [skills, setSkills] = useState<Set<string>>(new Set(initialSkills === '*' ? [] : initialSkills));
+
   const [saving, setSaving] = useState(false);
   const [error, setError] = useState('');
 
-  useEffect(() => {
-    void store.loadModeOptions();
-  }, []);
-
   const agents = app.agents.filter((item) => item.valid && item.usage !== 'subagent');
   const agentItems: MenuEntry[] = agents.map((item) => ({ id: item.id, label: `${item.name} · ${item.role}` }));
-
-  const toggle = (set: Set<string>, value: string): Set<string> => {
-    const next = new Set(set);
-    if (next.has(value)) next.delete(value);
-    else next.add(value);
-    return next;
-  };
 
   const save = async (): Promise<void> => {
     setError('');
@@ -96,8 +79,8 @@ function ModeEditor({ editing, onClose }: ModeEditorProps): ReactNode {
       description: description.trim(),
       agent,
       model: binding,
-      tools: allTools ? '*' : [...tools].sort(),
-      skills: allSkills ? '*' : [...skills].sort(),
+      tools: '*',
+      skills: '*',
       ...(kind === 'team' ? {
         members,
         policy: {
@@ -220,90 +203,74 @@ function ModeEditor({ editing, onClose }: ModeEditorProps): ReactNode {
               <Input value={maxActive} onChange={(event) => { setMaxActive(event.target.value); }} />
             </label>
             {members.map((member, index) => (
-              <div key={`${member.id}-${index}`} className={css.memberEditor}>
+              <article key={`${member.id}-${index}`} className={css.memberEditor}>
+                <div className={css.memberHead}>
+                  <strong>{member.name.trim() || t('Member {count}', { count: index + 1 })}</strong>
+                  <Button variant="outline" size="sm" onClick={() => { setMembers((current) => current.filter((_, itemIndex) => itemIndex !== index)); }}>{t('Remove')}</Button>
+                </div>
                 <div className={css.editorGrid}>
-                  <Input value={member.id} aria-label={t('Member id')} onChange={(event) => {
+                  <label className={css.field}>
+                    <span className={css.fieldLabel}>{t('Member id')}</span>
+                    <Input value={member.id} aria-label={t('Member id')} onChange={(event) => {
                     const value = event.target.value;
                     setMembers((current) => current.map((item, itemIndex) => itemIndex === index ? { ...item, id: value } : item));
                   }} />
-                  <Input value={member.name} aria-label={t('Member name')} onChange={(event) => {
+                  </label>
+                  <label className={css.field}>
+                    <span className={css.fieldLabel}>{t('Member name')}</span>
+                    <Input value={member.name} aria-label={t('Member name')} onChange={(event) => {
                     const value = event.target.value;
                     setMembers((current) => current.map((item, itemIndex) => itemIndex === index ? { ...item, name: value } : item));
                   }} />
-                  <SelectMenu
-                    value={member.agent}
-                    items={app.agents.filter((item) => item.valid && item.usage !== 'primary').map((item) => ({ id: item.id, label: item.name }))}
-                    onSelect={(value) => { setMembers((current) => current.map((item, itemIndex) => itemIndex === index ? { ...item, agent: value } : item)); }}
-                    ariaLabel={t('Member agent')}
-                    title={t('Member agent')}
-                    triggerClassName={css.editorSelect}
-                  >
-                    {agentName(member.agent, app)}
-                  </SelectMenu>
-                  <Button variant="outline" size="sm" onClick={() => { setMembers((current) => current.filter((_, itemIndex) => itemIndex !== index)); }}>{t('Remove')}</Button>
+                  </label>
+                  <label className={css.field}>
+                    <span className={css.fieldLabel}>{t('Member agent')}</span>
+                      <SelectMenu
+                      value={member.agent}
+                      items={app.agents.filter((item) => item.valid && item.usage !== 'primary').map((item) => ({ id: item.id, label: item.name }))}
+                      onSelect={(value) => { setMembers((current) => current.map((item, itemIndex) => itemIndex === index ? { ...item, agent: value } : item)); }}
+                      ariaLabel={t('Member agent')}
+                      title={t('Member agent')}
+                      triggerClassName={css.editorSelect}
+                    >
+                      {agentName(member.agent, app)}
+                    </SelectMenu>
+                  </label>
+                  <label className={css.field}>
+                    <span className={css.fieldLabel}>{t('Member model')}</span>
+                    <ModelPicker
+                      binding={member.model}
+                      models={app.models}
+                      roles={app.roles}
+                      onSelect={(value) => { setMembers((current) => current.map((item, itemIndex) => itemIndex === index ? { ...item, model: value } : item)); }}
+                      ariaLabel={t('Member model')}
+                      title={t('Member model')}
+                      triggerClassName={css.editorSelect}
+                    />
+                  </label>
                 </div>
-                <textarea
-                  className={css.memberPrompt}
-                  rows={2}
-                  value={member.prompt}
-                  aria-label={t('Member instructions')}
-                  placeholder={t('Optional instructions prepended to every task delegated to this member.')}
-                  onChange={(event) => {
-                    const value = event.target.value;
-                    setMembers((current) => current.map((item, itemIndex) => itemIndex === index ? { ...item, prompt: value } : item));
-                  }}
-                />
-              </div>
+                <label className={css.field}>
+                  <span className={css.fieldLabel}>{t('Member instructions')}</span>
+                  <textarea
+                    className={css.memberPrompt}
+                    rows={3}
+                    value={member.prompt}
+                    aria-label={t('Member instructions')}
+                    placeholder={t('Optional instructions prepended to every task delegated to this member.')}
+                    onChange={(event) => {
+                      const value = event.target.value;
+                      setMembers((current) => current.map((item, itemIndex) => itemIndex === index ? { ...item, prompt: value } : item));
+                    }}
+                  />
+                </label>
+              </article>
             ))}
-            <p className={css.fieldHint}>{t('Members keep the tools and skills of their agent unless a later edit narrows them. The team cannot widen access.')}</p>
+            <p className={css.fieldHint}>{t('Each member uses its agent’s tools and skills. Its model can follow the agent role or override it for this team.')}</p>
           </section>
         )}
 
-        <section className={css.choiceGroup}>
-          <div className={css.choiceHead}>
-            <span className={css.fieldLabel}>{t('Tools')}</span>
-            <Checkbox checked={allTools} label={t('All tools')} onChange={(next) => {
-              setAllTools(next);
-              if (next) setTools(new Set());
-            }} />
-          </div>
-          {!allTools && (
-            <div className={css.choiceGrid}>
-              {app.modeOptions.tools.map((tool) => (
-                <Checkbox
-                  key={tool}
-                  checked={tools.has(tool)}
-                  label={tool}
-                  onChange={() => { setTools((current) => toggle(current, tool)); }}
-                />
-              ))}
-              {app.modeOptions.tools.length === 0 && <p className={css.hint}>{t('Loading tool catalog…')}</p>}
-            </div>
-          )}
-        </section>
 
-        <section className={css.choiceGroup}>
-          <div className={css.choiceHead}>
-            <span className={css.fieldLabel}>{t('Skills')}</span>
-            <Checkbox checked={allSkills} label={t('All skills')} onChange={(next) => {
-              setAllSkills(next);
-              if (next) setSkills(new Set());
-            }} />
-          </div>
-          {!allSkills && (
-            <div className={css.choiceGrid}>
-              {app.modeOptions.skills.map((skill) => (
-                <Checkbox
-                  key={skill.name}
-                  checked={skills.has(skill.name)}
-                  label={skill.description === '' ? skill.name : `${skill.name} · ${skill.description}`}
-                  onChange={() => { setSkills((current) => toggle(current, skill.name)); }}
-                />
-              ))}
-              {app.modeOptions.skills.length === 0 && <p className={css.hint}>{t('No skills were discovered in this workspace. Add .agents/skills or keep All skills.')}</p>}
-            </div>
-          )}
-        </section>
+        {kind === 'single' && <p className={css.fieldHint}>{t('Tools and skills come from the selected agent. A mode chooses the agent and model; it does not grant extra capabilities.')}</p>}
         {error !== '' && <p className={css.formError} role="alert">{error}</p>}
       </div>
     </Modal>
@@ -339,9 +306,7 @@ function ModeCard({ mode, isDefault, t, app, onEdit }: ModeCardProps): ReactNode
           <span>{bindingLabel(mode.model, app, t)}</span>
         </span>
         <span className={css.presetMeta}>
-          <span>{mode.type === 'team' ? t('{count} members', { count: mode.members.length }) : mode.tools === '*' ? t('All tools') : t('{count} tools', { count: mode.tools.length })}</span>
-          <span className={css.presetDot} aria-hidden>·</span>
-          <span>{mode.skills === '*' ? t('All skills') : t('{count} skills', { count: mode.skills.length })}</span>
+          <span>{mode.type === 'team' ? t('{count} members', { count: mode.members.length }) : t('Uses agent capabilities')}</span>
         </span>
         {!mode.valid && <span className={css.presetWarning} role="alert">{mode.warnings.join(' · ')}</span>}
       </button>
@@ -373,7 +338,7 @@ export function SettingsModes(): ReactNode {
         <div>
           <h2 className={css.pageTitle}>{t('Mode presets')}</h2>
           <p className={css.pageIntro}>
-            {t('A mode sets the agent, default model, tools and skills a new session starts with. Choose it when creating a session; the mode cannot be changed afterwards.')}
+            {t('A mode chooses the agent and default model for a new session. Tools and skills come from that agent. The mode cannot be changed afterwards.')}
           </p>
         </div>
         <Button variant="outline" size="sm" onClick={() => { setEditor({ editing: null }); }}>{t('New mode')}</Button>
@@ -401,7 +366,7 @@ export function SettingsModes(): ReactNode {
         <h3 className={css.groupHead}>{t('Custom modes')}</h3>
         {custom.length === 0 && !app.modesLoading ? (
           <div className={css.emptyCustom}>
-            <p className={css.hint}>{t('No custom modes yet. Create one to combine an agent with its own model, tools and skills.')}</p>
+            <p className={css.hint}>{t('No custom modes yet. Create one to choose an agent and its default model.')}</p>
             <Button variant="outline" onClick={() => { setEditor({ editing: null }); }}>{t('Create a mode')}</Button>
           </div>
         ) : (

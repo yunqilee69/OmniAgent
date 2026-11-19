@@ -59,7 +59,7 @@ export function NewSessionDialog(): ReactNode {
           <div>
             <h2 className={css.pageTitle}>{t('Choose a mode for this session')}</h2>
             <p className={css.pageIntro}>
-              {t('The mode sets the agent, default model, tools and skills for the whole session. The model can be overridden before or during the conversation; to use a different mode, create a new session.')}
+              {t('The mode chooses the agent and default model. Tools and skills come from the agent. The model can be changed later; use a new session to change the mode.')}
             </p>
           </div>
         </header>
@@ -92,9 +92,7 @@ export function NewSessionDialog(): ReactNode {
                     <span>{modelLabel(mode, app, t)}</span>
                   </span>
                   <span className={css.presetMeta}>
-                    <span>{mode.type === 'team' ? t('{count} members', { count: mode.members.length }) : mode.tools === '*' ? t('All tools') : t('{count} tools', { count: mode.tools.length })}</span>
-                    <span className={css.presetDot} aria-hidden>·</span>
-                    <span>{mode.skills === '*' ? t('All skills') : t('{count} skills', { count: mode.skills.length })}</span>
+                    <span>{mode.type === 'team' ? t('{count} members', { count: mode.members.length }) : t('Uses agent capabilities')}</span>
                   </span>
                 </button>
               </li>

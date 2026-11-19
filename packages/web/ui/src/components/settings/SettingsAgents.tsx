@@ -284,7 +284,7 @@ export function SettingsAgents(): ReactNode {
         <div>
           <h2 className={css.pageTitle}>{t('Agents')}</h2>
           <p className={css.pageIntro}>
-            {t('Agents define identity and instructions. Modes combine one agent with the tools, model and skills a session can use.')}
+            {t('Agents define identity, instructions, tools and skills. A mode chooses one agent and its default model.')}
           </p>
         </div>
         <Button variant="outline" size="sm" onClick={() => { void startCreator(); }}>{t('Create agent in Creator mode')}</Button>

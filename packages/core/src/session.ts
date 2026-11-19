@@ -22,7 +22,7 @@ import type {
   ApprovalHandler,
   PermissionRequest,
 } from './protocol/permission';
-import type { SubagentNotice, SubagentService } from './domain/subagent';
+import type { SubagentNotice, SubagentOutcome, SubagentService } from './domain/subagent';
 import { SUBAGENT_NOTICE_EVENT } from './domain/subagent';
 import type { ModelClient } from './providers/types';
 import type { AuditSink } from './store/audit';
@@ -49,7 +49,7 @@ import {
 } from './tools/builtin/ask-user';
 import type { AskUserAnswerItem, AskUserQuestion, AskUserToolResult } from './tools/builtin/ask-user';
 import { createSubagentTools, SUBAGENT_TOOL_NAME } from './tools/builtin/subagent';
-import { createTeamDelegationTool, DELEGATE_TEAM_MEMBER_TOOL_NAME, renderTeamGuidance } from './tools/builtin/team';
+import { createTeamDelegationTool, renderTeamGuidance } from './tools/builtin/team';
 import type { TeamMemberSnapshot } from './session/mode-selection';
 import { createGoalTools, CREATE_GOAL_TOOL_NAME, GET_GOAL_TOOL_NAME, UPDATE_GOAL_TOOL_NAME } from './tools/builtin/goal';
 import { createScheduleTools, renderScheduleToolGuidance, SCHEDULE_TOOL_GROUP } from './schedule/tools';
@@ -458,6 +458,7 @@ export class Session {
       tools: this.tools,
       toolSpecs: () => this.visibleToolSpecs(),
       takeQueuedMessages: () => this.inbox.splice(0),
+      afterToolBatch: (signal) => this.settleStartedChildren(signal),
       takeForceCompact: () => {
         const requested = this.compactRequested;
         this.compactRequested = false;
@@ -651,6 +652,18 @@ export class Session {
     await this.appendMessage('message/notice', { text, source: 'tool-goal' });
     this.inbox.push(message);
     this.notifyInbox();
+  }
+
+  trackStartedChild?(childId: string): void {
+    this.subagents?.trackChild(this, childId);
+  }
+
+  private async settleStartedChildren(signal: AbortSignal): Promise<Message[]> {
+    if (!this.subagents) return [];
+    const outcomes = await this.subagents.waitForStartedChildren(this, signal);
+    return outcomes.map((outcome) => userMessage(
+      `Subagent ${outcome.id} finished with status ${outcome.status}.${outcome.result ? ` Result:\n${outcome.result}` : ''}`,
+    ));
   }
 
   /** Resolve when a message or notice is waiting for the next model step. */
@@ -1248,7 +1261,6 @@ export class Session {
     const tool = this.tools.get(name);
     return name === 'bash'
       || name === SUBAGENT_TOOL_NAME
-      || name === DELEGATE_TEAM_MEMBER_TOOL_NAME
       || name === WRITE_AGENT_DEFINITION_TOOL_NAME
       || tool?.mutating === true;
   }

@@ -33,7 +33,6 @@ const PRESENTATION: Record<string, { title: string; icon: string }> = {
   todo_write: { title: '更新任务', icon: '☑' },
   subagent: { title: '子代理', icon: '⑂' },
   send_message: { title: '发送消息', icon: '✉' },
-  wait_agent: { title: '等待代理', icon: '◷' },
   list_agents: { title: '代理列表', icon: '⑂' },
   interrupt_agent: { title: '中断代理', icon: '■' },
   exit_plan_mode: { title: '提交计划', icon: '◫' },
@@ -113,8 +112,6 @@ function summarizeArguments(name: string, args: Record<string, unknown>): string
       const message = stringValue(args['message']) ?? '';
       return `${target} · ${firstLine(message)}`;
     }
-    case 'wait_agent':
-      return '';
     case 'interrupt_agent':
       return stringValue(args['agent_id']) ?? '';
     case 'list_agents':

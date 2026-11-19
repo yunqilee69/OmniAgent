@@ -62,13 +62,14 @@ describe('ModeStore', () => {
     });
     expect(saved).toMatchObject({
       id: 'research', name: 'Research', description: 'Read-only research.',
-      agent: 'default', tools: ['read_file', 'grep'], skills: ['docs'],
+      agent: 'default', tools: '*', skills: '*',
       builtIn: false, customized: true, valid: true,
     });
     expect((await store.get('research'))?.name).toBe('Research');
     const file = JSON.parse(await readFile(modesPath, 'utf8')) as { version: number; modes: Record<string, unknown> };
     expect(file.version).toBe(1);
     expect(file.modes.research).toMatchObject({ name: 'Research', agent: 'default' });
+    expect(file.modes.research).toMatchObject({ tools: '*', skills: '*' });
   });
 
   it('gives the built-in creator mode every configuration tool', async () => {
@@ -78,15 +79,17 @@ describe('ModeStore', () => {
     expect(creator?.valid).toBe(true);
   });
 
-  it('accepts MCP tool names in a mode allowlist', async () => {
+  it('keeps MCP narrowing on team members without granting it to a single mode', async () => {
     const { store } = await fixture();
     const saved = await store.save('mcp', {
+      type: 'team',
       name: 'MCP',
       agent: 'default',
-      tools: ['read_file', 'mcp__filesystem__read_text_file'],
+      members: [{ id: 'reader', name: 'Reader', agent: 'default', tools: ['read_file', 'mcp__filesystem__read_text_file'], skills: [] }],
     });
     expect(saved.valid).toBe(true);
-    expect(saved.tools).toContain('mcp__filesystem__read_text_file');
+    expect(saved.members[0]?.tools).toBe('*');
+    expect(saved.members[0]?.skills).toBe('*');
   });
 
   it('rejects an invalid mode before writing it to disk', async () => {
@@ -97,14 +100,13 @@ describe('ModeStore', () => {
     expect((await store.list()).some((mode) => mode.id === 'broken')).toBe(false);
   });
 
-  it('rejects unknown tools without disturbing an existing modes file', async () => {
+  it('ignores obsolete tool fields on a single-agent mode', async () => {
     const { store, modesPath } = await fixture();
     await store.save('safe', { name: 'Safe', agent: 'default' });
     const before = await readFile(modesPath, 'utf8');
-    await expect(store.save('unsafe', { name: 'Unsafe', agent: 'default', tools: ['not_a_tool'] }))
-      .rejects.toThrow(/Unknown tool/);
-    expect(await readFile(modesPath, 'utf8')).toBe(before);
-    expect((await store.list()).some((mode) => mode.id === 'unsafe')).toBe(false);
+    const saved = await store.save('unsafe', { name: 'Unsafe', agent: 'default', tools: ['not_a_tool'] });
+    expect(saved).toMatchObject({ tools: '*', skills: '*', valid: true });
+    expect(JSON.parse(await readFile(modesPath, 'utf8')).modes.unsafe).toMatchObject({ tools: '*', skills: '*' });
   });
 
   it('reads an old mode without type as a single-agent mode and saves a team', async () => {
@@ -124,7 +126,7 @@ describe('ModeStore', () => {
     });
     expect(team).toMatchObject({
       type: 'team',
-      members: [{ id: 'reader', agent: 'default', tools: ['read_file'] }],
+      members: [{ id: 'reader', agent: 'default', tools: '*' }],
       policy: { maxActive: 2, maxDepth: 1, failure: 'stop', allowGoal: false },
     });
   });
@@ -189,6 +191,6 @@ describe('ModeStore', () => {
     }));
     const modes = await store.list();
     expect(modes.find((mode) => mode.id === 'stale')).toMatchObject({ valid: false });
-    expect(modes.find((mode) => mode.id === 'badtools')).toMatchObject({ valid: false });
+    expect(modes.find((mode) => mode.id === 'badtools')).toMatchObject({ tools: '*', valid: true });
   });
 });

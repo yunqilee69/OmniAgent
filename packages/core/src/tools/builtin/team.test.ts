@@ -36,7 +36,8 @@ function fakeService(entries: SubagentListEntry[] = []) {
     async send() { return { messageId: 'message-1' }; },
     async list() { return entries; },
     async wait() { return { id: 'child-1', status: 'completed' }; },
-    async waitForInput() { return { timedOut: false }; },
+    async waitForStartedChildren() { return []; },
+    trackChild() {},
     async interrupt() { return true; },
     canStart() { return true; },
   };
@@ -49,7 +50,7 @@ describe('team delegation', () => {
   it('renders member ids and the concurrency limit for the coordinator', () => {
     const guidance = renderTeamGuidance(members, 2);
     expect(guidance).toContain('You are the coordinator, not a worker');
-    expect(guidance).toContain('delegate_team_member');
+    expect(guidance).toContain('subagent');
     expect(guidance).toContain('"researcher"');
     expect(guidance).toContain('Researcher');
     expect(guidance).toContain('Focus on primary sources.');
@@ -70,8 +71,6 @@ describe('team delegation', () => {
       prompt: 'Focus on primary sources.\n\nDo it',
       agent: 'explorer',
       binding: { version: 2, kind: 'agent' },
-      tools: '*',
-      skills: '*',
       maxSteps: 50,
     });
   });
@@ -107,7 +106,7 @@ describe('team delegation', () => {
     const request = model.requests[0]!;
     expect(request.system).toContain('You are the coordinator, not a worker');
     expect(request.system).toContain('"researcher"');
-    expect(request.tools.map((tool) => tool.name)).toContain('delegate_team_member');
-    expect(request.tools.map((tool) => tool.name)).not.toContain('subagent');
+    expect(request.tools.map((tool) => tool.name)).toContain('subagent');
+    expect(request.tools.map((tool) => tool.name)).not.toContain('delegate_team_member');
   });
 });

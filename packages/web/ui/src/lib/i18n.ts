@@ -786,7 +786,7 @@ const zh: Record<string, string> = {
   // Modes, agents and role settings.
   'Mode presets': '模式预设',
   'Agents': '智能体',
-  'A mode sets the agent, default model, tools and skills a new session starts with. Choose it when creating a session; the mode cannot be changed afterwards.':
+  'A mode chooses the agent and default model for a new session. Tools and skills come from that agent. The mode cannot be changed afterwards.':
     '模式决定新会话使用的智能体、默认模型、工具与 Skill。创建会话时选择，创建后模式不可更改。',
   'Custom modes': '自定义模式',
   'Customized': '已自定义',
@@ -815,6 +815,8 @@ const zh: Record<string, string> = {
   'Add member': '添加成员',
   'Member id': '成员 ID',
   'Member name': '成员名称',
+  'Member model': '成员模型',
+  'Each member uses its agent’s tools and skills. Its model can follow the agent role or override it for this team.': '每个成员使用所属智能体的工具和 skill。模型可以跟随智能体角色，也可以在此覆盖。',
   'Member agent': '成员智能体',
   'Member instructions': '成员指令',
   'Optional instructions prepended to every task delegated to this member.':
@@ -839,17 +841,17 @@ const zh: Record<string, string> = {
   'Loading tool catalog…': '正在加载工具目录…',
   'No skills were discovered in this workspace. Add .agents/skills or keep All skills.':
     '当前工作区未发现 Skill。可添加 .agents/skills，或保留“全部 Skill”。',
-  'No custom modes yet. Create one to combine an agent with its own model, tools and skills.':
+  'No custom modes yet. Create one to choose an agent and its default model.':
     '还没有自定义模式。创建一个模式，将智能体与其专属模型、工具和 Skill 组合起来。',
   'Could not load modes: {message}': '无法加载模式：{message}',
   'Choose a mode': '选择模式',
   'Choose a mode for this session': '为新会话选择模式',
-  'The mode sets the agent, default model, tools and skills for the whole session. The model can be overridden before or during the conversation; to use a different mode, create a new session.':
+  'The mode chooses the agent and default model. Tools and skills come from the agent. The model can be changed later; use a new session to change the mode.':
     '模式决定整个会话使用的智能体、默认模型、工具与 Skill。模型可在创建前覆盖或在对话中切换；如需更换模式本身，请新建会话。',
   'No usable modes are configured.': '尚未配置可用的模式。',
   'Mode for this session: {mode}. Modes are fixed when the session is created.':
     '当前会话模式：{mode}。模式在创建会话时即已固定。',
-  'Agents define identity and instructions. Modes combine one agent with the tools, model and skills a session can use.':
+  'Agents define identity, instructions, tools and skills. A mode chooses one agent and its default model.':
     '智能体定义身份与指令；模式则将智能体与会话可用的工具、模型和 Skill 组合在一起。',
   'Built-in agents': '内置智能体',
   'New agent': '新建智能体',

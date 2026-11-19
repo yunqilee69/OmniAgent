@@ -47,6 +47,8 @@ export interface AgentLoopDeps {
   toolSpecs?: () => ToolSpec[];
   /** Drain messages delivered while a turn is running (agent messaging/notices). */
   takeQueuedMessages?: () => Message[];
+  /** Await platform work spawned by a completed tool batch before the next model request. */
+  afterToolBatch?: (signal: AbortSignal) => Promise<Message[]>;
   /** One-shot manual compaction request, consumed before the next model request. */
   takeForceCompact?: () => boolean;
   permissions: PermissionGate;
@@ -306,6 +308,19 @@ export class AgentLoop {
       }
 
       messages.push({ role: 'tool', results });
+      if (this.deps.afterToolBatch) {
+        try {
+          messages.push(...await this.deps.afterToolBatch(callSignal));
+        } catch (error) {
+          if (callSignal.aborted) {
+            yield { type: 'turn.end', reason: 'interrupted' };
+            return messages;
+          }
+          yield { type: 'error', error: agentErrorFromUnknown(error) };
+          yield { type: 'turn.end', reason: 'error' };
+          return messages;
+        }
+      }
     }
 
     yield { type: 'turn.end', reason: 'max_steps' };
