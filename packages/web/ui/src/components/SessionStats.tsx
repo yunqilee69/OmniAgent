@@ -6,7 +6,7 @@ import {
 } from '../../vendor/primitives/index.ts';
 import { useApp } from '../lib/store.ts';
 import type { SessionEntry } from '../lib/store.ts';
-import type { SessionMetrics } from '../lib/session-metrics.ts';
+import { emptyMetrics, type SessionMetrics } from '../lib/session-metrics.ts';
 import { translator, type Locale, type Translate } from '../lib/i18n.ts';
 import {
   formatCacheHitPercent, formatDuration, formatExactTokens, formatTokens, formatTokensPerSecond,
@@ -86,7 +86,8 @@ const ActivityPill = memo(function ActivityPill({ stats, t }: { stats: SessionMe
     : null;
   const speedText = speed === null ? null : t('{tps} tok/s', { tps: speed });
   const icon = <IconGaugeOutlineRegular />;
-  if (stats.steps.started === 0) return null;
+  // Zero is a reading, not an absence: a fresh session shows `0 turns 0 steps`
+  // in place of the line that would otherwise appear later and shift the dock.
   const content = { stat: 'activity', icon, ...reading(counts, speedText) };
   const llmMs = stats.requests.durationMs ?? 0;
   if (llmMs <= 0 && stats.tools.durationMs <= 0 && stats.ttft.count === 0 && speedText === null) {
@@ -116,18 +117,21 @@ const UsagePill = memo(function UsagePill({ stats, locale, t }: {
 }): ReactNode {
   const prompt = stats.usage.inputTokens;
   const output = stats.usage.outputTokens;
-  if (prompt === null && (output === null || output === 0)) return null;
   const promptTokens = prompt ?? 0;
   const outputTokens = output ?? 0;
   const cachedInput = stats.cache.count > 0 ? stats.cache.cachedInputTokens : null;
   const uncachedInput = cachedInput === null ? null : Math.max(0, promptTokens - cachedInput);
   const total = promptTokens + outputTokens;
   const cacheHit = cachedInput === null ? null : formatCacheHitPercent(cachedInput, promptTokens);
-  const cacheHitText = cacheHit === null ? null : t('Cache hit {percent}%', { percent: cacheHit });
+  // An unknown cache hit rate is unknown, never 0% or 100%: the dash keeps it
+  // from being read as a measurement.
+  const cacheHitText = cacheHit === null ? t('Cache hit —') : t('Cache hit {percent}%', { percent: cacheHit });
   const icon = <IconDatabaseOutlineRegular />;
+  // The pill labels its own scope: this is the whole session's spend, while the
+  // meter beside it is the current occupancy of the session's model window.
   return (
     <DialogPill stat="usage" icon={icon}
-      {...reading(t('{count} tok', { count: formatTokens(total, t) }), cacheHitText)}
+      {...reading(t('Session total {count} tok', { count: formatTokens(total, t) }), cacheHitText)}
       title={t('Token usage')} titleValue={t('{count} tok', { count: formatExactTokens(total, locale) })}
       details={(
         <dl className={dialogCss.details} data-session-stats-usage>
@@ -153,8 +157,9 @@ const UsagePill = memo(function UsagePill({ stats, locale, t }: {
 export function SessionStats({ entry }: { entry: SessionEntry | null }): ReactNode {
   const app = useApp();
   const t = translator(app.locale);
-  const stats = entry?.run?.metrics ?? entry?.metrics ?? null;
-  if (stats === null) return null;
+  // No entry, no metrics, or metrics that never reported usage all read zero:
+  // the dock is the same height before and after the session says anything.
+  const stats = entry?.run?.metrics ?? entry?.metrics ?? emptyMetrics();
   return (
     <>
       <ActivityPill stats={stats} t={t} />

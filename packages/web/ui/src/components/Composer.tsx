@@ -69,6 +69,13 @@ import {
   replaceRange,
   skillReference,
 } from '../lib/composer-trigger.ts';
+import {
+  draftAttachmentRecord,
+  resolveDraftAttachmentStore,
+  sanitizeDraftAttachments,
+  type DraftAttachment,
+  type DraftAttachmentStore,
+} from '../lib/draft-attachments.ts';
 import { attachmentFileName, clipboardFiles } from '../lib/clipboard.ts';
 import { rankLike } from '../lib/matcher.ts';
 import { relativeDate } from '../lib/trajectory.ts';
@@ -146,6 +153,27 @@ function readBase64(file: File): Promise<string> {
     };
     reader.readAsDataURL(file);
   });
+}
+
+/**
+ * Whether the draft's attachments have finished loading back from storage.
+ *
+ * Restoring is asynchronous, so a list written while it runs could overwrite the
+ * record still being read. Adding and sending are therefore *blocked* until it
+ * settles rather than queued (plan §6.5-D2); the two decisions share this predicate.
+ */
+export function draftAttachmentsSettled(restoring: boolean): boolean {
+  return !restoring;
+}
+
+/**
+ * Stored attachments as rail items: re-validated against `key` (the store already
+ * did this on read) and, for images, given back the preview the record cannot hold.
+ */
+export function restoredAttachments(stored: readonly DraftAttachment[], key: string): Attachment[] {
+  return sanitizeDraftAttachments(stored, key).map((item) => (item.kind === 'image'
+    ? { ...item, preview: `data:${item.mimeType};base64,${item.data}` }
+    : item));
 }
 
 export function GoalDock({ entry, t }: { entry: Pick<SessionEntry, 'goal' | 'goalGrant'> | null; t: Translate }): ReactNode {
@@ -268,6 +296,15 @@ export function Composer({ hero = false, onOpenPlanPreview }: { hero?: boolean; 
   const [attachmentError, setAttachmentError] = useState('');
   const [readingFiles, setReadingFiles] = useState(false);
   const readingFilesRef = useRef(false);
+  // Attachments are restored per draft key from IndexedDB. While that read runs the
+  // rail is not interactive, and `attachmentsWarning` marks the degraded case where
+  // the list lives in memory only (no IndexedDB, quota, write failure).
+  const [attachmentsLoading, setAttachmentsLoading] = useState(false);
+  const [attachmentsWarning, setAttachmentsWarning] = useState(false);
+  // Bumped on every draft switch so a read that resolves late cannot land in another
+  // draft's rail (switching sessions faster than IndexedDB answers).
+  const attachmentGeneration = useRef(0);
+  const attachmentStore = useRef<DraftAttachmentStore | null | undefined>(undefined);
   const [plusOpen, setPlusOpen] = useState(false);
   const [files, setFiles] = useState<WorkspaceFileEntry[]>([]);
   const [filesLoading, setFilesLoading] = useState(false);
@@ -293,11 +330,27 @@ export function Composer({ hero = false, onOpenPlanPreview }: { hero?: boolean; 
   const menuOpen = mode !== null;
   const menuKey = `${mode ?? 'none'}:${triggerVisible ? triggerKey : ''}`;
 
+  // Resolved on first use: the adapter owns one IndexedDB connection for the page's
+  // lifetime, and reaching for the platform global while rendering would break SSR.
+  const draftStore = (): DraftAttachmentStore | null => {
+    if (attachmentStore.current === undefined) attachmentStore.current = resolveDraftAttachmentStore();
+    return attachmentStore.current;
+  };
+  /** Forget the stored attachments of a draft, e.g. once they were sent. */
+  const forgetAttachments = async (draftKey: string): Promise<void> => {
+    const adapter = draftStore();
+    if (adapter === null) return;
+    try {
+      await adapter.remove(draftKey);
+    } catch {
+      // Forgetting is best-effort: a sent message must never fail on cleanup.
+    }
+  };
+
   useEffect(() => {
     const previous = drafts.current;
-    if (previous.key !== key) {
-      setAttachments([]);
-      setAttachmentError('');
+    const switched = previous.key !== key;
+    if (switched) {
       if (key !== null && previous.key !== null
         && previous.text.trim() !== '' && draftFollowsSession(previous.target, target)) {
         // Moving an unstarted session to another workspace keeps what was typed;
@@ -310,7 +363,84 @@ export function Composer({ hero = false, onOpenPlanPreview }: { hero?: boolean; 
       }
       setDraft(drafts.current.text);
     }
+    // Attachments follow the same key, but their record lives in IndexedDB and is
+    // therefore read back asynchronously. Runs on mount too, so a page reload
+    // restores what was attached before it (plan §6.5-D2).
+    attachmentGeneration.current += 1;
+    const generation = attachmentGeneration.current;
+    setAttachments([]);
+    setAttachmentError('');
+    setAttachmentsWarning(false);
+    if (key === null) {
+      setAttachmentsLoading(false);
+      return;
+    }
+    const restoreKey = key;
+    const adapter = draftStore();
+    if (adapter === null) {
+      // No persistence in this browser at all: keep working in memory and say so.
+      setAttachmentsLoading(false);
+      setAttachmentsWarning(true);
+      return;
+    }
+    // An unstarted session dragged to another workspace keeps its attachments: its
+    // record is moved to the new key instead of being left behind.
+    const migrateFrom = switched && previous.key !== null && draftFollowsSession(previous.target, target)
+      ? previous.key
+      : null;
+    const current = (): boolean => generation === attachmentGeneration.current && currentKey.current === restoreKey;
+    setAttachmentsLoading(true);
+    void (async () => {
+      let stored: DraftAttachment[] = [];
+      let persisted = true;
+      try {
+        if (migrateFrom !== null) {
+          stored = await adapter.read(migrateFrom);
+          if (!current()) return;
+          if (stored.length > 0) {
+            persisted = await adapter.write(restoreKey, stored);
+            if (!current()) return;
+            if (persisted) await adapter.remove(migrateFrom);
+          }
+        } else {
+          stored = await adapter.read(restoreKey);
+          if (!current()) return;
+        }
+      } catch {
+        // Neither read nor write throws by contract; a broken adapter must still not
+        // strand the composer in the restoring state.
+        if (current()) {
+          setAttachmentsLoading(false);
+          setAttachmentsWarning(true);
+        }
+        return;
+      }
+      setAttachments(restoredAttachments(stored, restoreKey));
+      setAttachmentsWarning(!persisted);
+      setAttachmentsLoading(false);
+    })();
   }, [key]);
+
+  /**
+   * Replace the stored record of a draft: `[]` drops it, anything else is validated by
+   * `draftAttachmentRecord` inside the store before it is written, so a later restore
+   * accepts exactly what was saved. A failure degrades to session-only attachments.
+   */
+  const persistAttachments = async (draftKey: string, items: readonly Attachment[]): Promise<void> => {
+    const adapter = draftStore();
+    let stored = false;
+    try {
+      stored = adapter !== null && (items.length === 0 || draftAttachmentRecord(draftKey, items) !== null)
+        ? await adapter.write(draftKey, items)
+        : false;
+    } catch {
+      // Neither branch throws by contract; a broken adapter still must not surface here.
+      stored = false;
+    }
+    // A write that lands after switching drafts says nothing about the draft on screen.
+    if (draftKey !== currentKey.current) return;
+    setAttachmentsWarning(!stored);
+  };
 
   useEffect(() => {
     // A dismissal belongs to one trigger; once the trigger leaves the draft,
@@ -440,14 +570,17 @@ export function Composer({ hero = false, onOpenPlanPreview }: { hero?: boolean; 
   const busy = run !== undefined || entry?.running === true;
   const saving = entry?.permissionSaving === true || entry?.agentSaving === true || entry?.modelSaving === true || entry?.planSaving === true;
   const selectedPermission = isPermissionPreset(entry?.permission) ? entry.permission : null;
-  const canSend = available && !saving && !sending && !readingFiles && selectedPermission !== null
-    && entry?.agent !== null && entry?.binding !== null && (draft.trim() !== '' || attachments.length > 0)
+  // Sending a draft whose attachments are still being restored would carry a partial
+  // list, so the send waits for that read instead of racing it.
+  const canSend = draftAttachmentsSettled(attachmentsLoading) && available && !saving && !sending && !readingFiles
+    && selectedPermission !== null && entry?.agent !== null && entry?.binding !== null
+    && (draft.trim() !== '' || attachments.length > 0)
     && (run === undefined || (run.stopping !== true && run.finishing !== true));
   const locked = !available || busy || saving;
   // Model and permission switches are recorded for the next turn, so a running
   // turn does not block them; only a missing session or a pending write does.
   const switchLocked = !available || saving;
-  const attachLocked = !available || saving || sending || readingFiles;
+  const attachLocked = !draftAttachmentsSettled(attachmentsLoading) || !available || saving || sending || readingFiles;
   const placeholder = app.workspaceId === null ? t('Select a workspace')
     : creating ? t('Create a session to begin')
       : app.sessionId === null ? t('Select a session to begin')
@@ -640,6 +773,14 @@ export function Composer({ hero = false, onOpenPlanPreview }: { hero?: boolean; 
   };
 
   const submit = async (complementary = false): Promise<void> => {
+    if (!draftAttachmentsSettled(attachmentsLoading)) {
+      // Enter still reaches the draft while the rail is inert; explain why the send was
+      // skipped only when there was something to send, so an empty draft stays silent.
+      if (draft.trim() !== '' || attachments.length > 0) {
+        store.showAlert(t('Wait for the draft attachments to finish restoring.'));
+      }
+      return;
+    }
     const text = draft.trim();
     if ((text === '' && attachments.length === 0) || !canSend || sendingRef.current) return;
     const goalCommand = text.match(/^\/goal(?:\s+([\s\S]+))?$/u);
@@ -656,7 +797,10 @@ export function Composer({ hero = false, onOpenPlanPreview }: { hero?: boolean; 
       try {
         const granted = await store.grantGoal();
         if (!granted) return;
-        if (key !== null) clearComposerDraft(key);
+        if (key !== null) {
+          clearComposerDraft(key);
+          void forgetAttachments(key);
+        }
         if (drafts.current.key === key) drafts.current.text = '';
         setDraft('');
         setCaret(0);
@@ -680,13 +824,17 @@ export function Composer({ hero = false, onOpenPlanPreview }: { hero?: boolean; 
           : await store.steerMessage(text, payload)
         : await store.sendMessage(text, payload);
       if (accepted) {
-        // The text now lives in the conversation, so its cached draft goes away.
-        if (key !== null) clearComposerDraft(key);
+        // The text and its attachments now live in the conversation, so both caches go.
+        if (key !== null) {
+          clearComposerDraft(key);
+          void forgetAttachments(key);
+        }
         if (drafts.current.key === key) drafts.current.text = '';
         if (currentKey.current === key) {
           setDraft('');
           setAttachments([]);
           setAttachmentError('');
+          setAttachmentsWarning(false);
           setCaret(0);
         }
       }
@@ -739,6 +887,9 @@ export function Composer({ hero = false, onOpenPlanPreview }: { hero?: boolean; 
 
   const addFiles = async (picked: readonly File[]): Promise<void> => {
     if (picked.length === 0 || readingFilesRef.current) return;
+    // While the stored record is being read back, adding is refused rather than
+    // queued: the partial list would overwrite what is still being restored.
+    if (!draftAttachmentsSettled(attachmentsLoading)) return;
     readingFilesRef.current = true;
     setReadingFiles(true);
     setAttachmentError('');
@@ -776,8 +927,11 @@ export function Composer({ hero = false, onOpenPlanPreview }: { hero?: boolean; 
         }
       }
       if (currentKey.current === key) {
-        if (next.length > 0) setAttachments((current) => [...current, ...next]);
+        const merged = [...attachments, ...next];
+        if (next.length > 0) setAttachments(merged);
         if (errors.length > 0) setAttachmentError([...new Set(errors)].join(' '));
+        // One write per batch: the record always mirrors the rail exactly.
+        if (next.length > 0 && key !== null) void persistAttachments(key, merged);
       }
     } finally {
       readingFilesRef.current = false;
@@ -788,6 +942,8 @@ export function Composer({ hero = false, onOpenPlanPreview }: { hero?: boolean; 
   const onPaste = (event: ClipboardEvent<HTMLTextAreaElement>): void => {
     const files = clipboardFiles(event.clipboardData);
     if (files.length === 0) return;
+    // A file paste is ignored — not swallowed — while the draft's attachments load.
+    if (!draftAttachmentsSettled(attachmentsLoading)) return;
     // Only file pastes are intercepted; text pastes keep the textarea default.
     event.preventDefault();
     if (!attachLocked) void addFiles(files);
@@ -959,6 +1115,15 @@ export function Composer({ hero = false, onOpenPlanPreview }: { hero?: boolean; 
             </div>
           </div>
         )}
+        {(attachmentsLoading || attachmentsWarning) && (
+          // Above the rail, never an alert: it explains the rail's state without
+          // blocking typing or sending (plan §6.5-D2).
+          <div className={attachmentCss.notice} role="status">
+            {attachmentsLoading
+              ? t('Restoring attachments…')
+              : t('Kept for this session only; a refresh may lose these attachments.')}
+          </div>
+        )}
         {attachments.length > 0 && (
           <div className={clsx(css.accessory, attachmentCss.rail)} aria-label={t('Files')}>
             {attachments.map((attachment) => (
@@ -976,7 +1141,12 @@ export function Composer({ hero = false, onOpenPlanPreview }: { hero?: boolean; 
                 )}
                 <button type="button" className={attachmentCss.remove}
                   aria-label={`${t('Remove attachment')}: ${attachment.name}`}
-                  onClick={() => { setAttachments((current) => current.filter((item) => item.id !== attachment.id)); }}>
+                  onClick={() => {
+                    const remaining = attachments.filter((item) => item.id !== attachment.id);
+                    setAttachments(remaining);
+                    // Rewrite immediately: an empty list is what drops the record.
+                    if (key !== null) void persistAttachments(key, remaining);
+                  }}>
                   <IconCloseOutlineRegular size={12} />
                 </button>
               </div>
@@ -1003,6 +1173,7 @@ export function Composer({ hero = false, onOpenPlanPreview }: { hero?: boolean; 
           <div className={css.tools}>
             <button ref={plusButton} type="button" className={css.add} aria-label={t('Add files or run commands')}
               aria-haspopup="listbox" aria-expanded={plusOpen} disabled={attachLocked}
+              aria-disabled={attachLocked || undefined}
               onMouseDown={(event) => { event.preventDefault(); }}
               onClick={() => {
                 setPlusOpen((current) => !current);
@@ -1161,7 +1332,8 @@ export function Composer({ hero = false, onOpenPlanPreview }: { hero?: boolean; 
           <SessionStats entry={entry} />
           <ContextMeter workspaceId={app.workspaceId} sessionId={app.sessionId}
             draft={draftSession} busy={busy} modelSaving={entry?.modelSaving === true}
-            modelKey={JSON.stringify(binding)} locale={app.locale} />
+            modelKey={JSON.stringify(binding)} locale={app.locale}
+            turnTick={entry?.contextTick ?? 0} />
         </div>
       </div>
       <RiskConfirmation

@@ -7,7 +7,10 @@ import type { ModelClient, ModelRequest, ModelResponse } from './providers/types
 import { FakeModel, textResponse, toolCallResponse } from './providers/fake';
 import { providerRequestError } from './providers/errors';
 import { toOpenAIMessages } from './providers/openai';
-import { Session } from './session';
+import { estimateModelHistory, Session } from './session';
+import type { SessionOptions } from './session';
+import { contextBreakdown } from './context/projection';
+import { estimateMessages } from './context/compaction';
 import { SessionStore } from './session/store';
 import { projectMessages } from './session/projection';
 import { ToolRegistry } from './tools/registry';
@@ -28,6 +31,21 @@ const noopTool: Tool = {
     return { content: 'ok' };
   },
 };
+
+/**
+ * Window that leaves `messageBudget` tokens for messages under this session's
+ * derived budget.
+ *
+ * The loop derives the message budget as `window - system - tools -
+ * outputReserve`, so a raw window number no longer means "history budget". A
+ * probe session built from the same options reports the overhead the loop will
+ * subtract; callers pass `outputTokenReserve: 0` to keep the arithmetic exact.
+ */
+function budgetWindow(options: SessionOptions, messageBudget: number): number {
+  const probe = new Session({ ...options, model: new FakeModel([]) });
+  const breakdown = probe.contextProjection()?.breakdown;
+  return (breakdown?.systemTokens ?? 0) + (breakdown?.toolsTokens ?? 0) + messageBudget;
+}
 
 function snapshot(preset: DshPermissionPreset): DshPermissionSnapshot {
   return snapshotDshPermissions({ status: 'ready', preset });
@@ -343,10 +361,11 @@ describe('Session', () => {
   it('records compaction metadata before yielding the event', async () => {
     const root = await mkdtemp(join(tmpdir(), 'omniagent-session-compact-'));
     const handle = await new SessionStore(root).create({ id: 'agent', workspace: root, cwd: root });
-    const session = new Session({
+    const options: SessionOptions = {
       cwd: root, model: new FakeModel([textResponse('first'), textResponse('done')]), dshPermissions: snapshot('read-only'),
-      approve: async () => 'deny', contextWindowTokens: 8, retainContextTokens: 2, session: handle,
-    });
+      approve: async () => 'deny', outputTokenReserve: 0, retainContextTokens: 2, session: handle,
+    };
+    const session = new Session({ ...options, contextWindowTokens: budgetWindow(options, 8) });
     await collect(session.send('earlier sensitive conversation '.repeat(30)));
     let compacted = false;
     for await (const event of session.send('sensitive conversation '.repeat(30))) {
@@ -360,6 +379,109 @@ describe('Session', () => {
       expect(JSON.stringify(fresh.events.at(-1)?.data)).not.toContain('sensitive conversation');
     }
     expect(compacted).toBe(true);
+  });
+
+  it('projects the running turn at every step instead of waiting for it to end', async () => {
+    const root = await temporaryWorkspace('omniagent-session-mid-turn-projection-');
+    const model = new FakeModel([
+      toolCallResponse([{ id: 'c1', name: 'noop', args: {} }]),
+      textResponse('done'),
+    ]);
+    const session = new Session({
+      cwd: root, model, tools: new ToolRegistry().register(noopTool),
+      dshPermissions: snapshot('danger-full-access'), approve: async () => 'deny',
+    });
+
+    const readings: Array<{ event: AgentEvent['type']; estimate: number; projected: number }> = [];
+    for await (const event of session.send('start')) {
+      if (event.type !== 'turn.start' && event.type !== 'assistant.message' && event.type !== 'tool.result') continue;
+      const projection = session.contextProjection();
+      const estimate = session.contextMessageEstimate();
+      expect(projection).toBeDefined();
+      expect(estimate).toBeDefined();
+      readings.push({ event: event.type, estimate: estimate ?? 0, projected: projection?.projectedTokens ?? 0 });
+    }
+
+    // One reading per step boundary: the turn start, then each message the loop
+    // publishes, for both steps.
+    expect(readings.map((reading) => reading.event)).toEqual([
+      'turn.start', 'assistant.message', 'tool.result', 'turn.start', 'assistant.message',
+    ]);
+    // At each step start the reading is exactly the layout that request carries.
+    expect(readings[0]!.estimate).toBe(estimateMessages(model.requests[0]!.messages));
+    expect(readings[3]!.estimate).toBe(estimateMessages(model.requests[1]!.messages));
+    // The assistant message is in the layout as soon as it exists.
+    expect(readings[1]!.estimate).toBeGreaterThan(readings[0]!.estimate);
+    // A tool batch is published after all of its results, so the tool.result
+    // event still shows the layout without it.
+    expect(readings[2]!.estimate).toBe(readings[1]!.estimate);
+    expect(readings[4]!.estimate).toBeGreaterThan(readings[3]!.estimate);
+    // The projection charges the prompt and the tools on top of the messages.
+    expect(readings[0]!.projected).toBeGreaterThan(readings[0]!.estimate);
+    // After the turn the reading comes from the transcript again.
+    expect(session.activeTurn).toBe(false);
+    expect(session.contextMessageEstimate()).toBe(estimateModelHistory(session.messages));
+    expect(session.contextMessageEstimate()).toBe(readings.at(-1)!.estimate);
+  });
+
+  it('projects the compacted layout mid-turn instead of the raw transcript', async () => {
+    const root = await temporaryWorkspace('omniagent-session-compacted-projection-');
+    const handle = await new SessionStore(root).create({ id: 'agent', workspace: root, cwd: root });
+    await handle.append({ type: 'message/user', data: { text: 'old '.repeat(400) } });
+    const model = new FakeModel([textResponse('first'), textResponse('second')]);
+    const options: SessionOptions = {
+      cwd: root, model, dshPermissions: snapshot('read-only'), approve: async () => 'deny', session: handle,
+      outputTokenReserve: 0,
+    };
+    const session = new Session({ ...options, contextWindowTokens: budgetWindow(options, 100) });
+    const idle = session.contextMessageEstimate();
+    expect(idle).toBeGreaterThan(100);
+
+    const compacted: number[] = [];
+    const later: number[] = [];
+    for await (const event of session.send('continue')) {
+      if (event.type === 'context.compacted') compacted.push(session.contextMessageEstimate() ?? 0);
+      if (event.type === 'assistant.message') later.push(session.contextMessageEstimate() ?? 0);
+    }
+
+    expect(compacted).toHaveLength(1);
+    expect(compacted[0]).toBeLessThan(idle!);
+    // The next step reads the compacted layout: the loop's history is what the
+    // request carries, so a later step must not fall back to the raw transcript.
+    expect(later).toHaveLength(1);
+    expect(later[0]).toBeLessThan(idle!);
+    expect(session.messages[0]).toMatchObject({
+      role: 'user', content: [{ type: 'text', text: expect.stringContaining('[conversation summary]') }],
+    });
+  });
+
+  it('drops the mid-turn layout when the turn is interrupted', async () => {
+    const root = await temporaryWorkspace('omniagent-session-interrupted-projection-');
+    const started = deferred<void>();
+    const model: ModelClient = {
+      name: 'interruptible',
+      async complete(request): Promise<ModelResponse> {
+        return new Promise<ModelResponse>((_, reject) => {
+          request.signal?.addEventListener('abort', () => reject(new Error('aborted')), { once: true });
+          started.resolve();
+        });
+      },
+    };
+    const session = new Session({
+      cwd: root, model, dshPermissions: snapshot('read-only'), approve: async () => 'deny',
+    });
+
+    const turn = collect(session.send('hello'));
+    await started.promise;
+    expect(session.contextProjection()).toBeDefined();
+    session.interrupt();
+    expect((await turn).at(-1)).toEqual({ type: 'turn.end', reason: 'interrupted' });
+
+    // A stale snapshot must not outlive the turn: the idle reading is the
+    // transcript's own estimate.
+    expect(session.activeTurn).toBe(false);
+    expect(session.contextMessageEstimate()).toBe(estimateModelHistory(session.messages));
+    expect(session.contextProjection()?.breakdown.messageTokens).toBe(estimateModelHistory(session.messages));
   });
 
   it('honors a manual compaction request on the next turn', async () => {
@@ -726,11 +848,13 @@ describe('Session', () => {
     expect(session.messages).toEqual(projectMessages(afterContinuation));
   });
 
-  it('repairs incomplete batches before compacting history for the next request', async () => {
+  it('repairs incomplete batches before compacting and adopts the compacted history', async () => {
     const root = await mkdtemp(join(tmpdir(), 'omniagent-session-compact-replay-'));
     const store = new SessionStore(root);
     const handle = await store.create({ id: 'agent', workspace: root, cwd: root });
-    await handle.append({ type: 'message/user', data: { text: 'old conversation '.repeat(100) } });
+    await handle.append({ type: 'message/user', data: { text: 'older context '.repeat(100) } });
+    await handle.append({ type: 'message/user', data: { text: 'old conversation '.repeat(40) } });
+    await handle.append({ type: 'message/user', data: { text: 'old conversation '.repeat(40) } });
     await handle.append({
       type: 'message/assistant',
       data: toolCallResponse([
@@ -742,10 +866,12 @@ describe('Session', () => {
       callId: 'c1', name: 'noop', ok: true, content: 'real result', truncated: false,
     } } });
     const model = new FakeModel([textResponse('continued'), textResponse('continued again')]);
-    const session = new Session({
+    const options: SessionOptions = {
       cwd: root, model, dshPermissions: snapshot('read-only'), approve: async () => 'deny', session: handle,
-      contextWindowTokens: 200, retainContextTokens: 150,
-    });
+      outputTokenReserve: 0, retainContextTokens: 150,
+    };
+    const session = new Session({ ...options, contextWindowTokens: budgetWindow(options, 500) });
+    const beforeLength = projectMessages(handle.events).length;
 
     const events = await collect(session.send('continue'));
 
@@ -756,9 +882,49 @@ describe('Session', () => {
       { role: 'tool', tool_call_id: 'c1', content: 'real result' },
       { role: 'tool', tool_call_id: 'c2', content: expect.stringMatching(/unknown/i) },
     ]);
+    // The compacted history is adopted even though the turn needed a repair:
+    // otherwise the next turn would compact the same messages again and the
+    // idle reading would jump back to the pre-compaction size.
+    const unadopted = projectMessages(handle.events);
+    expect(unadopted).toHaveLength(beforeLength + 2);
+    expect(session.messages.length).toBeLessThan(unadopted.length);
+    expect(session.messages[0]).toMatchObject({
+      role: 'user', content: [{ type: 'text', text: expect.stringContaining('[conversation summary]') }],
+    });
+    // Adoption is in memory only: the log still holds the exact event record,
+    // with one real tool result and no summary.
+    const persisted = handle.events;
+    expect(persisted.filter((event) => event.type === 'message/tool-result')).toHaveLength(1);
+    expect(JSON.stringify(persisted)).not.toContain('conversation summary');
+
     const secondEvents = await collect(session.send('continue again'));
-    expect(secondEvents.some((event) => event.type === 'context.compacted')).toBe(true);
+    expect(secondEvents.some((event) => event.type === 'context.compacted')).toBe(false);
     expectProviderToolCallsPaired(toOpenAIMessages('system', model.requests[1]!.messages));
+    expect(model.requests[1]!.messages[0]).toMatchObject({
+      role: 'user', content: [{ type: 'text', text: expect.stringContaining('[conversation summary]') }],
+    });
+  });
+
+  it('keeps the transcript when a repaired turn did not compact', async () => {
+    const root = await mkdtemp(join(tmpdir(), 'omniagent-session-repair-only-'));
+    const handle = await new SessionStore(root).create({ id: 'agent', workspace: root, cwd: root });
+    await handle.append({ type: 'message/user', data: { text: 'first' } });
+    await handle.append({
+      type: 'message/assistant',
+      data: toolCallResponse([{ id: 'c1', name: 'noop', args: {} }]).message,
+    });
+    const model = new FakeModel([textResponse('continued')]);
+    const session = new Session({
+      cwd: root, model, dshPermissions: snapshot('read-only'), approve: async () => 'deny', session: handle,
+    });
+
+    const events = await collect(session.send('continue'));
+
+    expect(events.some((event) => event.type === 'context.compacted')).toBe(false);
+    // A repair alone is provider input only: no synthetic tool result reaches
+    // the transcript or the in-memory history.
+    expect(session.messages).toEqual(projectMessages(handle.events));
+    expect(model.requests[0]!.messages.filter((message) => message.role === 'tool')).toHaveLength(1);
   });
 
   it('interrupts pending approval without executing the tool, even if approval later resolves', async () => {

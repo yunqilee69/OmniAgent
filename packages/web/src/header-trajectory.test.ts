@@ -3,6 +3,7 @@ import { renderToStaticMarkup } from 'react-dom/server';
 import { afterEach, describe, expect, it, vi } from 'vitest';
 import { Header } from '../ui/src/components/Header.tsx';
 import { RightPanel } from '../ui/src/components/RightPanel.tsx';
+import { seedLayout } from '../ui/src/lib/right-panel-tabs.ts';
 import { AppStore, store } from '../ui/src/lib/store.ts';
 
 vi.mock('react', async (importOriginal) => {
@@ -56,8 +57,8 @@ describe('conversation header and trajectory entry', () => {
     setSession({ title: 'Example session', plan: { active: false } });
     const html = renderToStaticMarkup(createElement(RightPanel, {
       fullscreen: false,
-      view: 'guide',
-      onViewChange: () => {},
+      layout: seedLayout(),
+      onAction: () => {},
       onClose: () => {},
       onToggleFullscreen: () => {},
     }));

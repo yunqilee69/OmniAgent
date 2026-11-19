@@ -2,7 +2,7 @@ import { readFileSync } from 'node:fs';
 import { createElement } from 'react';
 import { renderToStaticMarkup } from 'react-dom/server';
 import { describe, expect, it } from 'vitest';
-import { ContextMeter } from '../ui/src/components/ContextMeter.tsx';
+import { ContextMeter, ContextMeterPanel } from '../ui/src/components/ContextMeter.tsx';
 import {
   carryProjection, contextCapacity, contextOccupancy, READING_SLOT, splitReadingSentence,
 } from '../ui/src/lib/context-reading.ts';
@@ -11,7 +11,7 @@ import type { ContextEstimate } from '../ui/src/lib/wire.ts';
 
 const props = {
   workspaceId: null, sessionId: null, draft: false, busy: false,
-  modelSaving: false, modelKey: '', locale: 'en' as const,
+  modelSaving: false, modelKey: '', locale: 'en' as const, turnTick: 0,
 };
 
 const settled: ContextEstimate = {
@@ -23,7 +23,7 @@ const settled: ContextEstimate = {
 };
 
 describe('context meter', () => {
-  it('renders nothing until the session reports occupancy and a model window', () => {
+  it('renders nothing at all without a workspace and sends no request', () => {
     expect(renderToStaticMarkup(createElement(ContextMeter, props))).toBe('');
   });
 
@@ -31,6 +31,48 @@ describe('context meter', () => {
     const markup = renderToStaticMarkup(createElement(ContextMeter, { ...props, workspaceId: 'w', sessionId: 's', busy: true }));
     expect(markup).toContain('0%');
     expect(markup).toContain('aria-haspopup="dialog"');
+    // An unsettled ring names its own state instead of waiting silently.
+    expect(markup).toContain('No reading yet.');
+  });
+
+  it('shows the same zero ring for a new-session draft', () => {
+    const markup = renderToStaticMarkup(createElement(ContextMeter, { ...props, workspaceId: 'w', draft: true }));
+    expect(markup).toContain('0%');
+    expect(markup).toContain('No reading yet.');
+  });
+
+  it('prompts for a first reading in the panel until a projection arrives', () => {
+    const markup = renderToStaticMarkup(createElement(ContextMeterPanel, { value: null, locale: 'en' }));
+    expect(markup).toContain('role="dialog"');
+    expect(markup).toContain('0%');
+    expect(markup).toContain('No reading yet.');
+    expect(markup).not.toContain('this session’s model window');
+  });
+
+  it('names the session model window as the denominator once a projection arrives', () => {
+    const markup = renderToStaticMarkup(createElement(ContextMeterPanel, { value: settled, locale: 'en' }));
+    expect(markup).toContain('~50K / 200K');
+    expect(markup).toContain('title="The denominator is this session’s model window."');
+    expect(markup).toContain('role="note"');
+    expect(markup).toContain('The denominator is this session’s model window.');
+    expect(markup).not.toContain('No reading yet.');
+  });
+
+  it('lists the breakdown at 0 percent when the model window is unknown', () => {
+    const markup = renderToStaticMarkup(createElement(ContextMeterPanel, {
+      value: { projection: settled.projection }, locale: 'en',
+    }));
+    expect(markup).toContain('0%');
+    expect(markup).toContain('This model has no known context window.');
+    expect(markup).toContain('System prompt');
+    expect(markup).not.toContain('this session’s model window');
+  });
+
+  it('localizes both readings', () => {
+    expect(translate('zh', 'No reading yet.')).toBe('还没有读数。');
+    expect(translate('zh', 'The denominator is this session’s model window.')).toBe('分母为本会话模型窗口。');
+    const markup = renderToStaticMarkup(createElement(ContextMeterPanel, { value: settled, locale: 'zh' }));
+    expect(markup).toContain('分母为本会话模型窗口。');
   });
 
   it('names the reading once, without doubling the percent sign', () => {

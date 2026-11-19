@@ -157,7 +157,14 @@ export interface SessionOptions {
   /** Extra attempts after a retryable model failure. Defaults to 2. */
   maxRetries?: number;
   contextWindowTokens?: number;
+  /** Keep at most this many recent tokens when compacting; clamped to half the budget. */
   retainContextTokens?: number;
+  /**
+   * The selected model's output ceiling. The loop reserves it out of the context
+   * window before deriving how much history it may send; absent falls back to a
+   * share of the window (TUI and subagents do not pass it yet).
+   */
+  outputTokenReserve?: number;
   sessionId?: string;
   audit?: AuditSink;
   tools?: ToolRegistry;
@@ -223,6 +230,13 @@ export class Session {
   readonly #dshPermissions: DshPermissionSnapshot | undefined;
   private history: Message[] = [];
   private readonly loop: AgentLoop;
+  /**
+   * The messages the running turn will actually send, mirrored from the loop.
+   * Kept only while a turn is active: the loop owns the authoritative order
+   * (including compaction results) and `this.history` is a transcript that may
+   * be a step behind.
+   */
+  #projectionHistory: readonly Message[] | undefined;
   private readonly contextProvider: string;
   private readonly contextModel: string;
   private readonly tools: ToolRegistry;
@@ -496,6 +510,10 @@ export class Session {
       ...(options.maxRetries === undefined ? {} : { maxRetries: options.maxRetries }),
       ...(options.contextWindowTokens === undefined ? {} : { contextWindowTokens: options.contextWindowTokens }),
       ...(options.retainContextTokens === undefined ? {} : { retainContextTokens: options.retainContextTokens }),
+      ...(options.outputTokenReserve === undefined ? {} : { outputTokenReserveTokens: options.outputTokenReserve }),
+      // Contract from the loop: called synchronously, never awaited. This only
+      // assigns a reference, so it cannot throw mid-turn.
+      onTurnHistory: (messages) => { this.#projectionHistory = messages; },
       ...(options.audit ? { audit: options.audit } : {}),
     });
   }
@@ -508,16 +526,24 @@ export class Session {
     return this.history;
   }
 
-  /** Projection of the next request. During a turn the loop owns mutable history. */
+  /**
+   * Projection of the next request.
+   *
+   * During a turn the loop owns the mutable history, so the mirror it published
+   * at the last step boundary is what the next request will carry — compacted
+   * history included. Reading `this.history` mid-turn would show a stale,
+   * larger transcript that the next step never sends.
+   */
   contextProjection(): ReturnType<typeof projectContext> | undefined {
-    if (this.activeTurn) return undefined;
-    return projectContext(projectImageInput(projectCommandInput(prepareModelHistory(this.history).messages), this.modelCapabilities?.imageInput), this.systemText(), this.visibleToolSpecs(),
+    const history = this.activeTurn ? this.#projectionHistory ?? this.history : this.history;
+    return projectContext(projectImageInput(projectCommandInput(prepareModelHistory(history).messages), this.modelCapabilities?.imageInput), this.systemText(), this.visibleToolSpecs(),
       this.contextProvider, this.contextModel);
   }
 
-  /** Estimate the prepared history for the next turn, only when idle. */
+  /** Estimate the prepared history for the next request, mid-turn included. */
   contextMessageEstimate(): number | undefined {
-    return this.activeTurn ? undefined : estimateModelHistory(this.history, this.modelCapabilities?.imageInput);
+    const history = this.activeTurn ? this.#projectionHistory ?? this.history : this.history;
+    return estimateModelHistory(history, this.modelCapabilities?.imageInput);
   }
 
   get cwd(): string {
@@ -1059,9 +1085,13 @@ export class Session {
     let failed = false;
     let recordedError = false;
     let pendingAudit = false;
+    let compactedThisTurn = false;
     let stopReason: StopReason = 'interrupted';
 
     try {
+      // Seeded from the transcript so the first mid-turn reading is available
+      // before the loop publishes its first step; the loop corrects it next.
+      this.#projectionHistory = this.history;
       const modelHistory = prepareModelHistory(this.history);
       generator = this.loop.run(modelHistory.messages, controller.signal);
 
@@ -1078,11 +1108,18 @@ export class Session {
         pendingAudit = false;
         const next = await generator.next();
         if (next.done) {
-          if (!modelHistory.repaired) this.history = next.value;
+          // Adopt the loop's history unless the only difference is a repair:
+          // the transcript stays an exact record of events, so placeholder tool
+          // results are never written back. A compaction this turn produced is
+          // adopted even then, otherwise the next turn would compact the same
+          // messages again and the idle reading would jump back to pre-compaction.
+          // No event is appended for either case.
+          if (!modelHistory.repaired || compactedThisTurn) this.history = next.value;
           return stopReason;
         }
 
         const event = next.value;
+        if (event.type === 'context.compacted') compactedThisTurn = true;
         if (event.type === 'tool.result') pendingAudit = true;
         if (event.type === 'permission.decided' || event.type === 'tool.result') {
           const callId = event.type === 'permission.decided' ? event.callId : event.result.callId;
@@ -1155,6 +1192,7 @@ export class Session {
             }
           } finally {
             if (!failed) await this.recordAbandonedPermissions();
+            this.#projectionHistory = undefined;
             this.controller = undefined;
             // A notice or external message can arrive after the last model
             // step. Its text is already in history, so retire the step queue

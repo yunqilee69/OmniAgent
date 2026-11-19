@@ -1,7 +1,7 @@
 import { describe, expect, it } from 'vitest';
 import { assistantText, text, userMessage } from '../domain/message';
 import type { Message } from '../domain/message';
-import { compactMessages, estimateMessageTokens, estimateMessages } from './compaction';
+import { compactMessages, estimateMessageTokens, estimateMessages, wireVisibleMessage } from './compaction';
 
 function toolTurn(): Message[] {
   return [
@@ -36,6 +36,45 @@ describe('context compaction', () => {
     expect(estimateMessageTokens(large)).toBe(estimateMessageTokens(one));
     expect(estimateMessageTokens(one)).toBeGreaterThan(estimateMessageTokens(userMessage('question')) + 500);
     expect(estimateMessageTokens(two) - estimateMessageTokens(one)).toBeGreaterThan(1000);
+  });
+
+  it('charges only what the provider receives, not local metering or replay', () => {
+    const plain: Message = {
+      role: 'assistant',
+      content: [text('answer')],
+      toolCalls: [{ id: 'call-1', name: 'list_dir', arguments: { path: '.' } }],
+    };
+    const withMetadata: Message = {
+      ...plain,
+      usage: { inputTokens: 9_000, outputTokens: 120, cachedInputTokens: 4_000 },
+      contextSample: {
+        provider: 'p', model: 'm', historyHash: 'hash',
+        systemTokens: 10, toolsTokens: 20, messageTokens: 30,
+      },
+      dshReplay: {
+        kind: 'deepseek-messages', version: 1, provider: 'deepseek-official', model: 'm',
+        blocks: [
+          { type: 'text', text: 'answer' },
+          { type: 'tool_use', id: 'call-1', name: 'list_dir', input: { path: '.' }, raw: '{"path":"."}' },
+        ],
+      },
+      providerReplay: {
+        kind: 'pi-ai', version: 1, provider: 'p', model: 'm', api: 'openai',
+        content: [
+          { type: 'text', text: 'answer' },
+          { type: 'toolCall', id: 'call-1', name: 'list_dir', arguments: { path: '.' } },
+        ],
+      },
+    };
+
+    // The replay blocks re-encode the same text and tool arguments; charging
+    // them again measured one request twice (1.16×–3.48× on real sessions).
+    expect(estimateMessageTokens(withMetadata)).toBe(estimateMessageTokens(plain));
+    expect(wireVisibleMessage(withMetadata)).toEqual(plain);
+    expect(wireVisibleMessage(withMetadata)).not.toBe(withMetadata);
+    // Messages without local metadata are passed through unchanged.
+    const question = userMessage('hello');
+    expect(wireVisibleMessage(question)).toBe(question);
   });
 
   it('preserves protected groups while removing other oversized history', async () => {

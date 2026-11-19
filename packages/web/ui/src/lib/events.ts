@@ -9,6 +9,72 @@ function itemId(prefix: string): string {
   return `${prefix}-${nextItemId}`;
 }
 
+/**
+ * Deterministic identity for one hydrated message.
+ *
+ * A refreshed transcript must keep the same React keys as the one it replaces,
+ * otherwise every reload remounts the conversation and loses expanded blocks and
+ * scroll position. Live items keep {@link itemId} because only one live run can
+ * exist per session; hydrated items derive their id from their position instead.
+ * @param prefix - `u` for a user message, `a` for an assistant reply.
+ * @param messageIndex - index of the message in the hydrated history.
+ */
+function hydratedMessageId(prefix: 'u' | 'a', messageIndex: number): string {
+  return `${prefix}:${messageIndex}`;
+}
+
+/**
+ * Deterministic identity for one hydrated tool call.
+ *
+ * A call id is stable across reloads, so it is the id when present; a result
+ * without a call id falls back to its position in the message.
+ * @param callId - persisted call id, possibly empty.
+ * @param messageIndex - index of the message that carries the call.
+ * @param resultIndex - index of the result inside that message.
+ */
+function hydratedToolId(callId: string, messageIndex: number, resultIndex: number): string {
+  return callId === '' ? `t:${messageIndex}:${resultIndex}` : `t:${callId}`;
+}
+
+function usageKey(usage: MessageUsage | undefined): string {
+  return usage === undefined ? '' : `${usage.inputTokens}/${usage.outputTokens}`;
+}
+
+/**
+ * Content key used to match a hydrated item against the transcript on screen.
+ *
+ * Matching is deliberately narrow: same kind, same turn and the same visible
+ * content. Anything else keeps the deterministic id, so a changed reply becomes
+ * a new reply instead of silently inheriting the old one's component state.
+ */
+function previousKey(item: TranscriptItem): string | undefined {
+  if (item.kind === 'user') return `user|${item.turn}|${item.text}|${item.timestamp ?? ''}`;
+  if (item.kind === 'assistant') return `assistant|${item.turn}|${item.text}|${usageKey(item.usage)}`;
+  if (item.kind === 'tool') return `tool|${item.call.id}`;
+  // Notices, compactions and reasoning come from live events only; they are
+  // never produced by hydration and therefore never matched.
+  return undefined;
+}
+
+/**
+ * Borrow ids from the transcript already on screen.
+ *
+ * The returned lookup consumes one old id per match, so two identical messages
+ * still end up with two distinct ids.
+ * @param previous - transcript currently rendered, if any.
+ */
+function previousIds(previous: readonly TranscriptItem[] | undefined): (key: string) => string | undefined {
+  const buckets = new Map<string, string[]>();
+  for (const item of previous ?? []) {
+    const key = previousKey(item);
+    if (key === undefined) continue;
+    const bucket = buckets.get(key);
+    if (bucket === undefined) buckets.set(key, [item.id]);
+    else bucket.push(item.id);
+  }
+  return (key) => buckets.get(key)?.shift();
+}
+
 export interface UserAttachment {
   kind: 'image' | 'file' | 'text';
   name: string;
@@ -801,13 +867,29 @@ function assistantFailureForTurn(events: readonly unknown[], replyIndex: number)
   return latest;
 }
 
-export function hydrateTranscript(messages: readonly PublicMessage[], events: readonly unknown[] = []): {
+/**
+ * Rebuild the rendered transcript from persisted history and trace events.
+ *
+ * Ids are deterministic (see {@link hydratedMessageId}) so two hydrations of the
+ * same session produce the same keys. Passing the transcript already on screen
+ * keeps its ids wherever the content did not change, which migrates expanded
+ * blocks and scroll anchors across a reload.
+ * @param messages - persisted public history.
+ * @param events - persisted trace events, used when the history is empty.
+ * @param previous - transcript currently rendered, if any.
+ */
+export function hydrateTranscript(
+  messages: readonly PublicMessage[],
+  events: readonly unknown[] = [],
+  previous?: readonly TranscriptItem[],
+): {
   transcript: TranscriptItem[];
   turns: TurnMeta[];
 } {
   const source = messages.length > 0 ? messages : messagesFromEvents(events);
   const transcript: TranscriptItem[] = [];
   const turns = turnTiming(events);
+  const takePreviousId = previousIds(previous);
   let turnIndex = 0;
   let started = false;
   const startTurn = (): number => {
@@ -816,15 +898,21 @@ export function hydrateTranscript(messages: readonly PublicMessage[], events: re
     if (turns[turnIndex] === undefined) turns[turnIndex] = { index: turnIndex };
     return turnIndex;
   };
-  for (const message of source) {
+  for (const [messageIndex, message] of source.entries()) {
     if (message.role === 'system') continue;
     if (message.role === 'user') {
       const index = startTurn();
       const { text, attachments } = userContent(message.content);
       if (text !== '' || attachments.length > 0) {
+        const timestamp = typeof message.timestamp === 'number' && Number.isFinite(message.timestamp)
+          ? message.timestamp
+          : undefined;
         transcript.push({
-          kind: 'user', id: itemId('user'), turn: index, text,
-          ...(typeof message.timestamp === 'number' && Number.isFinite(message.timestamp) ? { timestamp: message.timestamp } : {}),
+          kind: 'user',
+          id: takePreviousId(`user|${index}|${text}|${timestamp ?? ''}`) ?? hydratedMessageId('u', messageIndex),
+          turn: index,
+          text,
+          ...(timestamp === undefined ? {} : { timestamp }),
           ...(typeof message.goalRound === 'number' ? { goalRound: message.goalRound } : {}),
           ...(attachments.length === 0 ? {} : { attachments }),
         });
@@ -839,27 +927,36 @@ export function hydrateTranscript(messages: readonly PublicMessage[], events: re
       const failure = calls.length === 0 ? assistantFailureForTurn(events, turnIndex) : undefined;
       if (text !== '' || failure !== undefined) {
         transcript.push({
-          kind: 'assistant', id: itemId('assistant'), turn: turnIndex, text, streaming: false,
+          kind: 'assistant',
+          id: takePreviousId(`assistant|${turnIndex}|${text}|${usageKey(usage)}`) ?? hydratedMessageId('a', messageIndex),
+          turn: turnIndex,
+          text,
+          streaming: false,
           ...(typeof message.timestamp === 'number' && Number.isFinite(message.timestamp) ? { timestamp: message.timestamp } : {}),
           ...(usage === undefined ? {} : { usage }),
           ...(failure === undefined ? {} : { error: failure }),
         });
       }
-      for (const call of message.toolCalls ?? []) {
+      for (const [callIndex, call] of calls.entries()) {
         if (findToolIn(transcript, call.id) === undefined) {
-          transcript.push({ kind: 'tool', id: itemId('tool'), turn: turnIndex, call });
+          transcript.push({
+            kind: 'tool',
+            id: takePreviousId(`tool|${call.id}`) ?? hydratedToolId(call.id, messageIndex, callIndex),
+            turn: turnIndex,
+            call,
+          });
         }
       }
       continue;
     }
     if (message.role === 'tool') {
-      for (const result of message.results ?? []) {
+      for (const [resultIndex, result] of (message.results ?? []).entries()) {
         const existing = findToolIn(transcript, result.callId);
         if (existing !== undefined) existing.result = result;
         else {
           transcript.push({
             kind: 'tool',
-            id: itemId('tool'),
+            id: takePreviousId(`tool|${result.callId}`) ?? hydratedToolId(result.callId, messageIndex, resultIndex),
             turn: turnIndex,
             call: { id: result.callId, name: result.name, arguments: {} },
             result,

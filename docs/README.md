@@ -37,6 +37,7 @@
 | [adr/](adr/) | 已做出的架构决策：背景、候选、结论、后果 |
 | [notes/](notes/) | 对 Codex、Claude Code 等外部实现的调研笔记 |
 | [spec/](spec/) | 事件协议、eval harness 等自有规格 |
+| [plan/](plan/) | 实施计划与执行记录 |
 
 ## 推荐阅读路线
 

@@ -13,6 +13,20 @@
   overflow: hidden;
 }
 
+/* Every dock page stays mounted so switching tabs never refetches; the inactive
+   ones are `hidden`, which needs an explicit rule to beat the flex display. */
+.page {
+  display: flex;
+  flex: 1;
+  flex-direction: column;
+  min-width: 0;
+  min-height: 0;
+}
+
+.page[hidden] {
+  display: none;
+}
+
 /* Dockkit strip metrics: 10px top margin inside a 38px row, chips and
    controls sharing the 28px content band. */
 .tabStrip {
@@ -26,33 +40,99 @@
   border-bottom: 0.5px solid var(--dsw-alias-border-l3);
 }
 
+/* Tabs scroll sideways once they outgrow the strip; the scrollbar itself stays
+   hidden so the 28px chip band keeps its height. */
 .stripTabs {
   display: flex;
   flex: 1;
   align-items: center;
+  gap: 4px;
   min-width: 0;
   height: 28px;
-  overflow: hidden;
+  overflow-x: auto;
+  overflow-y: hidden;
+  scrollbar-width: none;
+}
+
+.stripTabs::-webkit-scrollbar {
+  display: none;
+}
+
+/* The chip holds two sibling buttons (tab + close) so a close button is never
+   nested inside the tab button. */
+.tabSlot {
+  display: flex;
+  flex: 0 0 auto;
+  align-items: center;
+  box-sizing: border-box;
+  min-width: 80px;
+  max-width: 210px;
+  height: 28px;
+  border-radius: var(--dsw-radius-sm);
+  color: var(--dsw-alias-label-secondary);
+}
+
+.tabSlot[data-active='true'] {
+  background: var(--dsw-alias-interactive-bg-hover);
+  color: var(--dsw-alias-label-primary);
+}
+
+@media (hover: hover) {
+  .tabSlot:hover {
+    background: var(--dsw-alias-interactive-bg-hover);
+    color: var(--dsw-alias-label-primary);
+  }
 }
 
 .tab {
   display: inline-flex;
-  flex: 0 1 auto;
+  flex: 1 1 auto;
   align-items: center;
   gap: 5px;
-  min-width: 80px;
-  max-width: 210px;
+  min-width: 0;
   height: 28px;
-  padding: 0 10px;
+  padding: 0 4px 0 10px;
   border: none;
   border-radius: var(--dsw-radius-sm);
-  background: var(--dsw-alias-interactive-bg-hover);
-  color: var(--dsw-alias-label-primary);
+  background: transparent;
+  color: inherit;
   font: inherit;
   font-size: var(--dsh-content-font-size-secondary, 13px);
   line-height: 1;
   white-space: nowrap;
   cursor: pointer;
+}
+
+.tab:focus-visible {
+  outline: 1.5px solid var(--dsw-focus-ring-color, var(--dsw-alias-state-business-primary));
+  outline-offset: -1.5px;
+}
+
+.tabClose {
+  display: inline-flex;
+  flex: none;
+  align-items: center;
+  justify-content: center;
+  width: 20px;
+  height: 20px;
+  margin-right: 4px;
+  padding: 0;
+  border: none;
+  border-radius: var(--dsw-radius-sm);
+  background: transparent;
+  color: var(--dsw-alias-label-tertiary);
+  cursor: pointer;
+}
+
+@media (hover: hover) {
+  .tabClose:hover {
+    color: var(--dsw-alias-label-primary);
+  }
+}
+
+.tabClose:focus-visible {
+  outline: 1.5px solid var(--dsw-focus-ring-color, var(--dsw-alias-state-business-primary));
+  outline-offset: -1.5px;
 }
 
 .tabIcon {

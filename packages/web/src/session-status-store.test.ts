@@ -182,3 +182,101 @@ describe('workspace session status in the store', () => {
     store.dispose();
   });
 });
+
+interface BackoffHarness {
+  store: AppStore;
+  /** Delays the stream reconnect asked setTimeout for, in order. */
+  delays: number[];
+  /** How many status-stream attachments were attempted. */
+  attempts: () => number;
+}
+
+/**
+ * Boot a store whose workspace status stream is served by `serve`, and record the
+ * reconnect delays the store asks for instead of waiting them out.
+ * @param serve - builds the response for the Nth attachment attempt.
+ */
+async function bootStream(serve: (attempt: number) => Response): Promise<BackoffHarness> {
+  const delays: number[] = [];
+  let attempts = 0;
+  const realSetTimeout = globalThis.setTimeout;
+  vi.spyOn(globalThis, 'setTimeout').mockImplementation(((handler: TimerHandler, ms?: number, ...args: unknown[]) => {
+    // Only the reconnect backoff reaches into this range; test polling uses 1ms.
+    if (typeof ms === 'number' && ms >= 1_000 && ms <= 30_000) delays.push(ms);
+    return realSetTimeout(handler as () => void, 0, ...args);
+  }) as typeof setTimeout);
+  vi.stubGlobal('fetch', async (input: RequestInfo | URL, init?: RequestInit) => {
+    const url = String(input);
+    const method = init?.method ?? 'GET';
+    if (url === '/api/workspaces' && method === 'GET') {
+      return json({ workspaces: [{ id: 'a', name: 'Alpha', path: '/a' }] });
+    }
+    if (url === '/api/settings/permissions' && method === 'GET') {
+      return json({ settings: { defaultPreset: 'workspace-write', requiresSelection: false } });
+    }
+    if (url === '/api/models' && method === 'GET') return json({ models: [] });
+    if (url === '/api/agents' && method === 'GET') return json({ agents: [] });
+    if (url === '/api/roles' && method === 'GET') return json({ roles: [] });
+    if (url === '/api/workspaces/a/events' && method === 'GET') {
+      attempts += 1;
+      return serve(attempts);
+    }
+    if (url === '/api/workspaces/a/sessions' && method === 'GET') return json({ sessions: [{ id: 'open', updatedAt: 5 }] });
+    if (url.startsWith('/api/workspaces/a/sessions/') && method === 'GET') return json(detail);
+    throw new Error(`Unexpected request: ${method} ${url}`);
+  });
+  const store = new AppStore();
+  await store.bootstrap();
+  await waitFor(() => attempts >= 1);
+  return { store, delays, attempts: () => attempts };
+}
+
+/** A status stream that closes itself straight away. */
+function closingStream(frame?: string): Response {
+  return new Response(new ReadableStream<Uint8Array>({
+    start(controller) {
+      if (frame !== undefined) controller.enqueue(new TextEncoder().encode(frame));
+      controller.close();
+    },
+  }), { headers: { 'content-type': 'text/event-stream' } });
+}
+
+describe('workspace status stream backoff', () => {
+  afterEach(() => {
+    vi.restoreAllMocks();
+  });
+
+  it('backs off from one second to the thirty second cap after repeated drops', async () => {
+    const harness = await bootStream(() => closingStream());
+    await waitFor(() => harness.delays.length >= 7, 4_000);
+    expect(harness.delays.slice(0, 7)).toEqual([1_000, 2_000, 4_000, 8_000, 16_000, 30_000, 30_000]);
+    harness.store.dispose();
+  });
+
+  it('starts over once the stream delivers data again', async () => {
+    // Every attachment replays one frame, so the attempt counter never grows.
+    const harness = await bootStream(() =>
+      closingStream('data: {"type":"session.status","sessionId":"open","running":false,"pending":null}\n\n'));
+    await waitFor(() => harness.delays.length >= 3, 4_000);
+    expect(harness.delays.every((delay) => delay === 1_000)).toBe(true);
+    harness.store.dispose();
+  });
+
+  it('does not reconnect when the stream never worked', async () => {
+    const harness = await bootStream(() => json({ error: 'not found' }, 404));
+    const seen = harness.attempts();
+    await new Promise((resolve) => setTimeout(resolve, 50));
+    expect(harness.attempts()).toBe(seen);
+    expect(harness.delays).toEqual([]);
+    harness.store.dispose();
+  });
+
+  it('stops reconnecting once the store is disposed', async () => {
+    const harness = await bootStream(() => closingStream());
+    await waitFor(() => harness.delays.length >= 2, 4_000);
+    harness.store.dispose();
+    const seen = harness.attempts();
+    await new Promise((resolve) => setTimeout(resolve, 50));
+    expect(harness.attempts()).toBe(seen);
+  });
+});

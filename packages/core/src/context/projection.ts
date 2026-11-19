@@ -1,7 +1,7 @@
 import { createHash } from 'node:crypto';
 import type { Message } from '../domain/message';
 import type { ToolSpec } from '../domain/tool';
-import { estimateMessages } from './compaction';
+import { estimateMessages, wireVisibleMessage } from './compaction';
 
 export interface ContextBreakdown {
   systemTokens: number;
@@ -9,12 +9,9 @@ export interface ContextBreakdown {
   messageTokens: number;
 }
 
+/** The request a provider would receive; the same projection the meter charges for. */
 function requestMessages(messages: readonly Message[]): Message[] {
-  return messages.map((message) => {
-    if (message.role !== 'assistant') return message;
-    const { usage: _usage, contextSample: _sample, ...request } = message;
-    return request;
-  });
+  return messages.map((message) => wireVisibleMessage(message));
 }
 
 export function contextHistoryHash(messages: readonly Message[]): string {

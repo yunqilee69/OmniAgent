@@ -65,6 +65,20 @@ export interface AgentLoopDeps {
   maxRetries?: number;
   contextWindowTokens?: number;
   retainContextTokens?: number;
+  /**
+   * The model's output ceiling, reserved out of the context window before the
+   * message budget is derived. Absent falls back to a share of the window.
+   */
+  outputTokenReserveTokens?: number;
+  /**
+   * Snapshot of the messages the next request will send, pushed at every point
+   * where the loop changes them (turn entry, queued messages, compaction,
+   * assistant message, tool results, settled tool batches).
+   *
+   * Contract: called synchronously, never awaited, never wrapped in try/catch.
+   * An implementation that throws fails the turn instead of being swallowed.
+   */
+  onTurnHistory?: (messages: readonly Message[]) => void;
   audit?: AuditSink;
 }
 
@@ -109,6 +123,13 @@ export class AgentLoop {
     const currentUserIndex = messages.findLastIndex((message) => message.role === 'user');
     let protectedIndices = currentUserIndex < 0 ? [] : [currentUserIndex];
     const maxSteps = this.deps.maxSteps ?? DEFAULT_MAX_STEPS;
+    const project = (items: readonly Message[]): Message[] =>
+      projectImageInput(projectCommandInput(items), this.deps.imageInput);
+    // Both warnings describe a configuration problem that repeats every step;
+    // one line per turn is what a reader can act on.
+    let warnedNoWindow = false;
+    let warnedNoProgress = false;
+    this.publishHistory(messages);
 
     for (let step = 0; step < maxSteps; step += 1) {
       if (signal?.aborted) {
@@ -122,30 +143,65 @@ export class AgentLoop {
           if (message.role === 'user') protectedIndices.push(messages.length + index);
         });
         messages.push(...queued);
+        this.publishHistory(messages);
       }
 
       yield { type: 'turn.start', step };
 
+      // Resolve the dynamic prompt and tool disclosure once per step: both may
+      // read the filesystem or filter a live registry, and the compaction
+      // estimate has to charge for exactly what the request will carry.
+      const system = typeof this.deps.system === 'function' ? this.deps.system() : this.deps.system;
+      const tools = this.deps.toolSpecs ? this.deps.toolSpecs() : this.deps.tools.specs();
       const forceCompact = this.deps.takeForceCompact?.() === true;
-      if (this.deps.contextWindowTokens !== undefined || forceCompact) {
-        const beforeTokens = estimateMessages(projectImageInput(projectCommandInput(messages), this.deps.imageInput));
+      const window = this.deps.contextWindowTokens;
+      let messageBudget: number | undefined;
+      if (window !== undefined) {
+        const overhead = contextBreakdown(system, tools, []);
+        const outputReserve = outputTokenReserve(window, this.deps.outputTokenReserveTokens);
+        const rawBudget = window - overhead.systemTokens - overhead.toolsTokens - outputReserve;
+        if (rawBudget < 1) {
+          // A budget that cannot hold a single message is a configuration error,
+          // not a small window: clamping to one and calling the provider anyway
+          // guarantees an over-window request. Fail the turn before it is sent.
+          const message = `Context budget too small: window=${window}, system=${overhead.systemTokens}, `
+            + `tools=${overhead.toolsTokens}, outputReserve=${outputReserve}, remaining=${rawBudget}. `
+            + 'Raise contextWindowTokens/model contextWindow, lower maxTokens, or reduce tools.';
+          console.warn(`[agent-loop] ${message}`);
+          yield { type: 'error', error: { code: 'CONTEXT_BUDGET_TOO_SMALL', message } };
+          yield { type: 'turn.end', reason: 'error' };
+          return messages;
+        }
+        messageBudget = Math.max(1, rawBudget);
+      } else if (!warnedNoWindow) {
+        warnedNoWindow = true;
+        console.warn('[agent-loop] no context window configured; automatic compaction is off for this session');
+      }
+
+      if (messageBudget !== undefined || forceCompact) {
+        // The manual path keeps its own target; the automatic one may only spend
+        // what the window leaves after the prompt, the tools and the output.
         const maxTokens = forceCompact
-          ? Math.max(1, Math.floor(beforeTokens / 2))
-          : this.deps.contextWindowTokens;
-        if (maxTokens !== undefined) {
-          const compacted = await compactMessages(messages, {
-            maxTokens,
-            protectedIndices,
-            project: (history) => projectImageInput(projectCommandInput(history), this.deps.imageInput),
-            ...(forceCompact || this.deps.retainContextTokens === undefined
-              ? {}
-              : { retainTokens: this.deps.retainContextTokens }),
-          });
-          if (compacted.compacted) {
-            protectedIndices = compacted.protectedIndices ?? [];
-            messages.splice(0, messages.length, ...compacted.messages);
-            yield { type: 'context.compacted', beforeTokens, afterTokens: compacted.afterTokens };
-          }
+          ? Math.max(1, Math.floor(estimateMessages(project(messages)) / 2))
+          : messageBudget!;
+        const compacted = await compactMessages(messages, {
+          maxTokens,
+          protectedIndices,
+          project,
+          retainTokens: clampRetainTokens(this.deps.retainContextTokens, maxTokens),
+        });
+        if (compacted.compacted) {
+          protectedIndices = compacted.protectedIndices ?? [];
+          messages.splice(0, messages.length, ...compacted.messages);
+          this.publishHistory(messages);
+          yield { type: 'context.compacted', beforeTokens: compacted.beforeTokens, afterTokens: compacted.afterTokens };
+        } else if (messageBudget !== undefined && compacted.beforeTokens > messageBudget && !warnedNoProgress) {
+          // Silent failure is the complaint this warning answers: a turn that is
+          // over budget and still sends everything must say so once.
+          warnedNoProgress = true;
+          console.warn('[agent-loop] context over budget but compaction made no progress: '
+            + `before=${compacted.beforeTokens} budget=${messageBudget} removed=${compacted.removed.length} `
+            + `reason=${compacted.reason ?? 'no-removable-group'}`);
         }
       }
 
@@ -154,9 +210,9 @@ export class AgentLoop {
       try {
         const request = {
           model: this.deps.modelId,
-          system: typeof this.deps.system === 'function' ? this.deps.system() : this.deps.system,
-          messages: projectImageInput(projectCommandInput(messages), this.deps.imageInput),
-          tools: this.deps.toolSpecs ? this.deps.toolSpecs() : this.deps.tools.specs(),
+          system,
+          messages: project(messages),
+          tools,
           ...(signal ? { signal } : {}),
         };
 
@@ -236,6 +292,7 @@ export class AgentLoop {
       }
 
       messages.push(assistant);
+      this.publishHistory(messages);
       yield { type: 'assistant.message', message: assistant };
 
       if (assistant.toolCalls.length === 0 || stopReason === 'max_tokens') {
@@ -308,9 +365,11 @@ export class AgentLoop {
       }
 
       messages.push({ role: 'tool', results });
+      this.publishHistory(messages);
       if (this.deps.afterToolBatch) {
         try {
           messages.push(...await this.deps.afterToolBatch(callSignal));
+          this.publishHistory(messages);
         } catch (error) {
           if (callSignal.aborted) {
             yield { type: 'turn.end', reason: 'interrupted' };
@@ -325,6 +384,15 @@ export class AgentLoop {
 
     yield { type: 'turn.end', reason: 'max_steps' };
     return messages;
+  }
+
+  /**
+   * Push the current request history to the optional observer. The array is
+   * copied so the caller can never mutate the loop's own working set; the
+   * messages themselves are immutable.
+   */
+  private publishHistory(messages: readonly Message[]): void {
+    this.deps.onTurnHistory?.(messages.slice());
   }
 
   /**
@@ -353,6 +421,22 @@ export class AgentLoop {
     }
     return next.value;
   }
+}
+
+/**
+ * Output tokens the model may still produce, reserved out of the window.
+ *
+ * A missing value falls back to a share of the window rather than zero: the
+ * window has to hold the answer too, and a zero reserve would recreate the
+ * original bug (messages allowed to fill the whole window).
+ */
+function outputTokenReserve(window: number, configured: number | undefined): number {
+  return Math.max(0, Math.min(configured ?? Math.floor(window * 0.2), Math.floor(window / 2)));
+}
+
+/** Keep the retained suffix inside the budget it is retained from. */
+function clampRetainTokens(configured: number | undefined, messageBudget: number): number {
+  return Math.min(configured ?? Math.floor(messageBudget * 0.25), Math.max(0, Math.floor(messageBudget / 2)));
 }
 
 function retryDelayMs(attempt: number, error: AgentError): number {

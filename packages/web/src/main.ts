@@ -34,6 +34,7 @@ import { PermissionSettings } from './permissions';
 import { WebSearchConfigSettings } from './web-search-settings';
 import { SessionScheduleHost } from './schedule-host';
 import { parseWebPort, startWebHost } from './server';
+import { modelBudgetOptions } from './session-options';
 import { WorkspaceRegistry } from './workspaces';
 
 async function main(): Promise<void> {
@@ -187,8 +188,7 @@ async function main(): Promise<void> {
       dshPermissions: permissions,
       maxSteps: config.maxSteps,
       ...(resolved.maxRetries === undefined ? {} : { maxRetries: resolved.maxRetries }),
-      ...(resolved.contextWindowTokens === undefined ? {} : { contextWindowTokens: resolved.contextWindowTokens }),
-      ...(config.retainContextTokens === undefined ? {} : { retainContextTokens: config.retainContextTokens }),
+      ...modelBudgetOptions(resolved, config.retainContextTokens),
       approve: interactive ? approvals.handler(workspacePath, handle.id) : async () => 'deny',
       reviewPlan: interactive
         ? (plan, signal, requestId) => approvals.planHandler(workspacePath, handle.id)(plan, signal, requestId)

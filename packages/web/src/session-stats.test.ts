@@ -41,7 +41,8 @@ describe('session readings', () => {
     expect(html).toContain('data-composer-stat="usage"');
     expect(html).toContain('20 轮 438 步');
     expect(html).toContain('58 tok/s');
-    expect(html).toContain('178M tok');
+    // The pill labels the whole-session scope; the meter next to it is occupancy.
+    expect(html).toContain('整会话累计 178M tok');
     expect(html).toContain('缓存命中 73%');
   });
 
@@ -68,17 +69,27 @@ describe('session readings', () => {
     expect(html).not.toContain('tok/s');
   });
 
-  it('renders nothing until the session reports a reading', () => {
-    expect(render(null)).toBe('');
-    expect(render({ metrics: null, run: undefined })).toBe('');
-    expect(render({ run: undefined, metrics: { ...metrics, steps: { started: 0 } } }).includes('data-composer-stat="activity"'))
-      .toBe(false);
+  it('renders zero readings before the session reports anything', () => {
+    for (const entry of [null, { metrics: null, run: undefined }]) {
+      const html = render(entry);
+      expect(html).toContain('data-composer-stat="activity"');
+      expect(html).toContain('data-composer-stat="usage"');
+      expect(html).toContain('0 轮 0 步');
+      expect(html).toContain('整会话累计 0 tok');
+      expect(html).toContain('缓存命中 —');
+    }
+  });
+
+  it('keeps the activity reading at zero steps instead of hiding it', () => {
+    const html = render({ run: undefined, metrics: { ...metrics, steps: { started: 0 } } });
+    expect(html).toContain('data-composer-stat="activity"');
+    expect(html).toContain('20 轮 0 步');
   });
 
   it('translates the readings for the English locale', () => {
     const html = render({ metrics, run: undefined }, 'en');
     expect(html).toContain('20 turns 438 steps');
     expect(html).toContain('Cache hit 73%');
-    expect(html).toContain('178M tok');
+    expect(html).toContain('Session total 178M tok');
   });
 });

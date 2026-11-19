@@ -134,13 +134,13 @@
 
 `contextSample` 在每次成功请求后写入 assistant 消息，包含 provider / model、历史哈希和三段估算。它和 `usage` 一样不发给 provider；估算使用 UTF-8 JSON 字节 / 4，图片按每张 1,024 token 的固定近似，不读取图片真实尺寸。
 
-`Session.contextProjection()` / `contextMessageEstimate()` 只在没有活动回合时可用。Web 的 `GET .../context` 会优先使用匹配当前 preset / 模型 / revision 的 live Session，其次用 replay 构造临时 Session；运行中的回合不返回估算，避免把旧数据当成实时值。
+`Session.contextProjection()` / `contextMessageEstimate()` 随时可用：空闲时基于 `this.history`；回合中基于 AgentLoop 在 `turn.start` / `assistant.message` / `tool.result` / `turn.end` 之后发布的「下一步请求快照」，所以压缩后的读数就是下一次请求真正发送的内容，不会退回压缩前。Web 的 `GET .../context` 优先使用匹配当前 preset / 模型 / revision 的 live Session，其次用 replay 构造临时 Session：回合中只有在本 host 没有对应 live Session 时才不返回估算（replay 看不到回合内的临时历史）。`breakdown` 只描述请求构成；`window` 的语义见 §4.3——它是模型窗口，不是历史消息预算。
 
 会话指标（runs / steps / requests / usage / cache / throughput）不是新的持久化事件，而是 `projectSessionMetrics()` 对持久化 trace 和 assistant usage 的投影；Web UI 在流式过程中增量维护同一形状，并在 reconnect 时用服务器 baseline 重建。
 
 ### 3.6 为什么不在日志里补结果
 
-补写会伪造历史：模型可能以为工具执行过，或者审计与轨迹出现不存在的记录。当前设计选择「输入修复、日志保真」。代价是每次读取都要重新计算，同时压缩后的 provider 输入不会替换原始历史，后续 turn 可能重复压缩。
+补写会伪造历史：模型可能以为工具执行过，或者审计与轨迹出现不存在的记录。当前设计选择「输入修复、日志保真」。代价是每次读取都要重新计算，同时压缩后的 provider 输入不会替换原始历史，重新打开会话后可能再次压缩（同一进程内本轮压缩过的历史会被采纳，见 §4.4）。
 
 ## 4. 上下文压缩
 
@@ -148,11 +148,13 @@
 
 ```ts
 estimateMessageTokens(message) =
-  max(1, ceil(UTF8(JSON.stringify(messageWithoutUsageAndContextSample)).length / 4))
+  max(1, ceil(UTF8(JSON.stringify(wireVisibleMessage(message))).length / 4))
   + imageCount * 1024
 ```
 
-这是一个 provider 无关的保守估算，包含 JSON 字段名、tool 参数 / 结果全文，但不包含 `usage` / `contextSample`（它们是本地计量元数据，不会发给 provider）。图片不按 base64 长度计算，而是每张固定 1,024 token 的视觉近似。
+`wireVisibleMessage()` 剥掉全部「本地计量 / 回放」字段：`usage`、`contextSample`（本地计量）与 `dshReplay`、`providerReplay`（同一份可见内容的另一种编码）。它们都不以这些字段的形式发给 provider，计入就是把同一段文本算两遍——实测把真实会话高估到 1.16× / 1.58× / 3.48×，读数与压缩触发因此互相矛盾。代价是 replay 里确实会以 wire 形式提交的 `thinking` / `signature` 增量不再被计入，属于轻微低估，远好于重复计入造成的放量高估。该投影不修改持久化，也不重建消息，是「什么不算 token」的唯一入口。
+
+这是一个 provider 无关的保守估算，包含 JSON 字段名、tool 参数 / 结果全文。图片不按 base64 长度计算，而是每张固定 1,024 token 的视觉近似。
 
 ### 4.2 算法
 
@@ -174,29 +176,44 @@ estimateMessageTokens(message) =
 12. 如果压缩后 token 数没有减少，返回未压缩副本，避免「摘要反而变大」。
 13. 返回更新后的 `protectedIndices`（摘要插入后索引整体后移一位）。
 
-### 4.3 触发方式
+### 4.3 触发方式与有效预算
 
-- **自动**：配置了 `contextWindowTokens` 时，AgentLoop 每个 step 都会尝试压缩。
+- **自动**：`window` 已定义时（`config.contextWindowTokens ?? 模型目录的 contextWindow`），AgentLoop 每个 step 都按下面的**有效消息预算**判断是否压缩：
+
+  ```
+  window        = config.contextWindowTokens ?? descriptor.contextWindow   // 就是 /context 报出的 window.tokens
+  outputReserve = min(outputTokenReserveTokens ?? floor(window * 0.2), floor(window / 2))
+  overhead      = systemTokens + toolsTokens            // 与 contextBreakdown 同一估算
+  rawBudget     = window - overhead - outputReserve
+  messageBudget = max(1, rawBudget)                     // 仅在 rawBudget >= 1 时继续
+  retainTokens  = min(retainContextTokens ?? floor(messageBudget * 0.25), max(0, floor(messageBudget / 2)))
+  ```
+
+  - `contextWindowTokens` 仍然是**模型窗口**（显式配置覆盖优先），不再是历史消息预算；窗口与有效预算的差值由 system prompt、tool JSON schema 和输出预留构成。
+  - 输出预留来自模型 `maxTokens`：Web 由 `modelBudgetOptions()` 把 `resolved.modelDescriptor.maxTokens` 传成 `SessionOptions.outputTokenReserve`；TUI 与子代理尚未接线，回落 `floor(window * 0.2)`。两者都按窗口一半封顶。
+  - `retainContextTokens` 表达「想保留多少近期上下文」，实际值按有效预算钳制到一半以内（默认 1/4）。
+  - `window <= overhead + outputReserve`（即 `rawBudget < 1`）是配置错误，不是小窗口：AgentLoop 在该 step **调用 provider 之前** `yield error`（`code='CONTEXT_BUDGET_TOO_SMALL'`，消息含 `window` / `system` / `tools` / `outputReserve` / `remaining` 与调整建议）→ `yield turn.end(reason='error')` 并结束回合，不压缩、不调用 provider，同时 `console.warn` 一行。
+  - 非终止告警每回合最多一次：`contextWindowTokens` 缺失（自动压缩关闭，不是错误）、超预算但 `compactMessages` 没有进展（`reason` 区分「无可移除组」与「摘要未变小」）。
 - **手动**：`Session.requestCompaction()` 设置一次性标志；下一个 step 消费它。
   - 手动压缩的 `maxTokens = max(1, floor(beforeTokens / 2))`；
-  - 不传 `retainTokens`，因此使用默认的 1/4。
+  - `retainTokens` 仍按上面的式子钳制（默认 1/4）。
 
 两种路径都通过 `project: history => projectImageInput(projectCommandInput(history), imageInput)` 估算「真正发给 provider 的消息」：图片按 1,024 token 计，不支持图片的模型按占位文本计，`/init` 按展开后的长指令计。
 
 ### 4.4 重要限制
 
-- 压缩预算只计算 `messages`，**不包含 system prompt、tool JSON schema 和输出预留**；`contextWindowTokens` 在 AgentLoop 里是「历史消息预算」。
-- Context Meter 的投影包含 system + tools + messages，因此即使投影接近模型窗口，压缩预算仍可能只按消息部分计算；需要更保守时手动把 `contextWindowTokens` 调小。
+- 有效预算已经扣掉 system prompt、tool JSON schema 和输出预留（§4.3），所以 `window` 与「历史消息预算」不再相等；但估算仍是 provider 无关的近似（bytes/4 + 图片固定值），真实分词可能不同，预算贴边时仍可能被 provider 判超限。需要更保守时调小 `contextWindowTokens` 或 `maxTokens`。
+- 估算器剥离 `usage` / `contextSample` 与 `dshReplay` / `providerReplay`（§4.1）：代价是 replay 中确实上 wire 的 `thinking` / `signature` 增量被轻微低估，这是可接受的，远好于把它们算两遍造成的高估。
 - 没有真实摘要：AgentLoop 不传 `summarize`，被移除的内容只留下条数占位符。
 - 图片按固定 1,024 token 近似，可能高估或低估实际视觉成本。
-- 压缩结果只存在于内存 / 本次循环，**不写回会话日志**。重新打开会话会从完整历史重建，内存视图与日志视图可能不同。
-- 如果历史修复发生（`repaired=true`），本次循环的压缩结果会被整体丢弃。
+- 压缩结果只存在于内存 / 本次循环，**不写回会话日志**。重新打开会话会从完整历史重建，内存视图与日志视图可能不同；**重开会话可能再次压缩**同一批消息。
+- 历史修复（`repaired=true`）时默认仍不采纳 loop 返回的历史，占位 tool 结果永不落盘；但**本轮确实压缩过**时采纳压缩后的历史（`repaired && compactedThisTurn`）。否则下一回合会重复压缩同一批消息、空闲读数跳回压缩前。采纳只替换内存历史，不追加任何事件。
 - 受保护的用户消息可能让保留部分超过 `maxTokens`；这是有意的，优先保证当前输入和 steering 不丢失。
 
 ### 4.5 配置建议
 
-- `contextWindowTokens` 取配置值或模型目录的 `contextWindow`，是压缩触发窗口；需要为 system prompt、工具 schema 和输出预留空间时，显式配置得更小。
-- 需要保留更多近期上下文时调大 `retainContextTokens`；但保留越多，压缩越频繁。
+- `contextWindowTokens` 取配置值或模型目录的 `contextWindow`，它是**窗口**；自动压缩的实际触发点是「窗口 − system − tools − 输出预留」。需要为工具 schema 或更长输出留空间时，显式把 `contextWindowTokens` 配置得更小，或调小模型的 `maxTokens`。
+- 需要保留更多近期上下文时调大 `retainContextTokens`；但保留越多，压缩越频繁（实际值仍钳制在有效预算的一半以内）。
 - 需要真正摘要时，应在 `compactMessages` 的调用处注入 `summarize`，并接受额外的模型调用成本。
 
 ## 5. 消息投递与后台回合

@@ -134,3 +134,15 @@
     transition: none;
   }
 }
+
+/*
+ * Status line above the rail: the stored attachments of this draft are being read
+ * back, or they live in memory only because persistence is unavailable. Small and
+ * quiet — it never blocks typing, sending or the rail itself.
+ */
+.notice {
+  padding: 8px 12px 0;
+  color: var(--dsw-alias-label-tertiary, rgba(0, 0, 0, 0.45));
+  font-size: 12px;
+  line-height: 16px;
+}

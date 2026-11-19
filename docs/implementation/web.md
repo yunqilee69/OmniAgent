@@ -56,7 +56,8 @@ Web 由一个本地 Node HTTP Host（`packages/web/src`）和一个 React 工作
 - 前台：`approve = approvals.handler(...)`，`reviewPlan = approvals.planHandler(...)`；
 - 非交互（计划任务）：`approve` 一律 deny，`reviewPlan` 返回 `{ approved: false }`；
 - `creator` agent 在交互式会话中额外注入 `agentAuthoring` 与 `creator: createCreatorServices(...)`；定时/非交互 creator 会话不注入配置工具；
-- 配置服务的 `askUserTimeoutSec` 读 `askUserSettings.snapshot()`，不再从启动期 config 快照读取。
+- 配置服务的 `askUserTimeoutSec` 读 `askUserSettings.snapshot()`，不再从启动期 config 快照读取；
+- 上下文预算选项由 `packages/web/src/session-options.ts` 的 `modelBudgetOptions(resolved, config.retainContextTokens)` 展开进 `new Session(...)`：只传已配置的 `contextWindowTokens` / `retainContextTokens`，并把 `resolved.modelDescriptor?.maxTokens` 作为 `outputTokenReserve`（详见 6.1）。
 
 退出时依次关闭 schedules、mcp、subagents、host。
 
@@ -290,6 +291,7 @@ server 维护：
 
 - 帧格式 `data: {"type":"session.status","sessionId":"…","running":bool,"pending":null|"approval"|"plan-review"}\n\n`；
 - 连接先收到 `: connected` 注释，再收到当前所有运行中会话的一帧，晚到的客户端不必等下一次状态变化；
+- 空闲期每 15 秒写一行 `: ping\n\n` 注释心跳（`SessionStatusHub` 内每条连接一个 `setInterval`，默认 `DEFAULT_STATUS_HEARTBEAT_MS = 15_000`，可用组合选项 `WebHostOptions.statusHeartbeatMs` 覆盖，仅测试用）。注释行被客户端 SSE 解析器忽略，因此**不新增帧类型**；写之前检查 `destroyed` / `writableEnded`，连接关闭、工作区驱逐与 `closeAll()` 都会 `clearInterval`。心跳只挂在工作区状态流上，follow 流不在范围；
 - 推送点在回合生命周期上：`RunningTurn` 建立时推 `running: true`，`permission.requested` / `permission.decided` / `plan.review.*` 发布时重算 `pending`，回合进入 `finally` 时推 `running: false`；
 - 监听者与 follower 互不影响：断开只移除自己，取消注册工作区时统一关闭；每个工作区最多保留 64 条空闲连接，超出时关闭最早的一条，缓冲区超限的连接也会被丢弃。
 
@@ -367,6 +369,29 @@ tool.result
 - 删除会话。
 
 `LiveSessionRegistry` 默认上限 128，用于让计划任务和 Web 标签页共享同一个 Session，避免两个实例写同一日志。运行中的 `RunningTurn` 独立于 Session 缓存：它保存 baseline、事件 replay buffer 和 follower 集合，在 POST 连接断开后仍继续执行，直到回合结束或显式 interrupt。
+
+### 6.1 `/context` 与上下文预算
+
+`GET .../context` 的**路由与字段集合没变**，变化的是回合中的语义：
+
+- 本 host 持有 live `Session` 时，回合中也返回 `projection` 与 `estimatedMessageTokens`——Session 在回合中用 `onTurnHistory` 回调维护的「下一次请求会发送的消息」快照来投影，快照随每个 step 边界（含压缩后）更新，所以回合中读到的是压缩后的正确值，不是回合前的旧值；
+- 本 host 没有 live Session（回合由别的 host 持有，或运行时不可用）时，运行中仍然只有空投影；只有运行中「且没有 live 运行时」才退回日志重放（`replayContext`），因为重放看不到回合内的中间历史；
+- `window.tokens` 仍然是**模型窗口预算**（`config.contextWindowTokens` 优先，其次模型 `contextWindow`，`source` 为 `config` / `model`），也就是 ContextMeter 的分母。**有效的消息预算不通过 HTTP 暴露**：它是 AgentLoop 每步派生出来的内部值，新增字段会违反「HTTP 不变」，可观测入口是压缩触发时机与 `trace/context.compacted` 的 before/after。
+
+有效消息预算（在 `AgentLoop` 每步算一次，用同一步解析出的 `system` 与 `toolSpecs()`，并复用 `contextBreakdown` 的估算）：
+
+```text
+window        = contextWindowTokens ?? descriptor.contextWindow
+outputReserve = min(outputTokenReserveTokens ?? floor(window * 0.2), floor(window / 2))
+rawBudget     = window - systemTokens - toolsTokens - outputReserve
+rawBudget < 1 → 该步在调用 provider 之前 yield error(code='CONTEXT_BUDGET_TOO_SMALL') + turn.end(reason='error') 并返回
+messageBudget = max(1, rawBudget)          // 仅校验通过后的防御性钳制
+retainTokens  = min(retainContextTokens ?? floor(messageBudget * 0.25), floor(messageBudget / 2))
+```
+
+- `outputTokenReserve` 的来源是模型的输出上限：`packages/web/src/session-options.ts` 的 `modelBudgetOptions(resolved, retainContextTokens?)` 只在有值时返回 `contextWindowTokens` / `outputTokenReserve`（取 `resolved.modelDescriptor?.maxTokens`）/ `retainContextTokens`（缺省的键不会被写成 `undefined`，否则会改变 Session 的语义），`composeSession()` 用它一次展开进 `new Session(...)`。这个模块单独存在是为了让 Web host 与集成测试用同一份接线（`main.ts` 在导入时会启动 host，测试不能直接 import）。TUI 与 `SubagentManager` 目前不传输出预留，回落到 `window * 0.2`。
+- 预算不足是**硬错误**：`window <= system + tools + outputReserve` 时不再钳到 1 继续请求，而是该步直接 `error` + `turn.end(reason: 'error')`，错误消息含 `window` / `system` / `tools` / `outputReserve` / `remaining` 与调整建议（调大窗口或 `contextWindowTokens`、调小 `maxTokens`、减少工具），并 `console.warn` 一行；这一步不会调用 provider。
+- 两类**非终止**告警（每回合最多一次）：`contextWindowTokens` 缺失（自动压缩关闭，行为保持「不压缩」）；超预算但 `compactMessages` 没有进展（`removed=0` 或摘要没变小）。
 
 ## 7. 设置服务
 
@@ -488,26 +513,29 @@ AuthGate
    │   │   └─ Composer → PlanReviewComposer（等待计划审阅时替换输入区）
    │   │       └─ composerReadings（输入卡片下的读数行）
    │   │           ├─ SessionStats → ActivityPill / UsagePill（点开统计弹窗）
-   │   │           └─ ContextMeter（环形占比 + 上下文构成弹窗，5 秒轮询 .../context）
+   │   │           └─ ContextMeter（环形占比 + 上下文构成弹窗，按 step 边界刷新，空闲 15 秒校准 .../context）
    │   └─ TrajectoryView
-   ├─ RightPanel（guide / plan / files / preview / terminal）
+   ├─ RightPanel（多标签：guide / files / terminal / observe / plan / preview:<ws>:<path>）
    └─ NewSessionDialog
 ```
 
-认证启用时 `AuthGate` 先检查 `/api/auth/status`；登录成功后才渲染 `App`。`authFetch()` 统一携带 cookie，遇到 401 会把状态切回登录界面并清空当前 store。工作区行菜单的「查看文件列表」把左栏切成 `WorkspaceFileTree`，选中文件后在右栏预览；右栏 tab 显示「文件预览｜<文件名>」，预览由 `WorkspaceFilePreview`（薄壳）委托给 `preview/PreviewSurface`，后者按扩展名分派到具体 viewer。
+认证启用时 `AuthGate` 先检查 `/api/auth/status`；登录成功后才渲染 `App`。`authFetch()` 统一携带 cookie，遇到 401 会把状态切回登录界面并清空当前 store。工作区行菜单的「查看文件列表」把左栏切成 `WorkspaceFileTree`，选中文件后在右栏预览；右栏标签写着「文件预览｜<文件名>」，预览由 `WorkspaceFilePreview`（薄壳）委托给 `preview/PreviewSurface`，后者按扩展名分派到具体 viewer。右栏是可同时打开多个标签的 dock，标签集合与关闭规则见 9.9。
 
 输入卡片下方是一条居中的读数行（`composerReadings`），只做观测，不占输入区空间：
 
-- `SessionStats` 渲染两枚药丸：`ActivityPill`（`N 轮 M 步 · X tok/s`）和 `UsagePill`（`总 token · 缓存命中 X%`）。药丸默认是静态读数，只有存在可解释的明细时才变成按钮，点开锚定在药丸上方的弹窗；弹窗标题带精确总量，明细按「模型用时 / 工具调用用时 / 首 token 平均（TTFT）/ 输出速度（TPS）」和「缓存命中 / 未缓存输入 / 缓存读取 / 输出」分两栏列出。同一时刻只开一个弹窗，Escape 或外部点击关闭。
-- `ContextMeter` 渲染环形占比和百分比，点开是「上下文已用 X%」加三色构成条与「系统提示词 / 工具定义 / 对话消息」明细。读数按「工作区 + 会话 + 模型来源」定域：只有换会话或换模型才丢弃旧值，轮次开始/结束、轮询返回、请求失败都只更新数字，不卸载环形；一轮进行中每个 effect run 只取一次（占用在中途不会稳定），空闲时每 5 秒轮询。
-- 一轮进行中 `.../context` 不返回 `projection`（runtime 拒绝投影正在被改写的历史），所以环形保留上一次已结算的投影，只把更「新」的窗口字段换掉（`lib/context-reading.ts` 的 `carryProjection`）。否则每次轮次开始都会用一个没有投影的回答覆盖读数，环形就会在一轮里整段消失。占比分母取已解析的 `window.tokens`（配置覆盖或模型窗口，也就是压缩真正用的预算），缺失时回退到 `modelWindow`（`contextCapacity`），避免模型描述符没写窗口时环形整个不渲染。
-- 环形跟着会话走，不跟着读数走：只要有会话就渲染，还没有任何已结算投影时（会话第一轮进行中）读 0%，弹窗里写「本轮结束后出现首个读数」；一轮结束、轮询拿到投影后再结算成真实百分比（`contextOccupancy`）。新建会话的草稿态（还没有会话）不渲染环形。
+- `SessionStats` 渲染两枚药丸：`ActivityPill`（`N 轮 M 步 · X tok/s`）和 `UsagePill`（`整会话累计 N tok · 缓存命中 X%`）。读数先取 `entry.run.metrics`、再取 `entry.metrics`，两者都没有就用 `emptyMetrics()` 兜底，因此新会话、无 metrics、`steps.started === 0`、无 usage 时同样渲染 `0 轮 0 步`、`整会话累计 0 tok`、`缓存命中 —`——零值本身是读数而不是「没有」，输入区下方的高度在会话首次报数前后保持一致。缓存命中率未知时显示 `—`（`'Cache hit —'`），不会把未知命中率显示成 0% 或 100%。药丸默认是静态读数，只有存在可解释的明细时才变成按钮，点开锚定在药丸上方的弹窗；弹窗标题带精确总量，明细按「模型用时 / 工具调用用时 / 首 token 平均（TTFT）/ 输出速度（TPS）」和「缓存命中 / 未缓存输入 / 缓存读取 / 输出」分两栏列出。同一时刻只开一个弹窗，Escape 或外部点击关闭。
+- **两种口径不能混读**：`UsagePill` 的主读数是**整会话累计**（`lib/session-metrics.ts` 对每个 assistant 请求累加 `inputTokens + outputTokens`），文案固定带「整会话累计」，累加算法与 `SessionMetrics` 类型不变；`ContextMeter` 的百分比是**当前上下文占用**（下一次请求的 `projectedTokens` 除以模型窗口）。两者相邻显示、单位都是 tok，长会话里「累计 500k + 占用 40%」是正常组合，不能用累计值判断自动压缩是否失效。
+- `ContextMeter` 渲染环形占比和百分比，点开是「上下文已用 X%」加三色构成条与「系统提示词 / 工具定义 / 对话消息」明细。读数按「工作区 + 会话 + 模型来源」定域：只有换会话或换模型才丢弃旧值，更新数字时环形不卸载。
+- 刷新由**事件**驱动，不由固定轮询驱动：`store` 为每个会话维护 `contextTick`，在 `turn.start`、`assistant.message`、`tool.result`、`turn.end` 上各加一（follow 快照重放同样累加），`Composer` 把它作为 `turnTick` 传给 `ContextMeter`，后者在 effect 依赖里带上它。于是在每个 step 边界（包括工具结果落盘后）都会立刻重取一次 `.../context`，不必等回合结束；回合进行中不设定时器（占用在中途不会稳定，反复估算长历史比它给出的信息更贵），空闲时每 15 秒校准一次（`IDLE_POLL_MS`）。
+- 陈旧响应与失败：每次请求先 abort 上一次（`AbortController`），落地前再校验 `current` 与 `scope` 两重身份，晚到的旧回答不会覆盖新读数；请求失败或中断时保留上次读数，等下一个 step 边界或空闲校准重试，既不弹错也不清空。
+- 空状态共 7 种，每种都有可观察的数值或文案，不留空白：无工作区时不渲染；草稿态（有工作区、还没有会话）渲染 0% 且不发请求；会话已选、首个响应未到渲染 0% 且弹窗写「还没有读数。」；响应没有 `projection`（回合由别的 host 持有）时用 `carryProjection` 保留上次已结算的投影，从未有过则 0%；有投影但没有 `capacity` 时环形 0%、明细照列，弹窗写「This model has no known context window.」；请求失败保留上次；`scope`（会话或模型来源）变化时先清空再按上述各条处理。
+- 分母是**本会话模型窗口**：占比取 `window.tokens`（配置覆盖优先，其次模型窗口，也就是自动压缩真正使用的预算），缺失时回退到 `modelWindow`（`contextCapacity`），避免模型描述符没写窗口时环形整个不渲染。弹窗里的 `~X / Y` 带 `title` 与 `aria-label`，并在「有投影且有窗口」时于底部追加一行可见说明「分母为本会话模型窗口。」（`role="note"`），避免 `Y` 被读成整会话累计。
 - 读数全部来自服务端 `metrics` 和 `.../context` 投影，不做前端二次猜测；数字格式（K/M、分组、时长、缓存命中率）集中在 `lib/session-readings.ts`，缓存命中不会把部分命中四舍五入成 100%。
 - 样式在 `styles/dsh/stats-pills.module.css`、`stat-dialog.module.css`、`context-meter.module.css`；弹窗定位复用 `useAnchoredPosition`（视口夹取、`--dsh-anchored-max-width/height`）。
 
-输入框里还没发出去的文字按「目标」缓存（`lib/composer-drafts.ts`）：已有会话用 `[工作区, 会话]` 作键；还没落库的会话没有自己的 id（UI-only `draft-…` 每次刷新都会重新编号），所以它的草稿按工作区缓存一份，也就是「新建会话」页里输入的内容。草稿写进 `localStorage`，切换会话、切工作区、刷新页面都还在，最多保留 32 份、按写入时间淘汰，发送成功后立刻删除。把一个未落库的会话切到另一个工作区时草稿跟着走（`draftFollowsSession`），其余切换各读各自的缓存。
+输入框里还没发出去的文字按「目标」缓存（`lib/composer-drafts.ts`）：已有会话用 `[工作区, 会话]` 作键；还没落库的会话没有自己的 id（UI-only `draft-…` 每次刷新都会重新编号），所以它的草稿按工作区缓存一份，也就是「新建会话」页里输入的内容。草稿写进 `localStorage`，切换会话、切工作区、刷新页面都还在，最多保留 32 份、按写入时间淘汰，发送成功后立刻删除。把一个未落库的会话切到另一个工作区时草稿跟着走（`draftFollowsSession`），其余切换各读各自的缓存。草稿的**附件**（图片与普通文件）用同一个 draft key 存在 IndexedDB 里，与文本一起写、一起清、一起迁移，见 9.10。
 
-等待计划审阅时不再弹出遮挡式对话框：会话末尾显示计划卡片，点击卡片或输入区里的「查看计划」把完整计划以 Markdown 形式放到右栏 `plan` 视图；输入区同时切换为计划审阅模式，可直接批准，或输入反馈后继续规划。右栏保留最后一次审阅的计划，审阅结束后仍可查看。
+等待计划审阅时不再弹出遮挡式对话框：会话末尾显示计划卡片，点击卡片或输入区里的「查看计划」把完整计划以 Markdown 形式放到右栏的 `plan` 标签（单例标签：已存在就聚焦并换上新文档，绝不重复开）；输入区同时切换为计划审阅模式，可直接批准，或输入反馈后继续规划。右栏保留最后一次审阅的计划，审阅结束后仍可查看；新一轮计划只写入已打开的 `plan` 标签（`set-plan`），不会自行打开标签。
 
 侧边栏每个工作区组默认只渲染最新的 5 条会话，底部「显示更多（N）」按钮一次再放出 5 条（`SESSIONS_PER_PAGE`，按工作区记窗口大小）；当前选中的会话即使落在窗口之外也会强制显示，搜索态不做分页，命中的会话全部列出。会话行菜单的「归档会话」写入 `session/archived` 事件：行立即从列表消失，但对话记录、标题和子智能体都留在数据目录里，仍可按键入的会话 id 打开；侧边栏标题栏的归档按钮打开「归档会话」弹窗，那里拉取的是跨工作区的归档列表（`GET /api/sessions/archived`，只列主会话，子会话仍从父会话的团队卡片进入），每行标注所属工作区并可以「恢复会话」——恢复时按该行的工作区 id 调归档接口，成功后重新拉一次对应工作区的侧边栏列表。归档弹窗不再依赖当前选中的工作区，因此未选工作区时入口也可用。
 
@@ -544,11 +572,12 @@ AuthGate
   - `omniagent.busySend`
   - `omniagent.queue:<ws>:<sid>`
   - `omniagent.composerDraft:<workspaceId 或 [ws, sid]>`（输入框草稿，见 9.1）
+  - `omniagent.drafts` 库 / `draft-attachments` store（草稿附件，IndexedDB，见 9.10 —— 不是 `localStorage` 键）
 
 关键行为：
 
-- `bootstrap()`：加载工作区、会话、catalog、权限、自动归档设置；
-- `loadDetail()`：一次 patch 全部字段（含 metrics），重建 transcript / turns；
+- `bootstrap()`：加载工作区、会话、catalog、权限、自动归档设置；**不再**安装周期性详情轮询（旧的 3 秒 `scheduleDiscovery()` / `discoveryTimer` 已删除，`dispose()` 也不再清理它）；
+- `loadDetail()`：一次 patch 全部字段（含 metrics），重建 transcript / turns；重建时把屏幕上已有的 transcript 作为 `previous` 传给 `hydrateTranscript()`，内容没变的条目沿用旧 id。patch 之前先做**等价跳过**（`sameDetailContent()`）：`transcript` / `turns` / `events` / `metrics` / header / title / permission / plan / todos / mode / agent / model 等可见字段逐一比较（`loaded` / `loading` / `error` / `outcome` 这类簿记字段不算内容；会安装或摘掉 live `run` 的响应也不算等价），完全一致时只更新 `loaded` / `loading` / `error`，不替换数组、不额外 `emit()`——否则每次对账都会重挂载会话、丢掉展开态与滚动位置；
 - `startDraftSession()`：UI-only draft，不落库；
 - `persistDraftSession()`：第一条消息时创建真实会话，再补权限 / plan；
 - `startTurn()`：乐观把用户消息插入 transcript，发送 `Prefer: respond-async`，然后进入 follow 或直接消费 SSE；失败时回滚；
@@ -557,9 +586,11 @@ AuthGate
 - `stopTurn()`：先置 stopping，再 `POST interrupt`；
 - `resolveApproval()` / `resolvePlanReview()`：HTTP 回填；
 - `compactSession()`、`queueMessage()`、`steerMessage()`、`renameSession()`、`setSessionPinned()`、`setSessionArchived()`、`listArchivedSessions()`、`deleteArchivedSessions()`、`forkSession()`、`deleteSession()`、`exportSession()`；归档后行从 `sessionsByWorkspace` 移除，恢复时重新拉该工作区列表；`listArchivedSessions()` 读 `GET /api/sessions/archived`，覆盖全部已登记工作区，结果只存在于归档弹窗和设置页自己的状态里；`deleteArchivedSessions()` 把调用方列出的 id 交给 `POST /api/sessions/archived/delete`，只从本地选择里清掉服务端确认删除的会话；
-- `ensureStatusStream()` / `consumeStatusStream()`：订阅 `GET /api/workspaces/:id/events`，把宿主推送的 `session.status` 合并进 `statusBySession`；流不可用或断开时退回列表基线，只有曾经连通过才在 2 秒后重连；
+- `ensureStatusStream()` / `consumeStatusStream()`：订阅 `GET /api/workspaces/:id/events`，把宿主推送的 `session.status` 合并进 `statusBySession`；流不可用或断开时退回列表基线，只有曾经连通过才重连，并按指数退避等待（`statusReconnectDelay(attempt) = min(30_000, 1000 * 2^attempt)`，即 1s → 2s → 4s → … → 30s 封顶）。读到任何一段字节（含 `: ping` 心跳注释）就把该工作区的 `statusAttempts` 归零，于是偶发抖动立刻回到最短延迟；`dispose()` 与切换工作区清掉重连 timer，不残留固定间隔。
+- `reconcileOnce()` / `turnEndStamp()`：回合结束**只对账一次**的共用守卫。stamp 取该会话 `events` 里从后往前第一条 `trace/turn.end` 的持久 `seq`（找不到就跳过对账，不做时间或长度猜测）；`reconciledTurns`（`Map<key, { stamp, status: 'pending' | 'done' }>`）同时拦 `pending` 与 `done`，stamp 在检测到回合结束时取一次，请求本身不再改身份。`observeSessionStatus()` 与 `finishObservedRun()` 共用它，所以「状态帧先到、follow 后结束」和「follow 先结束、状态帧后到」两种顺序都只产生一次详情 GET；请求失败时清掉该条记录，让下一次状态变化重试（不自造定时器）。follow 结束的那条路径会先用重载后的事件重算一次 stamp 再记为 `done`，这样随后到达的状态帧认得同一个回合；本 tab 仍有 follow 观察者时，状态路径不额外对账；`running` 假→真仍走 `scheduleRunningPoll()` → `loadDetail()` → `followRun()`（一次性）。
 - `reconcileSessionStatuses()`：用列表基线补齐每个会话的现状（含 `lastTurn` 失败标记），与推送走同一套迁移规则；
-- `observeSessionStatus()`：处理单条推送；`running` 真→假时若该会话不是当前会话，置 `completionUnread`，并在 400 毫秒后调用 `refreshSessions()` 一次性刷新排序与结果；
+- `observeSessionStatus()`：处理单条推送；`running` 真→假时若该会话不是当前会话，置 `completionUnread`，并在 400 毫秒后调用 `refreshSessions()` 一次性刷新排序与结果；同一帧里若该会话就是当前会话，且 `run === undefined`、本 tab 没有 follow 观察者，则用 `reconcileFinishedTurn()` 走一次受 `reconcileOnce()` 保护的对账（详情因此只由真实状态变化驱动）；
+- `contextTick`：`SessionEntry` 的新字段，初值 0，在 `turn.start` / `assistant.message` / `tool.result` / `turn.end` 事件落入 `consumeStream()` 时递增（`contextTickFor()`），follow 快照重放时按快照里的事件数累加；`Composer` 把它作为 `turnTick` 传给 `ContextMeter`（见 9.1）；
 - `refreshSessions()`：静默重读列表（不改 `loading`），后台完成不会让侧栏闪空；
 - `clearCompletionReminder()`：用户打开会话时清掉完成提醒。
 
@@ -600,6 +631,12 @@ AuthGate
 - 其余进入 `process`；
 - notice 进入 `extras`；
 - 最后一个 running turn 标记为 live。
+
+**identity 是确定性的**（否则每次重载都会整段重挂载，`ConversationView` 用 `key={item.id}` 渲染）：
+
+- hydrate 出来的条目按位置取 id：user `u:<messageIndex>`、assistant `a:<messageIndex>`、tool `t:<callId>`（callId 为空时 `t:<messageIndex>:<resultIndex>`）——同一输入两次 hydrate 得到同一串 id；
+- live 事件仍用自增的 `itemId()`（一个会话同时只有一个 live 回合，不需要跨重载稳定），`compaction` / `notice` 只由 live 事件产生，hydrate 不产出它们，因此不参与对账；
+- `hydrateTranscript(messages, events, previous?)` 传入 `previous` 时，按「同 kind + 同 turn（user/assistant）/ 同 callId（tool）」加内容匹配（user：`text + timestamp`；assistant：`text + usage`；tool：`callId`）复用旧 id，把已有的展开态与滚动锚点迁到新数组上；内容变了的条目一律用确定性 id，表现成「新回复」而不是继承旧回复的组件状态。
 
 消息操作行（`MessageActions`）与运行状态行：
 
@@ -657,7 +694,8 @@ plan 模式没有常驻开关：只有输入 `/plan` 开启后，输入框才出
 - 图片 8 MB，文本 256 KB；
 - 图片 base64 预览；
 - 文本 `file.text()`；
-- 支持直接粘贴剪贴板中的截图和文件，无文件名时按 MIME 生成名称。
+- 支持直接粘贴剪贴板中的截图和文件，无文件名时按 MIME 生成名称；
+- 附件不只活在内存里：按草稿 key 存进 IndexedDB，切换会话与刷新页面后恢复（图片补回 `preview`），发送被 accepted（含 queue / steer / `/goal`）后与文本一起清掉，详见 9.10。
 
 ### 9.6 设置页
 
@@ -689,7 +727,7 @@ plan 模式没有常驻开关：只有输入 `/plan` 开启后，输入框才出
 | `path.ts` | 纯函数：扩展名 → `PreviewKind`、`sourceForPath()`（text / bytes / url / none）、`formatBytes()`、`resolveRelativePath()`。分派顺序在这里固定，`svg` 先于 code、`csv` 先于 code、`ipynb` 归 JSON |
 | `resource.ts` | `usePreviewResource()`：文本走 `files/content`，二进制走 `files/raw`，图片/音视频/PDF 直接用 `files/raw` URL；`AbortController` 取消 + 8 项 / 32 MiB LRU |
 | `registry.ts` | kind → viewer 的一张表；禁用某类型只需删一行，未知 kind 落到 `UnsupportedViewer` |
-| `PreviewChrome.tsx` | 预览内没有标题栏：dock 的 tab 已经写着「文件预览｜文件名」，工作区由会话决定。这里只提供 viewer 工具条、骨架 / 失败 / 不支持三种状态 |
+| `PreviewChrome.tsx` | 预览内没有标题栏：dock 的标签已经写着「文件预览｜文件名」，工作区由会话决定。这里只提供 viewer 工具条、骨架 / 失败 / 不支持三种状态 |
 | `PreviewSurface.tsx` | 判定 → 取字节 → 组装外壳与 viewer |
 | `viewers/*` | 每种类型一个组件 |
 | `office/*` | 零依赖 OOXML 解析：`zip.ts`（中央目录 + `DecompressionStream('deflate-raw')`）、`docx.ts`（段落/标题/列表/表格）、`xlsx.ts`（sharedStrings + sheetData + A1 定位）、`csv.ts`（RFC 4180 引号、分隔符探测） |
@@ -710,13 +748,67 @@ plan 模式没有常驻开关：只有输入 `/plan` 开启后，输入框才出
 | `html` | content | 默认源码；「渲染」走 `html/sanitize.ts` 的净化视图 |
 | 其它 | 无 | 下载卡片 + 新窗口打开 |
 
-文件树与右栏文件列表都支持右键菜单：重命名、移动到文件夹、复制相对路径、复制绝对路径、删除。菜单与三个确认对话框在 `components/FileTreeMenu.tsx`，请求封装在 `lib/file-ops.ts`；操作完成后由 `App` 递增 `refreshToken` 让所有已展开目录重新拉取，并按 `from → to` 跟随正在预览的文件（删除则关闭预览）。服务端拒绝 `.git` 与 `.omniagent` 段，避免误删仓库元数据或宿主状态。
+文件树与右栏文件列表都支持右键菜单：重命名、移动到文件夹、复制相对路径、复制绝对路径、删除。菜单与三个确认对话框在 `components/FileTreeMenu.tsx`，请求封装在 `lib/file-ops.ts`；操作完成后由 `App` 递增 `refreshToken` 让所有已展开目录与 `files` 标签页重新拉取，并向标签 reducer 派发 `rename-preview` / `remove-preview`：正在预览的文件按 `from → to` 跟随改名（包括目录下的子路径），被删除的文件（包括目录前缀）关闭对应标签，若关掉的正是激活标签则回到左邻。`WorkspaceFileTree` 的选中项取「当前激活标签是 preview 时的 path」，而不是最后打开过的文件。服务端拒绝 `.git` 与 `.omniagent` 段，避免误删仓库元数据或宿主状态。
 
 刻意不做的事：
 
 - **不引第三方预览库**：PDF 交给浏览器，Office 用平台 `DecompressionStream` 自行解包。代价是 Word 只保留结构、不还原版式（页边距、浮动图形、主题），收益是主包不增加、没有供应链面。
 - **不用 sandbox iframe 渲染 HTML**：`srcdoc` 与 `blob:` 文档都继承本文档 CSP，在 `default-src 'none'` 下渲染不出任何样式，除非整体放宽策略；净化后内联渲染既保留主题，也保持惰性。
 - **不内联 SVG**：一律走 `<img>`，避免文件里的脚本进入文档上下文。
+
+### 9.9 右栏标签（dock）
+
+右栏是「一个 reducer + 每会话一份内存布局」，渲染在 `components/RightPanel.tsx`，规则在 `lib/right-panel-tabs.ts`（纯函数，无 React / store / 浏览器存储依赖，因此可单测）。
+
+标签类型（`TabKind`）：
+
+| kind | 身份 | 说明 |
+| --- | --- | --- |
+| `guide` | 固定 id `guide` | 面板首页，`tabs[0]` 恒为它，**不可关闭**（没有 X） |
+| `files` | 固定 id | 工作区文件浏览（单例） |
+| `terminal` | 固定 id | 终端标签壳（单例）；Web 端没有终端内容分支，属既有缺口 |
+| `observe` | 固定 id | 轨迹视图（单例） |
+| `plan` | 固定 id | 计划预览（单例），文档由 `App` 持有，经 `open` / `set-plan` 进入 |
+| `preview` | `preview:<workspaceId>:<encodeURIComponent(path)>` | 资源标签，身份是「工作区 + 路径」，`line` 不含身份 |
+
+布局与动作（`RightPanelLayout = { tabs, activeId }`，`RightPanelAction` 为 `open` / `activate` / `close` / `rename-preview` / `remove-preview` / `set-plan` / `set-workspace-name`）：
+
+- `open`：单例 kind 已存在 → 激活（`plan` 同时换上新文档）；`preview` 的 id 已存在 → 激活并合并 `line`（新值有则更新、无则保留），**不新增、不挪位**；否则追加到末尾并激活；
+- `close`：`guide` 或找不到的 id → 原样返回；否则删除该标签；关掉的是激活标签时取删除后数组的**左邻**（`remaining[max(0, index - 1)]`，所以紧邻首页的标签关掉后回到 `guide`，永远不是右邻）；关掉非激活标签不改 `activeId`；
+- `rename-preview`：`workspaceId` 匹配且 `path === from || path.startsWith(from + '/')` 的预览标签改成 `to + 后缀`；新旧 id 冲突时保留 `tabs` 数组中靠前者（顺序不变），被丢弃的若是激活标签则按 `close` 的左邻规则重选；
+- `remove-preview`：关闭匹配（含目录前缀）的全部预览标签，激活标签被关时同样选左邻；
+- `set-plan`：只更新已存在的 `plan` 标签，绝不自动打开标签（不能在用户没看的时候挪动面板）；
+- `set-workspace-name`：工作区改名后刷新预览标签上的 `workspaceName`。
+
+布局归属与生命周期：`App` 用 `useRef(new Map<string, RightPanelLayout>())` 按 `layoutKey` 存布局——有真实会话时取 `sessionKey(ws, sid)`，无会话或草稿态取 `new:<workspaceId>`。切换会话 / 工作区时取该 key 的布局，首次见到则 `seedLayout()`（只有 `guide`）。布局**只在内存里**，不写 `localStorage`，刷新页面回到种子布局；关面板只关可见性，不清布局，所以重新展开会回到最后激活的标签而不是强制 `guide`（Header 的 `onToggleRight` 只 `setRightOpen(true)`）。
+
+渲染结构（`RightPanel`）：
+
+- 标签条是 `role="tablist"` + `aria-label="面板标签页"`，水平可滚动（`overflow-x: auto`、隐藏滚动条），标签 `min-width: 80px; max-width: 210px` 且超长省略；右侧 chrome 仍是「切到 guide / 全屏 / 收起」三个按钮，行为不变；
+- 每个标签是一个 `role="presentation"` 的 `div`（带 `data-tab-id` 与 `data-active`），里面是**两个兄弟按钮**：`role="tab"` + `aria-selected` 的主按钮（可访问名称就是标签标题，也是面板的 `aria-label` 来源），以及带 `aria-label="关闭标签页：<标题>"` 的关闭按钮。关闭按钮 `stopPropagation` 后只派发 `close`，点 X 不会激活该标签；外层是 `div` 而不是 `button`，从结构上杜绝 button 嵌套；
+- 内容区**所有标签都挂载**，非激活的用 `hidden` + `data-active="false"`，关闭即卸载——这样切标签不会丢展开态与滚动位置，代价是已打开的大文件预览常驻内存；
+- `files` 页面在布局里存在 `files` 标签时就拉取目录列表（不以「是否激活」为条件），避免切来切去重复请求；`hasPlan` 只决定 guide 里是否出现「计划审阅」入口卡片，它可选、缺省为 `false`（没有计划就不显示这张卡片）。
+
+### 9.10 草稿附件（IndexedDB）
+
+`lib/draft-attachments.ts` 负责把输入框的附件（图片与普通文件）落到 IndexedDB，`Composer.tsx` 负责读写时机与交互限制。
+
+存储契约（固定值，测试与文档共用）：
+
+- 库 `omniagent.drafts`，版本 1；store `draft-attachments`，`keyPath: 'draftKey'`——**一个 draft key 一条记录**；
+- 记录：`{ draftKey, attachments: Array<{ id, kind: 'image' | 'file', name, mimeType, data /* base64 */, size }>, updatedAt }`；
+- `draftKey` 复用 `composerDraftKey()` 的结果（`new:<ws>` 或 `JSON.stringify([ws, sid])`），不新增编码；
+- 每次写入成功后按 `updatedAt` 只保留最新 8 条 draft 记录（`MAX_DRAFT_ATTACHMENT_RECORDS`），单条记录内仍受 8 个 / 单个 8MiB / 合计 20MiB 约束；
+- 全部 IDB 调用都 try/catch，`factory` 缺失、`open` 失败或被 block、配额错误都归入「不可用」，不向 UI 抛错、不重试风暴；`createIndexedDbDraftStore(undefined)` 返回 `null`，`resolveDraftAttachmentStore()` 从 `globalThis.indexedDB` 取（在 Composer 里首次使用时解析，渲染期不碰平台全局，SSR 安全）。
+
+读写时机（`Composer.tsx`）：
+
+- 校验与适配器分两层：纯函数 `draftAttachmentBytes()` / `sanitizeDraftAttachments()` / `draftAttachmentRecord()` 逐条 `restoreSendAttachment` 形状校验、重算字节并与 `size` 比对、套用同一套上限；坏记录逐条丢弃，落库前走同一套校验，因此「读回来能用的」与「写进去的」永远一致；
+- key 变化（含首次挂载）时：递增 generation → 清空列表与错误 → 异步 `read(key)` → 仅当 generation 与 key 仍匹配时 `sanitizeDraftAttachments` 后再 `setAttachments`（图片补回 `preview`）→ 结束「恢复中」；未落库会话被拖到另一个工作区时，记录按 `read(old) → write(new) → remove(old)` 迁移；
+- **恢复期禁止新增与发送**：`attachmentsLoading === true` 时 `addFiles()` 直接返回（`+` 的文件选择与粘贴文件是 Web 端仅有的两条添加路径——Composer 没有文件拖拽入口），`+` 按钮 `disabled` + `aria-disabled`，`submit()` 直接返回并提示「请等待附件恢复完成再发送。」（草稿为空时不打扰）；恢复完成或失败后恢复可交互。理由是不做队列合并——用空列表覆盖正在读的记录会直接丢数据；
+- 每次新增成功后一次 `put` 整条记录，手动移除后立即重写（空数组即删除），恢复期不写；
+- 发送被 accepted（含 queue / steer / `/goal` 分支）后与文本一起清：`clearComposerDraft(key)` + `remove(key)`；
+- 降级提示：附件栏上方有 `role="status"` 小字，恢复中显示「正在恢复附件…」，不可持久化时显示「本次会话内保留，刷新可能丢失。」——不弹 alert、不阻塞输入。
 
 ## 10. 如何扩展
 
@@ -760,5 +852,10 @@ plan 模式没有常驻开关：只有输入 `/plan` 开启后，输入框才出
 - 模式允许 `mcp__<server>__<tool>` 形式的工具名；保存时只做结构校验，服务器断开或工具不存在由运行时解析处理。
 - 文本预览仍限制在 1 MiB UTF-8（`files/content`）；二进制、图片、PDF、Office、音视频走 `files/raw`，单文件上限 256 MiB。PDF 由浏览器渲染，样式随浏览器而定；Word 只还原结构与表格，不还原版式；Excel 只读单元格原值，不做数字格式与公式计算；HTML 渲染视图是白名单净化后的近似效果。
 - Context Meter 的 `projectedTokens` 是基于字节数 / 4 和图片固定成本的近似值；切换模型或历史后可能先显示估算，直到出现新的真实 usage。
+- 压缩结果不落盘：回合中的投影用压缩后的快照，刷新页面后到下一轮请求之前只能用完整日志重算，读数可能先偏大再回落。`usage` 口径的读取（`UsagePill`）是整会话累计，与 Context Meter 的当前占用不是同一个数。
+- 右栏 `terminal` 标签只有标签壳与占位文案，Web 端没有终端内容；右栏布局只在内存里（每会话一份），刷新页面回到只有 `guide` 的种子布局。
+- 草稿附件依赖浏览器 IndexedDB：不可用或被配额拒绝时降级为「本次会话内保留」，刷新会丢；附件记录与文本草稿一样按草稿淘汰（只保留最新 8 份附件记录），`localStorage` 里的文本草稿上限仍是 32 份。
+- 删除周期性详情轮询后，别的标签页改动的非运行类元数据（标题以外的字段）不会即时同步到本页，只有回合结束对账、状态推送与显式刷新（Retry / 首次选中会话）会触发一次详情 GET。
+- 确定性 transcript id 与 live 事件的 `itemId()` 不是同一套编号：回合结束的那次对账若内容确有变化，会复用旧 id 迁移状态，但仍可能有个别条目重挂载。
 - 实时 SSE、`follow` 的 `run.snapshot` 和原始会话记录不是脱敏导出格式；assistant 文本、工具参数和结果都可能含敏感内容。
 - `run.snapshot` 的 replay 有上限；溢出时 `truncated: true`，UI 会提示实时历史不完整，并在回合结束后通过会话详情对账。

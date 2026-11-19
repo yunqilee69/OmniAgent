@@ -19,18 +19,41 @@ export interface CompactionResult {
   removed: Message[];
   /** Updated protected indices after a successful compaction. */
   protectedIndices?: number[];
+  /**
+   * Why a failed attempt left the history alone. The caller reports the two
+   * cases differently: nothing removable (usually one protected message that is
+   * already too large) is a different problem from a summary that did not
+   * shrink the request.
+   */
+  reason?: 'no-removable-group' | 'no-reduction';
 }
 
 // Without image dimensions or provider-specific tiling, use a fixed approximate
 // visual cost per image. Base64 transport size is not a text token count.
 const IMAGE_TOKENS = 1024;
 
+/**
+ * The message as a provider receives it: every locally added field removed.
+ *
+ * `usage` and `contextSample` are local metering; `dshReplay` / `providerReplay`
+ * re-encode the same visible content for exact replay. Counting either again
+ * measures one body twice — real sessions were over-estimated by 1.16×–3.48×,
+ * which made the meter and the compaction trigger disagree with the wire.
+ *
+ * This is a projection only: persistence and the `Message` type are unchanged,
+ * and this function stays the single place that decides what is not sent.
+ */
+export function wireVisibleMessage(message: Message): Message {
+  if (message.role !== 'assistant') return message;
+  const {
+    usage: _usage, contextSample: _sample, dshReplay: _dshReplay, providerReplay: _providerReplay, ...visible
+  } = message;
+  return visible;
+}
+
 /** Provider-independent estimate: JSON UTF-8 bytes / 4 plus a visual allowance. */
 export function estimateMessageTokens(message: Message): number {
-  // Metering metadata is persisted for replay but is never sent to a provider.
-  const value = message.role === 'assistant'
-    ? (({ usage: _usage, contextSample: _sample, ...rest }) => rest)(message)
-    : message;
+  const value = wireVisibleMessage(message);
   let imageCount = 0;
   const projected = value.role === 'user' || value.role === 'assistant'
     ? { ...value, content: value.content.map((part) => {
@@ -97,7 +120,8 @@ export async function compactMessages(
   if (removed.length === 0) {
     // Even the oldest group cannot be dropped. Returning "compacted" here
     // would prepend a summary to the unchanged history and grow the request.
-    return { messages, compacted: false, beforeTokens, afterTokens: beforeTokens, removed: [] };
+    return { messages, compacted: false, beforeTokens, afterTokens: beforeTokens, removed: [],
+      reason: 'no-removable-group' };
   }
 
   const summary = options.summarize
@@ -113,7 +137,8 @@ export async function compactMessages(
     // compaction. Returning the original copy keeps the caller's context
     // finite instead of silently growing it. A reduced request may still
     // exceed the configured budget when no smaller group can be retained.
-    return { messages, compacted: false, beforeTokens, afterTokens: beforeTokens, removed: [] };
+    return { messages, compacted: false, beforeTokens, afterTokens: beforeTokens, removed: [],
+      reason: 'no-reduction' };
   }
 
   const retainedProtectedIndices: number[] = [];

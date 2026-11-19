@@ -630,3 +630,56 @@ describe('web client protocol', () => {
     expect(turn.planReview).toBeUndefined();
   });
 });
+
+describe('stable transcript identity', () => {
+  const history = [
+    { role: 'user' as const, content: [{ type: 'text' as const, text: 'Question' }], timestamp: 1_000 },
+    {
+      role: 'assistant' as const,
+      content: [{ type: 'text' as const, text: 'Reading' }],
+      toolCalls: [{ id: 'call-1', name: 'read_file', arguments: { path: 'a.ts' } }],
+      timestamp: 2_000,
+    },
+    { role: 'tool' as const, results: [{ callId: 'call-1', name: 'read_file', content: 'contents', ok: true, truncated: false }] },
+    { role: 'assistant' as const, content: [{ type: 'text' as const, text: 'Answer' }], timestamp: 3_000 },
+  ];
+
+  it('derives the same ids for the same history', () => {
+    const first = hydrateTranscript(history).transcript.map((item) => item.id);
+    const second = hydrateTranscript(history).transcript.map((item) => item.id);
+    expect(second).toEqual(first);
+    expect(first).toEqual(['u:0', 'a:1', 't:call-1', 'a:3']);
+  });
+
+  it('names a tool result after its call id and falls back to its position', () => {
+    const { transcript } = hydrateTranscript([], [
+      { type: 'tool/result', data: { callId: 'call-9', name: 'bash', content: 'ok', ok: true, truncated: false } },
+      { type: 'tool/result', data: { callId: '', name: 'bash', content: 'no id', ok: true, truncated: false } },
+    ]);
+    expect(transcript.map((item) => item.id)).toEqual(['t:call-9', 't:1:0']);
+  });
+
+  it('keeps the previous id when the content did not change and drops it when it did', () => {
+    const previous = hydrateTranscript(history).transcript;
+    const unchanged = hydrateTranscript(history, [], previous).transcript;
+    expect(unchanged.map((item) => item.id)).toEqual(previous.map((item) => item.id));
+
+    const edited = history.map((message) => (message.role === 'assistant' && message.timestamp === 3_000
+      ? { ...message, content: [{ type: 'text' as const, text: 'Different answer' }] }
+      : message));
+    const changed = hydrateTranscript(edited, [], previous).transcript;
+    expect(changed.map((item) => item.id)).toEqual(['u:0', 'a:1', 't:call-1', 'a:3']);
+    // The unchanged user turn still borrows the id it had on screen.
+    expect(changed[0]!.id).toBe(previous[0]!.id);
+    // Two identical replies on screen keep two distinct ids.
+    const duplicated = hydrateTranscript([...history, history[3]!], [], previous).transcript;
+    expect(new Set(duplicated.map((item) => item.id)).size).toBe(duplicated.length);
+  });
+
+  it('matches a live transcript by content, not by its generated id', () => {
+    const live = hydrateTranscript(history, [], hydrateTranscript(history).transcript).transcript;
+    const restamped = live.map((item) => ({ ...item, id: `live-${item.id}` }));
+    const refreshed = hydrateTranscript(history, [], restamped).transcript;
+    expect(refreshed.map((item) => item.id)).toEqual(restamped.map((item) => item.id));
+  });
+});

@@ -80,7 +80,7 @@ import {
   type TranscriptItem,
   type TurnMeta,
 } from './events.ts';
-import { IDLE_SESSION_STATE, type SessionLiveState } from './session-status.ts';
+import { IDLE_SESSION_STATE, statusReconnectDelay, type SessionLiveState } from './session-status.ts';
 
 export type Theme = 'light' | 'dark';
 export type ProcessDisplay = 'collapsed' | 'expanded';
@@ -161,6 +161,12 @@ export interface SessionEntry {
   outcome: '' | 'error' | 'interrupted';
   /** The server reports an active turn even when this tab is not streaming it. */
   running: boolean;
+  /**
+   * Counts the step boundaries that change what the next request will carry.
+   * The Context Meter watches this instead of polling during a turn: `turn.start`,
+   * `assistant.message`, `tool.result` and `turn.end` each publish a new layout.
+   */
+  contextTick: number;
   queued: QueuedMessage[];
   run?: LiveTurnState;
 }
@@ -380,8 +386,16 @@ function emptyEntry(): SessionEntry {
     request: 0,
     outcome: '',
     running: false,
+    contextTick: 0,
     queued: [],
   };
+}
+
+/** One tick per event that changes the request the loop will send next. */
+function contextTickFor(type: unknown): number {
+  return type === 'turn.start' || type === 'assistant.message' || type === 'tool.result' || type === 'turn.end'
+    ? 1
+    : 0;
 }
 
 function initialTheme(): Theme {
@@ -552,7 +566,6 @@ export class AppStore {
   private draftSequence = 0;
   private draftRequest = 0;
   private readonly runningPolls = new Map<string, ReturnType<typeof setTimeout>>();
-  private discoveryTimer?: ReturnType<typeof setTimeout>;
   private readonly observers = new Map<string, AbortController>();
   private readonly followBases = new Map<string, { transcript: TranscriptItem[]; turns: TurnMeta[]; metrics?: SessionMetrics }>();
   private readonly followEvents = new Map<string, unknown[]>();
@@ -560,7 +573,16 @@ export class AppStore {
   private readonly liveRuns = new Map<string, LiveTurnState>();
   private readonly statusObservers = new Map<string, AbortController>();
   private readonly statusReconnects = new Map<string, ReturnType<typeof setTimeout>>();
+  private readonly statusAttempts = new Map<string, number>();
   private readonly statusReloads = new Map<string, ReturnType<typeof setTimeout>>();
+  /**
+   * One reconcile per finished turn, keyed by session.
+   *
+   * The stamp is the `seq` of the turn's `trace/turn.end` event, which stops
+   * changing the moment it is persisted. Status pushes and the end of a followed
+   * run therefore agree on the same identity instead of asking twice.
+   */
+  private readonly reconciledTurns = new Map<string, { stamp: number | undefined; status: 'pending' | 'done' }>();
   private disposed = false;
 
   constructor(private readonly restoreQueued = true) {
@@ -611,9 +633,10 @@ export class AppStore {
     this.disposed = true;
     for (const timer of this.runningPolls.values()) clearTimeout(timer);
     this.runningPolls.clear();
-    if (this.discoveryTimer !== undefined) clearTimeout(this.discoveryTimer);
     for (const timer of this.statusReconnects.values()) clearTimeout(timer);
     this.statusReconnects.clear();
+    this.statusAttempts.clear();
+    this.reconciledTurns.clear();
     for (const timer of this.statusReloads.values()) clearTimeout(timer);
     this.statusReloads.clear();
     for (const observer of this.statusObservers.values()) observer.abort();
@@ -1220,23 +1243,6 @@ export class AppStore {
     void this.loadMcpServers();
     void this.loadModes();
     await this.loadWorkspaces();
-    this.scheduleDiscovery();
-  }
-
-  private scheduleDiscovery(): void {
-    if (this.disposed || this.discoveryTimer !== undefined) return;
-    this.discoveryTimer = setTimeout(() => {
-      this.discoveryTimer = undefined;
-      const { workspaceId, sessionId } = this.state;
-      if (workspaceId !== null && sessionId !== null) {
-        const entry = this.state.entries[sessionKey(workspaceId, sessionId)];
-        if (entry?.loaded && !entry.draft && !entry.loading && entry.run === undefined) {
-          void this.loadDetail(workspaceId, sessionId, false, true);
-        }
-      }
-      this.scheduleDiscovery();
-    }, 3000);
-    (this.discoveryTimer as { unref?: () => void }).unref?.();
   }
 
   async loadWorkspaces(preferredId?: string): Promise<void> {
@@ -1368,16 +1374,104 @@ export class AppStore {
     if (changed) this.patch({ statusBySession: next });
   }
 
-  /** Merge one pushed state change and remember a finished run the user missed. */
+  /** Merge one pushed state change, reconcile a finished turn, and follow a new one. */
   private observeSessionStatus(workspaceId: string, sessionId: string, running: boolean, pending: SessionPendingKind | null): void {
     const key = sessionKey(workspaceId, sessionId);
     const previous = this.state.statusBySession[key] ?? IDLE_SESSION_STATE;
     const next = this.nextLiveState(workspaceId, sessionId, previous, running, running ? pending : null);
     if (sameLiveState(previous, next)) return;
     this.patch({ statusBySession: { ...this.state.statusBySession, [key]: next } });
+    // A new turn is a new reconcile target; a record kept from the previous one
+    // would otherwise look like "already done" for this turn's end.
+    if (!previous.running && running) this.reconciledTurns.delete(key);
     // A finished run changes ordering, the recorded outcome and the session
     // title, so refresh the list once instead of on every event.
     if (previous.running && !running) this.scheduleStatusReload(workspaceId);
+    if (this.isCurrent(workspaceId, sessionId)) {
+      const entry = this.state.entries[key];
+      const watched = entry !== undefined && entry.draft !== true
+        && entry.run === undefined && this.observers.get(key) === undefined;
+      // The entry's own run state follows the host whenever no live run owns it,
+      // so a run this tab never started still shows as running while it is
+      // discovered, and stops showing once the host says it settled.
+      if (watched && entry.running !== running) this.patchEntry(key, { running });
+      if (previous.running && !running) this.reconcileFinishedTurn(workspaceId, sessionId, key);
+      // A run this tab never started is invisible until its state changes: follow
+      // it once so the conversation shows the live turn instead of a stale copy.
+      else if (!previous.running && running) this.scheduleRunningPoll(workspaceId, sessionId);
+    }
+  }
+
+  /**
+   * Reconcile a turn that ended while this tab followed nothing.
+   *
+   * The pushed state only says "not running", so the details have to come from
+   * the session itself — once per turn. A turn whose end was never persisted has
+   * no identity to dedupe on, and guessing one would re-request on every frame,
+   * so it is left for the next `trace/turn.end`.
+   * @param workspaceId - workspace that owns the session.
+   * @param sessionId - session whose turn just ended.
+   * @param key - `sessionKey` of that session.
+   */
+  private reconcileFinishedTurn(workspaceId: string, sessionId: string, key: string): void {
+    if (this.observers.has(key)) return;
+    const entry = this.state.entries[key];
+    if (entry === undefined || entry.run !== undefined) return;
+    const stamp = this.turnEndStamp(key);
+    if (stamp === undefined) return;
+    void this.reconcileOnce(workspaceId, sessionId, key, stamp, true);
+  }
+
+  /**
+   * Read the `seq` of the newest persisted turn end.
+   *
+   * `turn.end` is written before the run is reported as finished and never
+   * changes afterwards, so its `seq` identifies one finished turn even when
+   * later events are appended to the same transcript.
+   * @param key - `sessionKey` of the session.
+   * @returns that `seq`, or `undefined` when no finished turn was persisted yet.
+   */
+  private turnEndStamp(key: string): number | undefined {
+    const events = this.state.entries[key]?.events ?? [];
+    for (let index = events.length - 1; index >= 0; index -= 1) {
+      const event = events[index];
+      if (typeof event !== 'object' || event === null) continue;
+      if ((event as { type?: unknown }).type !== 'trace/turn.end') continue;
+      const seq = (event as { seq?: unknown }).seq;
+      return typeof seq === 'number' && Number.isSafeInteger(seq) && seq >= 0 ? seq : undefined;
+    }
+    return undefined;
+  }
+
+  /**
+   * Reload one finished turn at most once.
+   *
+   * Both detection paths — a pushed state change and the end of a followed run —
+   * share this guard, so whichever arrives second sees `pending` or `done` for
+   * the same stamp and does nothing. A failed load clears the record so the next
+   * state change can retry without inventing a timer.
+   * @param workspaceId - workspace that owns the session.
+   * @param sessionId - session whose turn ended.
+   * @param key - `sessionKey` of that session.
+   * @param stamp - turn identity taken once when the end was detected.
+   * @param silent - keep the loading spinner out of a background reconcile.
+   * @returns whether the details were reloaded.
+   */
+  private async reconcileOnce(workspaceId: string, sessionId: string, key: string, stamp: number | undefined, silent: boolean): Promise<boolean> {
+    const known = this.reconciledTurns.get(key);
+    if (stamp !== undefined && known !== undefined && known.stamp === stamp) return false;
+    this.reconciledTurns.set(key, { stamp, status: 'pending' });
+    const reloaded = await this.loadDetail(workspaceId, sessionId, true, silent);
+    if (!reloaded) {
+      const current = this.reconciledTurns.get(key);
+      if (current?.status === 'pending') this.reconciledTurns.delete(key);
+      return false;
+    }
+    // A followed run ends before its turn end is on screen, so the reload is what
+    // finally reveals the stamp; recording it keeps the matching state push from
+    // asking for the same turn again. The request itself never changed identity.
+    this.reconciledTurns.set(key, { stamp: this.turnEndStamp(key) ?? stamp, status: 'done' });
+    return true;
   }
 
   private nextLiveState(
@@ -1445,7 +1539,8 @@ export class AppStore {
    *
    * The stream is an optimization, not a requirement: a server that does not
    * offer it leaves the list baseline in charge, and a dropped stream reconnects
-   * only after it once worked.
+   * only after it once worked — backing off so a host that keeps refusing does
+   * not see a reconnect every second.
    */
   private ensureStatusStream(workspaceId: string): void {
     if (this.disposed || this.statusObservers.has(workspaceId)) return;
@@ -1466,10 +1561,12 @@ export class AppStore {
     } finally {
       if (this.statusObservers.get(workspaceId) === controller) this.statusObservers.delete(workspaceId);
       if (connected && !this.disposed) {
+        const attempt = this.statusAttempts.get(workspaceId) ?? 0;
+        this.statusAttempts.set(workspaceId, attempt + 1);
         const timer = setTimeout(() => {
           this.statusReconnects.delete(workspaceId);
           this.ensureStatusStream(workspaceId);
-        }, 2_000);
+        }, statusReconnectDelay(attempt));
         (timer as { unref?: () => void }).unref?.();
         this.statusReconnects.set(workspaceId, timer);
       }
@@ -1490,6 +1587,9 @@ export class AppStore {
       while (true) {
         const part = await reader.read();
         if (part.done) break;
+        // Bytes on the wire — even a heartbeat comment — prove the stream works,
+        // so the next drop starts from the shortest delay again.
+        this.statusAttempts.delete(workspaceId);
         parser.push(decoder.decode(part.value, { stream: true }));
       }
       parser.push(decoder.decode());
@@ -1703,6 +1803,27 @@ export class AppStore {
     }
   }
 
+  /**
+   * Whether a detail response would change anything the user can see.
+   *
+   * The bookkeeping flags (`loaded`/`loading`/`error`/`outcome`) are not content.
+   * A response that would install or drop a live run is never equivalent either,
+   * because patching `run` is a real change: a restored prompt has to appear, and
+   * a finished turn has to stop looking live.
+   * @param entry - entry currently on screen.
+   * @param patch - response projected onto an entry.
+   * @returns true when applying the patch would only rewrite identical values.
+   */
+  private sameDetailContent(entry: SessionEntry, patch: Partial<SessionEntry>): boolean {
+    if (entry.loaded !== true) return false;
+    if (Object.hasOwn(patch, 'run') && (patch.run !== undefined || entry.run !== undefined)) return false;
+    for (const [field, value] of Object.entries(patch) as Array<[keyof SessionEntry, unknown]>) {
+      if (field === 'loaded' || field === 'loading' || field === 'error' || field === 'outcome' || field === 'run') continue;
+      if (JSON.stringify(entry[field]) !== JSON.stringify(value)) return false;
+    }
+    return true;
+  }
+
   async loadDetail(workspaceId: string, sessionId: string, reconcile = false, silent = false): Promise<boolean> {
     const key = sessionKey(workspaceId, sessionId);
     const entry = this.getEntry(workspaceId, sessionId);
@@ -1721,7 +1842,10 @@ export class AppStore {
       const preset = (body.permission as { preset: PermissionPreset | null }).preset;
       const messages = Array.isArray(body.messages) ? body.messages : [];
       const events = Array.isArray(body.events) ? body.events : [];
-      const hydrated = hydrateTranscript(messages as never, events);
+      const displayed = this.state.entries[key] ?? entry;
+      // Reuse the ids of whatever is on screen so unchanged replies keep their
+      // component state, then compare against it below.
+      const hydrated = hydrateTranscript(messages as never, events, displayed.run?.transcript ?? displayed.transcript);
       // A reload drops the live review prompt. A review persisted with the session
       // comes back either way; a still-running turn can also be restored from the
       // unanswered exit_plan_mode call until its own prompt arrives.
@@ -1732,7 +1856,7 @@ export class AppStore {
         ?? (body.running === true ? pendingPlanReview(hydrated.transcript) : undefined);
       const restoredAskUser = pendingAskUser(body.askUser);
        const closedApproval = closedApprovalRequest(body.pendingApproval);
-      this.patchEntry(key, {
+      const patch: Partial<SessionEntry> = {
         header: typeof body.header === 'object' && body.header !== null ? body.header as Record<string, unknown> : null,
         title: typeof body.title === 'string' && body.title.trim() !== '' ? body.title.trim() : null,
         blank: body.blank === true,
@@ -1774,7 +1898,17 @@ export class AppStore {
             : reconcile && body.running !== true
               ? { run: undefined }
               : {}),
-      });
+      };
+      // An unchanged response must not replace the arrays: a new array identity
+      // remounts the conversation and loses expanded blocks. Only the loading
+      // flags can still move, so the spinner does not stay on screen.
+      if (this.sameDetailContent(displayed, patch)) {
+        if (displayed.loading || displayed.error !== '') {
+          this.patchEntry(key, { loaded: true, loading: false, error: '' });
+        }
+      } else {
+        this.patchEntry(key, patch);
+      }
       if (body.running === true) {
         if (this.state.entries[key]?.run === undefined || restoredReview !== undefined || restoredAskUser !== undefined) this.followRun(workspaceId, sessionId);
       } else {
@@ -2396,6 +2530,7 @@ export class AppStore {
     const key = sessionKey(workspaceId, sessionId);
     const entry = this.state.entries[key];
     if (this.disposed || entry === undefined || this.observers.has(key)) return;
+    if (existing === undefined) this.reconciledTurns.delete(key);
     const run = existing ?? entry.run ?? createLiveState();
     if (existing === undefined && entry.run === undefined) {
       run.transcript = entry.transcript.slice();
@@ -2427,7 +2562,7 @@ export class AppStore {
           finished = await this.consumeStream(workspaceId, sessionId, key, run, response.body, (baseline) => {
             const stopping = this.state.entries[key]?.run?.stopping;
             const fresh = createLiveState();
-            const hydrated = baseline === undefined ? undefined : hydrateTranscript(baseline.messages as never);
+            const hydrated = baseline === undefined ? undefined : hydrateTranscript(baseline.messages as never, [], snapshotBase.transcript);
             fresh.transcript = hydrated?.transcript ?? snapshotBase.transcript.slice();
             fresh.turns = hydrated?.turns ?? snapshotBase.turns.map((turn) => ({ ...turn }));
             if (hydrated !== undefined && fresh.turns.length > 0 && fresh.turns[fresh.turns.length - 1]!.endedAt === undefined) {
@@ -2464,7 +2599,11 @@ export class AppStore {
 
   private async finishObservedRun(workspaceId: string, sessionId: string, key: string, run: LiveTurnState): Promise<boolean> {
     if (run.outcome !== undefined) this.patchEntry(key, { run: { ...run, finishing: true } });
-    const reconciled = await this.loadDetail(workspaceId, sessionId, true);
+    // The followed run is the authoritative end of this turn, so it reconciles
+    // even when the turn end is not on screen yet; the shared guard then keeps
+    // the matching state push from asking for the same turn a second time.
+    const stamp = this.turnEndStamp(key);
+    const reconciled = await this.reconcileOnce(workspaceId, sessionId, key, stamp, false);
     const current = this.state.entries[key];
     if (!reconciled || current === undefined || current.running) {
       if (current?.run !== undefined && run.outcome !== undefined) this.patchEntry(key, { run: { ...run, finishing: false } });
@@ -2506,6 +2645,7 @@ export class AppStore {
     this.liveRuns.set(key, run);
     const decoder = new TextDecoder();
     const { createSSEParser } = await import('./events.ts');
+    let ticks = 0;
     const parser = createSSEParser((event) => {
       const snapshot = event as { type?: unknown; events?: unknown; truncated?: unknown; baseline?: unknown } | null;
       if (snapshot?.type === 'run.snapshot') {
@@ -2523,12 +2663,16 @@ export class AppStore {
         const restoredReview = run.planReview?.requestId.startsWith('restored:') === true ? run.planReview : undefined;
         if (prefixMatches) {
           for (const item of snapshot.events.slice(previous.length)) applyAgentEvent(run, item as never);
+          ticks += snapshot.events.slice(previous.length)
+            .reduce((count, item) => count + contextTickFor((item as { type?: unknown } | null)?.type), 0);
         } else {
           const baseline = snapshot.baseline;
           if (baseline !== undefined && (typeof baseline !== 'object' || baseline === null
             || !Array.isArray((baseline as { messages?: unknown }).messages))) throw new Error('Invalid run baseline');
           resetSnapshot(baseline as { messages: unknown[]; metrics?: unknown } | undefined);
           for (const item of snapshot.events) applyAgentEvent(run, item as never);
+          ticks += snapshot.events
+            .reduce((count, item) => count + contextTickFor((item as { type?: unknown } | null)?.type), 0);
         }
         // A snapshot that already decided or ended the review must not revive the
         // placeholder. One that is still waiting replaces it with the live prompt,
@@ -2550,6 +2694,7 @@ export class AppStore {
         this.followEvents.set(key, snapshot.events.slice());
       } else {
         applyAgentEvent(run, event as never);
+        ticks += contextTickFor((event as { type?: unknown } | null)?.type);
         const events = this.followEvents.get(key);
         if (observed && events !== undefined) events.push(event);
       }
@@ -2602,9 +2747,17 @@ export class AppStore {
         }
       }
       // Immutable snapshot so React sees a new run object for every event batch.
+      // The context tick rides along so a step boundary costs one emit, not two.
       const entry = this.state.entries[key];
-      if (entry !== undefined && entry.run !== undefined) {
-        this.state = { ...this.state, entries: { ...this.state.entries, [key]: { ...entry, run: { ...run } } } };
+      const pendingTicks = ticks;
+      ticks = 0;
+      if (entry !== undefined && (entry.run !== undefined || pendingTicks > 0)) {
+        const next: SessionEntry = {
+          ...entry,
+          ...(entry.run === undefined ? {} : { run: { ...run } }),
+          ...(pendingTicks === 0 ? {} : { contextTick: entry.contextTick + pendingTicks }),
+        };
+        this.state = { ...this.state, entries: { ...this.state.entries, [key]: next } };
         this.emit();
       }
     });
@@ -3341,10 +3494,14 @@ export class AppStore {
       this.sessionRequests.set(workspaceId, (this.sessionRequests.get(workspaceId) ?? 0) + 1);
       this.statusObservers.get(workspaceId)?.abort();
       this.statusObservers.delete(workspaceId);
+      this.statusAttempts.delete(workspaceId);
       for (const maps of [this.statusReconnects, this.statusReloads]) {
         const timer = maps.get(workspaceId);
         if (timer !== undefined) clearTimeout(timer);
         maps.delete(workspaceId);
+      }
+      for (const key of this.reconciledTurns.keys()) {
+        if (workspaceOfKey(key) === workspaceId) this.reconciledTurns.delete(key);
       }
       const statusBySession = { ...this.state.statusBySession };
       for (const key of Object.keys(statusBySession)) {

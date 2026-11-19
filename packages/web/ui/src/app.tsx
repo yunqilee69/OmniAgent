@@ -1,7 +1,7 @@
-import { useEffect, useRef, useState, type CSSProperties, type PointerEvent as ReactPointerEvent, type ReactNode } from 'react';
+import { useCallback, useEffect, useMemo, useRef, useState, type CSSProperties, type PointerEvent as ReactPointerEvent, type ReactNode } from 'react';
 import clsx from 'clsx';
 import { Button, FishLogo, IconCloseOutlineRegular, IconWarningOutlineRegular } from '../vendor/primitives/index.ts';
-import { store, useApp, useSessionEntry } from './lib/store.ts';
+import { sessionKey, store, useApp, useSessionEntry } from './lib/store.ts';
 import { translator } from './lib/i18n.ts';
 import { Header } from './components/Header.tsx';
 import { Sidebar } from './components/Sidebar.tsx';
@@ -12,11 +12,20 @@ import { ApprovalView } from './components/ApprovalView.tsx';
 import { AutomationPage } from './components/AutomationPage.tsx';
 import { SettingsPage } from './components/SettingsPage.tsx';
 import { NewSessionDialog } from './components/NewSessionDialog.tsx';
-import { RightPanel, type RightView } from './components/RightPanel.tsx';
+import { RightPanel } from './components/RightPanel.tsx';
+import {
+  activeTab,
+  planPreviewAction,
+  previewTabId,
+  rightPanelReducer,
+  seedLayout,
+  type RightPanelAction,
+  type RightPanelIntent,
+  type RightPanelLayout,
+} from './lib/right-panel-tabs.ts';
 import type { PlanDocument } from './components/PlanReview.tsx';
 import { WorkspaceFileTree } from './components/WorkspaceFileTree.tsx';
 import type { FileMenuChange } from './components/FileTreeMenu.tsx';
-import type { FileSelection } from './components/WorkspaceFilePreview.tsx';
 import css from './styles/app.module.css';
 import heroCss from './styles/dsh/hero-shell.module.css';
 
@@ -74,13 +83,28 @@ export function App(): ReactNode {
   const [rightOpen, setRightOpen] = useState(false);
   const [rightFullscreen, setRightFullscreen] = useState(false);
   const [rightWidth, setRightWidth] = useState<number | null>(null);
-  const [rightView, setRightView] = useState<RightView>('guide');
+  /** One dock layout per session, kept in memory only: a reload starts from the seed. */
+  const layoutsRef = useRef<Map<string, RightPanelLayout>>(new Map());
+  const [layout, setLayout] = useState<RightPanelLayout>(() => seedLayout());
   const [browseWorkspaceId, setBrowseWorkspaceId] = useState<string | null>(null);
-  const [preview, setPreview] = useState<FileSelection | null>(null);
   /** Bumped after a file operation so open folder listings and the file page refetch. */
   const [fileRefreshToken, setFileRefreshToken] = useState(0);
   const [planDoc, setPlanDoc] = useState<string | null>(null);
   const booted = useRef(false);
+  const hasSession = app.sessionId !== null;
+  const draft = entry?.draft === true;
+  const layoutKey = !draft && app.workspaceId !== null && app.sessionId !== null
+    ? sessionKey(app.workspaceId, app.sessionId)
+    : `new:${app.workspaceId ?? ''}`;
+
+  const dispatchLayout = useCallback((action: RightPanelAction): void => {
+    setLayout((current) => {
+      const next = rightPanelReducer(current, action);
+      if (next === current) return current;
+      layoutsRef.current.set(layoutKey, next);
+      return next;
+    });
+  }, [layoutKey]);
 
   useEffect(() => {
     if (booted.current) return;
@@ -93,16 +117,29 @@ export function App(): ReactNode {
   }, [mobile]);
 
   useEffect(() => {
-    setPreview(null);
-    setPlanDoc(null);
-    setRightView((view) => view === 'preview' || view === 'plan' ? 'guide' : view);
-  }, [app.workspaceId, app.sessionId]);
+    // Switching session or workspace restores that key's dock layout; a key seen
+    // for the first time starts at the guide. Previews and plans are not reset —
+    // they belong to the layout, which is already per session.
+    const stored = layoutsRef.current.get(layoutKey);
+    if (stored !== undefined) {
+      setLayout(stored);
+      return;
+    }
+    const seeded = seedLayout();
+    layoutsRef.current.set(layoutKey, seeded);
+    setLayout(seeded);
+  }, [layoutKey]);
 
   useEffect(() => {
     if (!app.workspacesLoading && browseWorkspaceId !== null && !app.workspaces.some((workspace) => workspace.id === browseWorkspaceId)) {
       setBrowseWorkspaceId(null);
     }
   }, [app.workspaces, app.workspacesLoading, browseWorkspaceId]);
+
+  // The plan snapshot only stands in for the settled review of *this* session.
+  useEffect(() => {
+    setPlanDoc(null);
+  }, [app.workspaceId, app.sessionId]);
 
   useEffect(() => {
     if (!rightOpen || !rightOverlay) return;
@@ -125,20 +162,22 @@ export function App(): ReactNode {
   const browseWorkspace = app.workspaces.find((workspace) => workspace.id === browseWorkspaceId);
   const activeWorkspace = app.workspaces.find((workspace) => workspace.id === app.workspaceId);
   const activeWorkspaceName = activeWorkspace?.name || activeWorkspace?.path || '';
+  /** The tree highlights the file whose preview tab is on screen, not the last one opened. */
+  const dockTab = activeTab(layout);
+  const activePreview = dockTab.kind === 'preview' ? dockTab.resource : null;
 
-  /** Follow a previewed file through a rename or move, and close it when it is deleted. */
+  /** Follow previewed files through a rename or move, and close them when deleted. */
   const followFileChange = (change: FileMenuChange): void => {
     setFileRefreshToken((value) => value + 1);
-    setPreview((current) => {
-      if (current === null) return current;
-      const inside = current.path === change.from || current.path.startsWith(`${change.from}/`);
-      if (!inside) return current;
-      if (change.to === undefined) return null;
-      return { ...current, path: `${change.to}${current.path.slice(change.from.length)}` };
-    });
+    if (app.workspaceId === null || app.workspaceId === undefined) return;
+    if (change.to === undefined) {
+      dispatchLayout({ type: 'remove-preview', workspaceId: app.workspaceId, path: change.from });
+      return;
+    }
+    dispatchLayout({ type: 'rename-preview', workspaceId: app.workspaceId, from: change.from, to: change.to });
   };
 
-  /** Open one file in the preview page; absolute links are mapped onto the workspace root. */
+  /** Open one file in a preview tab; absolute links are mapped onto the workspace root. */
   const openFile = (path: string, options?: { line?: number }): void => {
     if (app.workspaceId === null || app.workspaceId === undefined || path === '') return;
     const root = activeWorkspace?.path ?? '';
@@ -150,13 +189,20 @@ export function App(): ReactNode {
       return;
     }
     if (relative === '') return;
-    setPreview({
-      workspaceId: app.workspaceId,
-      workspaceName: activeWorkspaceName,
-      path: relative,
-      ...(options?.line === undefined ? {} : { line: options.line }),
+    // The reducer owns de-duplication: the same file focuses its tab and merges the line.
+    dispatchLayout({
+      type: 'open',
+      tab: {
+        id: previewTabId(app.workspaceId, relative),
+        kind: 'preview',
+        resource: {
+          workspaceId: app.workspaceId,
+          workspaceName: activeWorkspaceName,
+          path: relative,
+          ...(options?.line === undefined ? {} : { line: options.line }),
+        },
+      },
     });
-    setRightView('preview');
     setRightOpen(true);
     store.setTab('conversation');
   };
@@ -165,22 +211,39 @@ export function App(): ReactNode {
   useEffect(() => {
     if (planReview !== undefined) setPlanDoc(planReview.plan);
   }, [planReview]);
-  const openPlanPreview = (): void => {
-    setRightView('plan');
-    setRightOpen(true);
-  };
   // Keep the last reviewed plan readable after the review settles: the live
   // request supplies status, the snapshot supplies the document.
-  const planDocument: PlanDocument | null = planReview === undefined && planDoc === null ? null : {
-    plan: planReview?.plan ?? planDoc ?? '',
-    ...(planReview === undefined ? {} : {
-      pending: planReview.pending === true,
-      ...(planReview.error !== undefined && planReview.error !== '' ? { error: planReview.error } : {}),
-    }),
-  };
+  const planDocument = useMemo<PlanDocument | null>(() => {
+    if (planReview === undefined && planDoc === null) return null;
+    return {
+      plan: planReview?.plan ?? planDoc ?? '',
+      ...(planReview === undefined ? {} : {
+        pending: planReview.pending === true,
+        ...(planReview.error !== undefined && planReview.error !== '' ? { error: planReview.error } : {}),
+      }),
+    };
+  }, [planReview, planDoc]);
+  useEffect(() => {
+    // A refreshed plan flows into an open plan tab; it never opens one by itself.
+    if (planDocument !== null) dispatchLayout({ type: 'set-plan', plan: planDocument });
+  }, [planDocument, dispatchLayout]);
+  const openPlanPreview = useCallback((): void => {
+    // No plan in this session means nothing to preview; opening an empty tab would lie.
+    const action = planPreviewAction(planDocument);
+    if (action === null) return;
+    // An existing plan tab is refocused and refreshed by the reducer, not duplicated.
+    dispatchLayout(action);
+    setRightOpen(true);
+  }, [dispatchLayout, planDocument]);
+  /** The panel asks; the App answers with the document it owns. */
+  const handlePanelAction = useCallback((intent: RightPanelIntent): void => {
+    if (intent.type === 'open-plan') {
+      openPlanPreview();
+      return;
+    }
+    dispatchLayout(intent);
+  }, [dispatchLayout, openPlanPreview]);
   const drawer = mobile && sidebarOpen;
-  const hasSession = app.sessionId !== null;
-  const draft = entry?.draft === true;
   const sessionBlocked = entry?.error !== undefined && entry.error !== '' && entry?.loaded !== true;
   const rightActive = rightOpen && app.tab !== 'automation' && app.tab !== 'settings';
   const maxRightWidth = Math.max(300, viewportWidth - (sidebarOpen && !mobile ? 280 : 0) - 400);
@@ -230,13 +293,19 @@ export function App(): ReactNode {
             workspaceId={browseWorkspace.id}
             workspacePath={browseWorkspace.path}
             name={browseWorkspace.name || browseWorkspace.path}
-            selected={preview?.workspaceId === browseWorkspace.id ? preview.path : null}
+            selected={activePreview !== null && activePreview.workspaceId === browseWorkspace.id ? activePreview.path : null}
             refreshToken={fileRefreshToken}
             onChanged={followFileChange}
             onBack={() => { setBrowseWorkspaceId(null); }}
             onSelect={(path) => {
-              setPreview({ workspaceId: browseWorkspace.id, workspaceName: browseWorkspace.name || browseWorkspace.path, path });
-              setRightView('preview');
+              dispatchLayout({
+                type: 'open',
+                tab: {
+                  id: previewTabId(browseWorkspace.id, path),
+                  kind: 'preview',
+                  resource: { workspaceId: browseWorkspace.id, workspaceName: browseWorkspace.name || browseWorkspace.path, path },
+                },
+              });
               setRightOpen(true);
               store.setTab('conversation');
               if (mobile) setSidebarOpen(false);
@@ -251,7 +320,7 @@ export function App(): ReactNode {
           sidebarOpen={sidebarOpen}
           onToggleSidebar={() => { setSidebarOpen((value) => !value); }}
           rightOpen={rightActive}
-          onToggleRight={() => { setRightView('guide'); setRightOpen(true); }}
+          onToggleRight={() => { setRightOpen(true); }}
         />
 
         {app.alert !== '' && (
@@ -357,10 +426,9 @@ export function App(): ReactNode {
           )}
           <RightPanel
             fullscreen={rightFullscreen}
-            view={rightView}
-            preview={preview}
-            plan={planDocument}
-            onViewChange={setRightView}
+            layout={layout}
+            hasPlan={planDocument !== null}
+            onAction={handlePanelAction}
             onClose={() => { setRightOpen(false); setRightFullscreen(false); }}
             onToggleFullscreen={() => { setRightFullscreen((value) => !value); }}
             onOpenFile={(path) => { openFile(path); }}

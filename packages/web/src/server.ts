@@ -242,6 +242,11 @@ export interface WebHostOptions {
   liveSessions?: LiveSessionRegistry;
   /** Host-wide automation tasks shared by the page, HTTP routes, and agent tools. */
   schedule?: ScheduleService;
+  /**
+   * Silence the workspace status stream tolerates before a `: ping` comment.
+   * Composition option for tests; the HTTP contract is unchanged.
+   */
+  statusHeartbeatMs?: number;
 }
 
 export interface WebHost {
@@ -363,6 +368,9 @@ interface SessionStatusFrame {
  */
 class SessionStatusHub {
   private readonly streams = new Map<string, Set<ServerResponse>>();
+  private readonly heartbeats = new Map<ServerResponse, ReturnType<typeof setInterval>>();
+
+  constructor(private readonly heartbeatMs: number) {}
 
   subscribe(workspaceId: string, response: ServerResponse): void {
     let streams = this.streams.get(workspaceId);
@@ -371,19 +379,45 @@ class SessionStatusHub {
       this.streams.set(workspaceId, streams);
     }
     streams.add(response);
+    // A status stream can stay silent for minutes, and idle proxies drop silent
+    // connections. A comment line is invisible to the framing parser, so it keeps
+    // the stream alive without adding a frame type.
+    const heartbeat = setInterval(() => {
+      if (response.destroyed || response.writableEnded) {
+        this.forget(workspaceId, response);
+        return;
+      }
+      response.write(': ping\n\n');
+    }, this.heartbeatMs);
+    heartbeat.unref?.();
+    this.heartbeats.set(response, heartbeat);
     response.once('close', () => {
-      const current = this.streams.get(workspaceId);
-      if (current === undefined) return;
-      current.delete(response);
-      if (current.size === 0) this.streams.delete(workspaceId);
+      this.forget(workspaceId, response);
     });
     if (streams.size > MAX_STATUS_STREAMS) {
       const oldest = streams.values().next().value;
       if (oldest !== undefined) {
         streams.delete(oldest);
+        this.stopHeartbeat(oldest);
         oldest.destroy();
       }
     }
+  }
+
+  /** Drop one listener and its heartbeat, whichever path noticed it first. */
+  private forget(workspaceId: string, response: ServerResponse): void {
+    this.stopHeartbeat(response);
+    const current = this.streams.get(workspaceId);
+    if (current === undefined) return;
+    current.delete(response);
+    if (current.size === 0) this.streams.delete(workspaceId);
+  }
+
+  private stopHeartbeat(response: ServerResponse): void {
+    const heartbeat = this.heartbeats.get(response);
+    if (heartbeat === undefined) return;
+    clearInterval(heartbeat);
+    this.heartbeats.delete(response);
   }
 
   publish(workspaceId: string, frame: SessionStatusFrame): void {
@@ -395,6 +429,7 @@ class SessionStatusHub {
       if (stream.destroyed || stream.writableEnded
         || (stream.writableLength > 0 && stream.writableLength + bytes > MAX_FOLLOW_BUFFER_BYTES)) {
         streams.delete(stream);
+        this.stopHeartbeat(stream);
         stream.destroy();
         continue;
       }
@@ -408,17 +443,28 @@ class SessionStatusHub {
     const streams = this.streams.get(workspaceId);
     if (streams === undefined) return;
     this.streams.delete(workspaceId);
-    for (const stream of streams) stream.destroy();
+    for (const stream of streams) {
+      this.stopHeartbeat(stream);
+      stream.destroy();
+    }
   }
 
   closeAll(): void {
-    for (const streams of this.streams.values()) for (const stream of streams) stream.destroy();
+    for (const streams of this.streams.values()) {
+      for (const stream of streams) {
+        this.stopHeartbeat(stream);
+        stream.destroy();
+      }
+    }
     this.streams.clear();
   }
 }
 
 /** Largest number of idle status listeners kept per workspace. */
 const MAX_STATUS_STREAMS = 64;
+
+/** Silence the workspace status stream tolerates before it writes a comment. */
+const DEFAULT_STATUS_HEARTBEAT_MS = 15_000;
 
 export function createWebHost(options: WebHostOptions): WebHost {
   const bindHost = options.host ?? '127.0.0.1';
@@ -435,7 +481,7 @@ export function createWebHost(options: WebHostOptions): WebHost {
   const permissionLocks = new Map<string, Promise<void>>();
   const failedPermissions = new Set<string>();
   const compactRequests = new Set<string>();
-  const statusHub = new SessionStatusHub();
+  const statusHub = new SessionStatusHub(options.statusHeartbeatMs ?? DEFAULT_STATUS_HEARTBEAT_MS);
   const observedSockets = new WeakSet<object>();
   // Automatic archiving is a host concern: every pass re-reads the saved
   // setting, so turning it off takes effect without a restart. The first pass
@@ -1521,12 +1567,14 @@ async function route(
     if (shared && matches(shared)) live = sharedSession;
     else if (cached && matches(cached)) live = await cached.pending.catch(() => undefined);
     const runningNow = running.has(key) || sharedSession?.activeTurn === true || live?.activeTurn === true;
-    // A live runtime owns the authoritative post-compaction history. Only use
-    // replay when the next turn would create a fresh runtime from the log.
-    const estimatedMessageTokens = runningNow ? undefined
-      : live ? live.contextMessageEstimate?.() : estimateModelHistory(projectMessages(handle.events));
-    let projection = runningNow ? undefined : live?.contextProjection?.();
-    if (!runningNow && !live && runtime && options.replayContext) {
+    // A live runtime owns the authoritative post-compaction history, mid-turn
+    // included: it publishes the request it will send at every step boundary.
+    // Only a session this host has no live runtime for falls back to the log —
+    // and only when idle, because replay cannot see a turn's interim history.
+    const estimatedMessageTokens = live ? live.contextMessageEstimate?.()
+      : runningNow ? undefined : estimateModelHistory(projectMessages(handle.events));
+    let projection = live?.contextProjection?.();
+    if (!live && !runningNow && runtime && options.replayContext) {
       const permission = permissionProjection(handle, key, failedPermissions);
       if (permission.status === 'ready') {
         try {

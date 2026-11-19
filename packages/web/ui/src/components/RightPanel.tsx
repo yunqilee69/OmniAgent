@@ -4,6 +4,7 @@ import {
   GuideArtworkFiles,
   IconChevronLeftOutlineRegular,
   IconClockOutlineRegular,
+  IconCloseOutlineRegular,
   IconCompareSplitOutlineRegular,
   IconCopyOutlineRegular,
   IconDatabaseOutlineRegular,
@@ -25,15 +26,18 @@ import { authFetch } from '../lib/auth.ts';
 import { store, useApp } from '../lib/store.ts';
 import { translator, type Translate } from '../lib/i18n.ts';
 import { workspaceApiPath, type WorkspaceFileEntry } from '../lib/wire.ts';
+import {
+  activeTab,
+  type RightPanelIntent,
+  type RightPanelLayout,
+  type RightTab,
+} from '../lib/right-panel-tabs.ts';
 import { TrajectoryView } from './TrajectoryView.tsx';
 import { WorkspaceFilePreview } from './WorkspaceFilePreview.tsx';
-import type { FileSelection } from './preview/types.ts';
 import { filenameOf } from './preview/path.ts';
 import { FileTreeMenu, type FileMenuChange, type FileMenuTarget } from './FileTreeMenu.tsx';
-import { PlanPreview, type PlanDocument } from './PlanReview.tsx';
+import { PlanPreview } from './PlanReview.tsx';
 import css from '../styles/dsh/right-panel.module.css';
-
-export type RightView = 'guide' | 'files' | 'terminal' | 'observe' | 'preview' | 'plan';
 
 function CompassGlyph({ size = 16, className }: { size?: number; className?: string }): ReactNode {
   return (
@@ -56,15 +60,23 @@ function MoreToolsGlyph(): ReactNode {
   );
 }
 
-function viewTitle(view: RightView, t: Translate, preview: FileSelection | null | undefined): string {
+/** The tab is the only place a dock page names itself; the title is also its accessible name. */
+function tabTitle(tab: RightTab, t: Translate): string {
   // The tab names the file itself: the session already fixes the workspace, so a
   // bare "File preview" would say nothing the user did not click.
-  if (view === 'preview') return preview ? `${t('File preview')}｜${filenameOf(preview.path)}` : t('File preview');
-  if (view === 'plan') return t('Plan preview');
-  if (view === 'files') return t('Workspace files');
-  if (view === 'terminal') return t('Terminal');
-  if (view === 'observe') return t('Observe');
+  if (tab.kind === 'preview') return `${t('File preview')}｜${filenameOf(tab.resource.path)}`;
+  if (tab.kind === 'plan') return t('Plan preview');
+  if (tab.kind === 'files') return t('Workspace files');
+  if (tab.kind === 'terminal') return t('Terminal');
+  if (tab.kind === 'observe') return t('Observe');
   return t('Start');
+}
+
+function tabIcon(tab: RightTab): ReactNode {
+  if (tab.kind === 'guide') return <CompassGlyph size={14} className={css.tabIcon} />;
+  if (tab.kind === 'plan') return <IconPlanOutlineRegular size={14} className={css.tabIcon} />;
+  if (tab.kind === 'preview') return <IconPaperclipOutlineRegular size={14} className={css.tabIcon} />;
+  return null;
 }
 
 interface EntryCardProps {
@@ -88,19 +100,23 @@ function EntryCard({ icon, title, description, onClick }: EntryCardProps): React
   );
 }
 
-export function RightPanel({ fullscreen, view, onViewChange: setView, onClose, onToggleFullscreen, preview, plan, onOpenFile, refreshToken = 0, onFilesChanged }: {
-  preview?: FileSelection | null;
-  plan?: PlanDocument | null;
-  /** Open one workspace file in the preview page; the caller owns the selection state. */
+export function RightPanel({ layout, onAction, hasPlan = false, fullscreen, onClose, onToggleFullscreen, onOpenFile, refreshToken = 0, onFilesChanged }: {
+  /** Tabs and the active tab; the caller owns the layout (one per session). */
+  layout: RightPanelLayout;
+  onAction: (action: RightPanelIntent) => void;
+  /**
+   * Whether this session has a plan to review. Only the fact travels down: the
+   * document itself lives with the caller and enters through the plan tab.
+   */
+  hasPlan?: boolean | undefined;
+  fullscreen: boolean;
+  onClose: () => void;
+  onToggleFullscreen: () => void;
+  /** Open one workspace file in a preview tab; the caller owns the tab layout. */
   onOpenFile?: ((path: string) => void) | undefined;
   /** Bumped by the caller after a file operation, so the file page refetches. */
   refreshToken?: number | undefined;
   onFilesChanged?: ((change: FileMenuChange) => void) | undefined;
-  fullscreen: boolean;
-  view: RightView;
-  onViewChange: (view: RightView) => void;
-  onClose: () => void;
-  onToggleFullscreen: () => void;
 }): ReactNode {
   const app = useApp();
   const t = useMemo(() => translator(app.locale), [app.locale]);
@@ -113,6 +129,7 @@ export function RightPanel({ fullscreen, view, onViewChange: setView, onClose, o
   const [moreOpen, setMoreOpen] = useState(false);
   const [fileMenu, setFileMenu] = useState<FileMenuTarget | null>(null);
   const moreAnchor = useRef<HTMLButtonElement | null>(null);
+  const filesTab = layout.tabs.some((tab) => tab.kind === 'files');
 
   useEffect(() => {
     setDirectory('');
@@ -121,7 +138,9 @@ export function RightPanel({ fullscreen, view, onViewChange: setView, onClose, o
   }, [app.workspaceId, app.sessionId]);
 
   useEffect(() => {
-    if (view !== 'files' || app.workspaceId === null) return;
+    // The listing belongs to the files tab, not to whatever is on screen: fetching
+    // only while it is active would refetch the same folder on every switch back.
+    if (!filesTab || app.workspaceId === null) return;
     const controller = new AbortController();
     const timer = window.setTimeout(() => {
       setFilesLoading(true);
@@ -155,7 +174,7 @@ export function RightPanel({ fullscreen, view, onViewChange: setView, onClose, o
       window.clearTimeout(timer);
       controller.abort();
     };
-  }, [view, app.workspaceId, directory, search, t, refreshToken]);
+  }, [filesTab, app.workspaceId, directory, search, t, refreshToken]);
 
   const openDirectory = (entry: WorkspaceFileEntry): void => {
     setDirectory(`${entry.path}/`);
@@ -177,63 +196,36 @@ export function RightPanel({ fullscreen, view, onViewChange: setView, onClose, o
 
   const crumb = directory === '' ? t('Workspace') : directory.replace(/\/$/, '');
 
-  return (
-    <aside id="right-panel" className={clsx(css.root, fullscreen && css.fullscreen)} aria-label={viewTitle(view, t, preview)} data-right-panel="">
-      <div className={css.tabStrip}>
-        <div className={css.stripTabs}>
-          <button type="button" className={css.tab} onClick={() => { setView('guide'); }}>
-            {view === 'plan'
-              ? <IconPlanOutlineRegular size={14} className={css.tabIcon} />
-              : <CompassGlyph size={14} className={css.tabIcon} />}
-            <span className={css.tabLabel}>{viewTitle(view, t, preview)}</span>
-          </button>
-        </div>
-        <div className={css.stripChrome}>
-          <Tooltip label={t('Open guide')} side="bottom" delayMs={400}>
-            <button type="button" className={css.iconButton} aria-label={t('Open guide')} onClick={() => { setView('guide'); }}>
-              <IconCompareSplitOutlineRegular size={14} />
-            </button>
-          </Tooltip>
-          <Tooltip label={fullscreen ? t('Exit fullscreen') : t('Enter fullscreen')} side="bottom" delayMs={400}>
-            <button type="button" className={css.iconButton} aria-label={fullscreen ? t('Exit fullscreen') : t('Enter fullscreen')} onClick={onToggleFullscreen}>
-              <IconFullscreenOutlineRegular size={16} />
-            </button>
-          </Tooltip>
-          <Tooltip label={t('Collapse panel')} side="bottom" delayMs={400}>
-            <button type="button" className={css.iconButton} aria-label={t('Collapse panel')} onClick={onClose}>
-              <IconPanelLeftOutlineRegular size={16} className={css.collapseGlyph} />
-            </button>
-          </Tooltip>
-        </div>
-      </div>
-
-      {view === 'guide' && (
+  const renderPage = (tab: RightTab): ReactNode => {
+    if (tab.kind === 'guide') {
+      return (
         <div className={css.guide}>
           <span className={css.guideHero} aria-hidden="true"><CompassGlyph size={56} /></span>
-          {plan !== null && plan !== undefined && (
+          {hasPlan && (
             <EntryCard
               icon={<IconPlanOutlineRegular size={26} />}
               title={t('Plan review')}
               description={t('Open the last submitted plan.')}
-              onClick={() => { setView('plan'); }}
+              // The panel holds no plan body: the caller answers with the open action.
+              onClick={() => { onAction({ type: 'open-plan' }); }}
             />
           )}
           <EntryCard
             icon={<IconClockOutlineRegular size={26} />}
             title={t('Observe')}
-            onClick={() => { setView('observe'); }}
+            onClick={() => { onAction({ type: 'open', tab: { id: 'observe', kind: 'observe' } }); }}
           />
           <EntryCard
             icon={<GuideArtworkFiles size={26} />}
             title={t('Workspace files')}
             description={t('Browse and reference files in this workspace.')}
-            onClick={() => { setView('files'); }}
+            onClick={() => { onAction({ type: 'open', tab: { id: 'files', kind: 'files' } }); }}
           />
           <EntryCard
             icon={<PluginArtworkTerminal size={26} />}
             title={t('New terminal')}
             description={t('Open a terminal in this workspace.')}
-            onClick={() => { setView('terminal'); }}
+            onClick={() => { onAction({ type: 'open', tab: { id: 'terminal', kind: 'terminal' } }); }}
           />
           <div className={css.entryCell}>
             <Menu
@@ -266,109 +258,18 @@ export function RightPanel({ fullscreen, view, onViewChange: setView, onClose, o
             />
           </div>
         </div>
-      )}
-
-      {view === 'preview' && preview && <WorkspaceFilePreview file={preview} />}
-      {view === 'plan' && <PlanPreview plan={plan ?? null} />}
-      {view === 'observe' && <TrajectoryView />}
-
-      {view === 'files' && (
-        <div className={css.files}>
-          <div className={css.filesToolbar}>
-            {directory !== '' && (
-              <Tooltip label={t('Workspace')} side="bottom" delayMs={400}>
-                <button
-                  type="button"
-                  className={css.iconButton}
-                  aria-label={t('Workspace')}
-                  onClick={() => { setDirectory(''); setSearch(''); setCopied(''); }}
-                >
-                  <IconChevronLeftOutlineRegular size={14} />
-                </button>
-              </Tooltip>
-            )}
-            <span className={css.crumb} title={crumb}>{crumb}</span>
-            <div className={css.fileSearch}>
-              <IconSearchOutlineRegular size={13} />
-              <input
-                type="text"
-                value={search}
-                placeholder={t('Search workspace files…')}
-                aria-label={t('Search workspace files…')}
-                onChange={(event) => { setSearch(event.target.value); }}
-              />
-            </div>
-          </div>
-          <div className={css.fileList} role="list">
-            {filesLoading && <div className={css.fileStatus}>{t('Loading files…')}</div>}
-            {!filesLoading && filesError !== '' && <div className={css.fileError}>{filesError}</div>}
-            {!filesLoading && filesError === '' && files.length === 0 && <div className={css.fileStatus}>{t('No files found.')}</div>}
-            {!filesLoading && files.map((entry) => (
-              <div key={`${entry.kind}:${entry.path}`} className={css.fileRowWrap} role="listitem">
-                <button
-                  type="button"
-                  className={css.fileRow}
-                  title={entry.kind === 'directory' ? t('Open folder') : t('Open preview')}
-                  onClick={() => {
-                    if (entry.kind === 'directory') openDirectory(entry);
-                    else if (onOpenFile !== undefined) onOpenFile(entry.path);
-                    else copyPath(entry);
-                  }}
-                  onContextMenu={(event) => {
-                    event.preventDefault();
-                    setFileMenu({ path: entry.path, kind: entry.kind, x: event.clientX, y: event.clientY });
-                  }}
-                >
-                  <span className={css.fileGlyph} aria-hidden>
-                    {entry.kind === 'directory' ? <IconFolderCloseRegular size={16} /> : <IconPaperclipOutlineRegular size={16} />}
-                  </span>
-                  <span className={css.fileText}>
-                    <span className={css.fileName}>{entry.name}</span>
-                    <span className={css.filePath}>{entry.path}</span>
-                  </span>
-                  {entry.kind === 'directory' && <span className={css.fileMeta}>{t('Open folder')}</span>}
-                </button>
-                {entry.kind === 'file' && (
-                  <Tooltip label={t('Copy file path')} side="bottom" delayMs={400}>
-                    <button
-                      type="button"
-                      className={css.fileRowAction}
-                      aria-label={t('Copy file path')}
-                      onClick={() => { copyPath(entry); }}
-                    >
-                      <IconCopyOutlineRegular size={14} />
-                    </button>
-                  </Tooltip>
-                )}
-              </div>
-            ))}
-          </div>
-          {copied !== '' && (
-            <div className={css.copyStatus} role="status">
-              <IconDatabaseOutlineRegular size={13} />
-              <span>{t('Copied')}</span>
-              <code>{copied}</code>
-            </div>
-          )}
-        </div>
-      )}
-
-      {app.workspaceId !== null && app.workspaceId !== undefined && (
-        <FileTreeMenu
-          workspaceId={app.workspaceId}
-          workspacePath={app.workspaces.find((workspace) => workspace.id === app.workspaceId)?.path ?? ''}
-          target={fileMenu}
-          onClose={() => { setFileMenu(null); }}
-          onChanged={(change) => { onFilesChanged?.(change); }}
-        />
-      )}
-
-      {view === 'terminal' && (
+      );
+    }
+    if (tab.kind === 'preview') return <WorkspaceFilePreview file={tab.resource} />;
+    if (tab.kind === 'plan') return <PlanPreview plan={tab.plan} />;
+    if (tab.kind === 'observe') return <TrajectoryView />;
+    if (tab.kind === 'terminal') {
+      return (
         <div className={css.terminal}>
           <div className={css.terminalBar}>
             <span className={css.terminalDot} aria-hidden />
             <span>{t('Terminal')}</span>
-            <button type="button" className={css.terminalBack} onClick={() => { setView('guide'); }}>
+            <button type="button" className={css.terminalBack} onClick={() => { onAction({ type: 'activate', id: 'guide' }); }}>
               {t('Return to Start')}
             </button>
           </div>
@@ -380,6 +281,180 @@ export function RightPanel({ fullscreen, view, onViewChange: setView, onClose, o
             <p>{t('The terminal is not available in the web client.')}</p>
           </div>
         </div>
+      );
+    }
+    return (
+      <div className={css.files}>
+        <div className={css.filesToolbar}>
+          {directory !== '' && (
+            <Tooltip label={t('Workspace')} side="bottom" delayMs={400}>
+              <button
+                type="button"
+                className={css.iconButton}
+                aria-label={t('Workspace')}
+                onClick={() => { setDirectory(''); setSearch(''); setCopied(''); }}
+              >
+                <IconChevronLeftOutlineRegular size={14} />
+              </button>
+            </Tooltip>
+          )}
+          <span className={css.crumb} title={crumb}>{crumb}</span>
+          <div className={css.fileSearch}>
+            <IconSearchOutlineRegular size={13} />
+            <input
+              type="text"
+              value={search}
+              placeholder={t('Search workspace files…')}
+              aria-label={t('Search workspace files…')}
+              onChange={(event) => { setSearch(event.target.value); }}
+            />
+          </div>
+        </div>
+        <div className={css.fileList} role="list">
+          {filesLoading && <div className={css.fileStatus}>{t('Loading files…')}</div>}
+          {!filesLoading && filesError !== '' && <div className={css.fileError}>{filesError}</div>}
+          {!filesLoading && filesError === '' && files.length === 0 && <div className={css.fileStatus}>{t('No files found.')}</div>}
+          {!filesLoading && files.map((entry) => (
+            <div key={`${entry.kind}:${entry.path}`} className={css.fileRowWrap} role="listitem">
+              <button
+                type="button"
+                className={css.fileRow}
+                title={entry.kind === 'directory' ? t('Open folder') : t('Open preview')}
+                onClick={() => {
+                  if (entry.kind === 'directory') openDirectory(entry);
+                  else if (onOpenFile !== undefined) onOpenFile(entry.path);
+                  else copyPath(entry);
+                }}
+                onContextMenu={(event) => {
+                  event.preventDefault();
+                  setFileMenu({ path: entry.path, kind: entry.kind, x: event.clientX, y: event.clientY });
+                }}
+              >
+                <span className={css.fileGlyph} aria-hidden>
+                  {entry.kind === 'directory' ? <IconFolderCloseRegular size={16} /> : <IconPaperclipOutlineRegular size={16} />}
+                </span>
+                <span className={css.fileText}>
+                  <span className={css.fileName}>{entry.name}</span>
+                  <span className={css.filePath}>{entry.path}</span>
+                </span>
+                {entry.kind === 'directory' && <span className={css.fileMeta}>{t('Open folder')}</span>}
+              </button>
+              {entry.kind === 'file' && (
+                <Tooltip label={t('Copy file path')} side="bottom" delayMs={400}>
+                  <button
+                    type="button"
+                    className={css.fileRowAction}
+                    aria-label={t('Copy file path')}
+                    onClick={() => { copyPath(entry); }}
+                  >
+                    <IconCopyOutlineRegular size={14} />
+                  </button>
+                </Tooltip>
+              )}
+            </div>
+          ))}
+        </div>
+        {copied !== '' && (
+          <div className={css.copyStatus} role="status">
+            <IconDatabaseOutlineRegular size={13} />
+            <span>{t('Copied')}</span>
+            <code>{copied}</code>
+          </div>
+        )}
+      </div>
+    );
+  };
+
+  return (
+    <aside
+      id="right-panel"
+      className={clsx(css.root, fullscreen && css.fullscreen)}
+      aria-label={tabTitle(activeTab(layout), t)}
+      data-right-panel=""
+    >
+      <div className={css.tabStrip}>
+        <div className={css.stripTabs} role="tablist" aria-label={t('Panel tabs')}>
+          {layout.tabs.map((tab) => {
+            const title = tabTitle(tab, t);
+            const selected = tab.id === layout.activeId;
+            return (
+              // Two sibling buttons, never nested: the chip would be unclickable
+              // for assistive tech if the close button lived inside the tab button.
+              <div
+                key={tab.id}
+                role="presentation"
+                data-tab-id={tab.id}
+                data-active={selected ? 'true' : 'false'}
+                className={css.tabSlot}
+              >
+                <button
+                  type="button"
+                  role="tab"
+                  aria-selected={selected}
+                  className={css.tab}
+                  onClick={() => { onAction({ type: 'activate', id: tab.id }); }}
+                >
+                  {tabIcon(tab)}
+                  <span className={css.tabLabel}>{title}</span>
+                </button>
+                {tab.kind !== 'guide' && (
+                  <button
+                    type="button"
+                    className={css.tabClose}
+                    aria-label={t('Close tab {title}', { title })}
+                    onClick={(event) => {
+                      // Closing is not selecting: keep the click on the close button.
+                      event.stopPropagation();
+                      onAction({ type: 'close', id: tab.id });
+                    }}
+                  >
+                    <IconCloseOutlineRegular size={12} />
+                  </button>
+                )}
+              </div>
+            );
+          })}
+        </div>
+        <div className={css.stripChrome}>
+          <Tooltip label={t('Open guide')} side="bottom" delayMs={400}>
+            <button type="button" className={css.iconButton} aria-label={t('Open guide')} onClick={() => { onAction({ type: 'activate', id: 'guide' }); }}>
+              <IconCompareSplitOutlineRegular size={14} />
+            </button>
+          </Tooltip>
+          <Tooltip label={fullscreen ? t('Exit fullscreen') : t('Enter fullscreen')} side="bottom" delayMs={400}>
+            <button type="button" className={css.iconButton} aria-label={fullscreen ? t('Exit fullscreen') : t('Enter fullscreen')} onClick={onToggleFullscreen}>
+              <IconFullscreenOutlineRegular size={16} />
+            </button>
+          </Tooltip>
+          <Tooltip label={t('Collapse panel')} side="bottom" delayMs={400}>
+            <button type="button" className={css.iconButton} aria-label={t('Collapse panel')} onClick={onClose}>
+              <IconPanelLeftOutlineRegular size={16} className={css.collapseGlyph} />
+            </button>
+          </Tooltip>
+        </div>
+      </div>
+
+      {layout.tabs.map((tab) => (
+        <div
+          key={tab.id}
+          className={css.page}
+          role="tabpanel"
+          aria-label={tabTitle(tab, t)}
+          data-active={tab.id === layout.activeId ? 'true' : 'false'}
+          hidden={tab.id !== layout.activeId}
+        >
+          {renderPage(tab)}
+        </div>
+      ))}
+
+      {app.workspaceId !== null && app.workspaceId !== undefined && (
+        <FileTreeMenu
+          workspaceId={app.workspaceId}
+          workspacePath={app.workspaces.find((workspace) => workspace.id === app.workspaceId)?.path ?? ''}
+          target={fileMenu}
+          onClose={() => { setFileMenu(null); }}
+          onChanged={(change) => { onFilesChanged?.(change); }}
+        />
       )}
     </aside>
   );

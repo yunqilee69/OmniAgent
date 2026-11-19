@@ -25,6 +25,8 @@ const zh: Record<string, string> = {
   '{percent} of context used': '上下文已用 {percent}',
   'Context usage is counted when a turn finishes': '上下文用量在一轮结束后结算',
   'The first reading appears when this turn finishes.': '本轮结束后出现首个读数。',
+  'No reading yet.': '还没有读数。',
+  'The denominator is this session’s model window.': '分母为本会话模型窗口。',
   'This model has no known context window.': '该模型没有已知的上下文窗口。',
   'System prompt': '系统提示词',
   'Tool definitions': '工具定义',
@@ -137,7 +139,7 @@ const zh: Record<string, string> = {
   'Add workspace': '添加工作区',
   'Remove workspace': '移除工作区',
   'Standard mode': '标准模式',
-  'Automations': '自动化任务',
+  'Automations': '自动化',
   'No automation tasks are configured.': '当前没有配置自动化任务。',
   'More': '更多',
   'Workspace settings': '工作区设置',
@@ -177,6 +179,8 @@ const zh: Record<string, string> = {
   'Collapse {name}': '收起 {name}',
   'Expand {name}': '展开 {name}',
   'Start': '开始',
+  'Panel tabs': '面板标签页',
+  'Close tab {title}': '关闭标签页：{title}',
   'Workspace files': '工作区文件',
   'New terminal': '新建终端',
   'More tools': '更多工具',
@@ -207,6 +211,10 @@ const zh: Record<string, string> = {
   '{minutes}m{seconds}s': '{minutes}分{seconds}秒',
   'Cache hit {percent}%': '缓存命中 {percent}%',
   'Cache hit': '缓存命中',
+  // An unknown hit rate stays unknown instead of reading as 0% or 100%.
+  'Cache hit —': '缓存命中 —',
+  // The pill total is the whole session's spend, not the current occupancy.
+  'Session total {count} tok': '整会话累计 {count} tok',
   'Session statistics': '会话统计',
   'Token usage': 'Token 用量',
   'LLM time': '模型用时',
@@ -462,6 +470,9 @@ const zh: Record<string, string> = {
   'Text files must be smaller than {size} KB.': '文本文件必须小于 {size} KB。',
   'Only images and text-like files can be attached.': '仅支持图片和文本类文件。',
   'Attachment failed: {message}': '附件处理失败：{message}',
+  'Restoring attachments…': '正在恢复附件…',
+  'Kept for this session only; a refresh may lose these attachments.': '本次会话内保留，刷新可能丢失。',
+  'Wait for the draft attachments to finish restoring.': '请等待附件恢复完成再发送。',
 
   // @ references, # sessions, / commands and $ skills.
   'File reference': '文件引用',

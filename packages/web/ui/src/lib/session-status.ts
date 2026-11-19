@@ -39,6 +39,22 @@ export const IDLE_SESSION_STATE: SessionLiveState = {
   completionUnread: false,
 };
 
+/** Longest wait between re-attaching the workspace status stream. */
+export const MAX_STATUS_RECONNECT_DELAY = 30_000;
+
+/**
+ * Delay before re-attaching the workspace status stream.
+ *
+ * The stream is an optimization, so a dropped connection backs off instead of
+ * hammering the host: 1s, 2s, 4s, … capped at {@link MAX_STATUS_RECONNECT_DELAY}.
+ * @param attempt - consecutive failed attachments since the last delivered frame.
+ * @returns milliseconds to wait before the next attempt.
+ */
+export function statusReconnectDelay(attempt: number): number {
+  const steps = Number.isFinite(attempt) ? Math.max(0, Math.floor(attempt)) : 0;
+  return Math.min(MAX_STATUS_RECONNECT_DELAY, 1_000 * 2 ** steps);
+}
+
 function text(value: unknown): string {
   return typeof value === 'string' ? value.trim() : '';
 }

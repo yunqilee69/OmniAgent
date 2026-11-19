@@ -13,6 +13,19 @@ describe('web locale catalogue', () => {
     expect(translate('zh', 'Untranslated product label')).toBe('Untranslated product label');
   });
 
+  it('names the automation nav entry apart from the automation tasks page', () => {
+    expect(translate('zh', 'Automations')).toBe('自动化');
+    expect(translate('zh', 'Automation tasks')).toBe('自动化任务');
+  });
+
+  it('translates the draft attachment notices', () => {
+    expect(translate('zh', 'Restoring attachments…')).toBe('正在恢复附件…');
+    expect(translate('zh', 'Kept for this session only; a refresh may lose these attachments.'))
+      .toBe('本次会话内保留，刷新可能丢失。');
+    expect(translate('zh', 'Wait for the draft attachments to finish restoring.'))
+      .toBe('请等待附件恢复完成再发送。');
+  });
+
   it('normalizes persisted locale values', () => {
     expect(normalizeLocale('zh')).toBe('zh');
     expect(normalizeLocale('en')).toBe('en');

@@ -14,7 +14,7 @@ import {
   textResponse,
   toolCallResponse,
 } from '@omniagent/core';
-import type { SessionHandle } from '@omniagent/core';
+import type { SessionHandle, SessionOptions } from '@omniagent/core';
 import { createInitialDshPermissionEvent, projectDshPermissions } from '../../core/src/permissions/dsh-permissions';
 import type { DshPermissionSnapshot } from '../../core/src/permissions/dsh-permissions';
 import { ApprovalBroker } from './approval';
@@ -67,6 +67,18 @@ async function setup(
   });
   hosts.push(host);
   return { base: host.address()!, first, second, store, workspaces, host };
+}
+
+/**
+ * Window that leaves `messageBudget` tokens for messages under one session's
+ * derived budget. The loop subtracts the prompt, the tool disclosure and the
+ * output reserve from the window, so a window number alone no longer means
+ * "history budget"; a probe session with the same options reports the overhead.
+ */
+function budgetWindow(options: SessionOptions, messageBudget: number): number {
+  const probe = new Session({ ...options, model: new FakeModel([]) });
+  const breakdown = probe.contextProjection()?.breakdown;
+  return (breakdown?.systemTokens ?? 0) + (breakdown?.toolsTokens ?? 0) + messageBudget;
 }
 
 function signal() {
@@ -375,11 +387,14 @@ describe('workspace web host', () => {
   });
 
   it('uses the live compacted history instead of replay', async () => {
-    const { base, first, store } = await setup((_id, permissions, workspace, handle) => new Session({
-      cwd: workspace.path, session: handle, dshPermissions: permissions,
-      approve: async () => 'deny', contextWindowTokens: 40,
-      model: new FakeModel([textResponse('done')], { onExhausted: textResponse('done') }),
-    }));
+    const { base, first, store } = await setup((_id, permissions, workspace, handle) => {
+      const options: SessionOptions = {
+        cwd: workspace.path, session: handle, dshPermissions: permissions,
+        approve: async () => 'deny', outputTokenReserve: 0,
+        model: new FakeModel([textResponse('done')], { onExhausted: textResponse('done') }),
+      };
+      return new Session({ ...options, contextWindowTokens: budgetWindow(options, 20) });
+    });
     const handle = await store.create({ id: 'compact-context', workspace: first.path, cwd: first.path });
     await handle.append(createInitialDshPermissionEvent('workspace-write'));
     await handle.append({ type: 'message/user', data: { text: 'old '.repeat(300) } });
@@ -391,7 +406,7 @@ describe('workspace web host', () => {
     expect(live.estimatedMessageTokens).toBeLessThan(replay.estimatedMessageTokens);
   });
 
-  it('does not expose a stale estimate during an active turn', async () => {
+  it('reports the live projection and estimate during an active turn', async () => {
     const started = signal();
     const finish = signal();
     const { base, first, store } = await setup((id) => ({
@@ -399,12 +414,53 @@ describe('workspace web host', () => {
       async *send() { started.resolve(); await finish.promise; yield { type: 'turn.end', reason: 'end_turn' }; },
       interrupt() { finish.resolve(); },
       contextMessageEstimate() { return 123; },
+      contextProjection() {
+        return {
+          breakdown: { systemTokens: 1, toolsTokens: 2, messageTokens: 120 },
+          projectedTokens: 123, source: 'estimate' as const,
+        };
+      },
+      activeTurn: true,
     }));
     const handle = await store.create({ id: 'busy-context', workspace: first.path, cwd: first.path });
     await handle.append(createInitialDshPermissionEvent('workspace-write'));
     const url = `${sessionsUrl(base, first.id)}/busy-context`;
     const pending = fetch(`${url}/messages`, jsonRequest({ text: 'hello' }));
     await started.promise;
+    // The loop publishes the request it will send at every step boundary, so a
+    // running turn has a reading instead of hiding behind a stale one.
+    expect(await (await fetch(`${url}/context`)).json()).toEqual({
+      estimatedMessageTokens: 123,
+      projection: {
+        breakdown: { systemTokens: 1, toolsTokens: 2, messageTokens: 120 },
+        projectedTokens: 123, source: 'estimate',
+      },
+    });
+    finish.resolve();
+    await (await pending).text();
+  });
+
+  it('omits the projection for a running turn this host has no live session for', async () => {
+    const started = signal();
+    const finish = signal();
+    const { base, first, store } = await setup((id) => ({
+      id,
+      async *send() { started.resolve(); await finish.promise; yield { type: 'turn.end', reason: 'end_turn' }; },
+      interrupt() { finish.resolve(); },
+      contextMessageEstimate() { return 123; },
+      contextProjection() {
+        return { breakdown: { systemTokens: 1, toolsTokens: 2, messageTokens: 120 }, projectedTokens: 123, source: 'estimate' as const };
+      },
+    }));
+    const handle = await store.create({ id: 'moved-context', workspace: first.path, cwd: first.path });
+    await handle.append(createInitialDshPermissionEvent('workspace-write'));
+    const url = `${sessionsUrl(base, first.id)}/moved-context`;
+    const pending = fetch(`${url}/messages`, jsonRequest({ text: 'hello' }));
+    await started.promise;
+    // A preset the running runtime did not capture means the live session no
+    // longer matches this session's selection: replay cannot see the interim
+    // history, so the answer stays empty rather than quoting the log.
+    await handle.append(createInitialDshPermissionEvent('read-only'));
     expect(await (await fetch(`${url}/context`)).json()).toEqual({});
     finish.resolve();
     await (await pending).text();

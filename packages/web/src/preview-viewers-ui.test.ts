@@ -12,6 +12,7 @@ import { SheetViewer } from '../ui/src/components/preview/viewers/SheetViewer.ts
 import { TextViewer } from '../ui/src/components/preview/viewers/TextViewer.tsx';
 import { UnsupportedViewer } from '../ui/src/components/preview/viewers/UnsupportedViewer.tsx';
 import { RightPanel } from '../ui/src/components/RightPanel.tsx';
+import { previewTabId, rightPanelReducer, seedLayout } from '../ui/src/lib/right-panel-tabs.ts';
 import { AppStore, store } from '../ui/src/lib/store.ts';
 
 vi.mock('react', async (importOriginal) => {
@@ -53,11 +54,14 @@ describe('preview surface', () => {
 describe('preview tab', () => {
   it('names the dock tab after the previewed file', () => {
     englishStore();
+    const preview = { workspaceId: 'ws', workspaceName: 'Demo workspace', path: 'docs/guide.md' };
     const html = renderToStaticMarkup(createElement(RightPanel, {
       fullscreen: false,
-      view: 'preview',
-      preview: { workspaceId: 'ws', workspaceName: 'Demo workspace', path: 'docs/guide.md' },
-      onViewChange: () => {},
+      layout: rightPanelReducer(seedLayout(), {
+        type: 'open',
+        tab: { id: previewTabId(preview.workspaceId, preview.path), kind: 'preview', resource: preview },
+      }),
+      onAction: () => {},
       onClose: () => {},
       onToggleFullscreen: () => {},
     }));
@@ -71,9 +75,8 @@ describe('preview tab', () => {
     englishStore();
     const html = renderToStaticMarkup(createElement(RightPanel, {
       fullscreen: false,
-      view: 'guide',
-      preview: null,
-      onViewChange: () => {},
+      layout: seedLayout(),
+      onAction: () => {},
       onClose: () => {},
       onToggleFullscreen: () => {},
     }));

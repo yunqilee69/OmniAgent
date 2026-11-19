@@ -9,6 +9,8 @@ import { ProviderRequestError } from '../providers/errors';
 import { FakeModel, textResponse, toolCallResponse } from '../providers/fake';
 import type { ModelClient, ModelResponse } from '../providers/types';
 import { ToolRegistry } from '../tools/registry';
+import { estimateMessageTokens, estimateMessages } from '../context/compaction';
+import { contextBreakdown } from '../context/projection';
 import { AgentLoop } from './agent-loop';
 
 /**
@@ -35,6 +37,21 @@ const allowAll: PermissionGate = {
 
 function registryWithEcho(): ToolRegistry {
   return new ToolRegistry().register(echoTool);
+}
+
+/**
+ * Window that leaves exactly `messageBudget` tokens for messages.
+ *
+ * The loop derives that budget as `window - system - tools - outputReserve`, so
+ * a raw window number in a test no longer means "history budget". These cases
+ * pass `outputTokenReserveTokens: 0` to keep the arithmetic explicit.
+ */
+function windowForMessageBudget(
+  messageBudget: number,
+  options: { system?: string; tools?: ToolRegistry } = {},
+): number {
+  const breakdown = contextBreakdown(options.system ?? '', (options.tools ?? registryWithEcho()).specs(), []);
+  return breakdown.systemTokens + breakdown.toolsTokens + messageBudget;
 }
 
 async function collect(generator: AsyncGenerator<AgentEvent, Message[]>) {
@@ -73,7 +90,7 @@ describe('AgentLoop', () => {
       };
       const loop = new AgentLoop({ model, modelId: 'timed', system: () => { clock += 500; return ''; },
         tools: registryWithEcho(), permissions: allowAll, cwd: process.cwd(), sessionId: 'test',
-        contextWindowTokens: 8,
+        contextWindowTokens: windowForMessageBudget(8), outputTokenReserveTokens: 0,
         prepareToolCall: async (call) => ({ decision: 'allow', source: 'test', execute: async () => {
           clock += 300;
           return { callId: call.id, name: call.name, ok: true, content: 'done', truncated: false };
@@ -413,7 +430,8 @@ describe('AgentLoop', () => {
       textResponse('done'),
     ]);
     const loop = new AgentLoop({ model, modelId: 'fake', imageInput: true, system: '', tools: registryWithEcho(),
-      permissions: allowAll, cwd: process.cwd(), sessionId: 'test', contextWindowTokens: 10,
+      permissions: allowAll, cwd: process.cwd(), sessionId: 'test',
+      contextWindowTokens: windowForMessageBudget(10), outputTokenReserveTokens: 0,
       takeQueuedMessages: () => ++drains === 2 ? [steer1] : drains === 3 ? [steer2] : [] });
     const { events } = await collect(loop.run([userMessage('old '.repeat(1000)), prompt]));
     expect(events.filter((event) => event.type === 'context.compacted').length).toBeGreaterThanOrEqual(2);
@@ -423,18 +441,35 @@ describe('AgentLoop', () => {
     expect(model.requests[2]?.messages).toEqual(expect.arrayContaining([prompt, steer1, steer2]));
   });
 
-  it('does not compact text-model history based on image base64 size', async () => {
-    const image = { type: 'image' as const, mediaType: 'image/png', data: 'x'.repeat(10_000), filePath: '.images/a.png' };
-    const model = new FakeModel([textResponse('done')]);
-    const loop = new AgentLoop({ model, modelId: 'fake', imageInput: false, system: '', tools: registryWithEcho(),
-      permissions: allowAll, cwd: process.cwd(), sessionId: 'test', contextWindowTokens: 100 });
-    const { events, messages } = await collect(loop.run([{ role: 'user', content: [image] }]));
-    expect(events.some((event) => event.type === 'context.compacted')).toBe(false);
-    expect(model.requests[0]?.messages[0]).toMatchObject({ role: 'user', content: [
-      { type: 'text', text: expect.stringContaining('.images/a.png') },
-    ] });
-    expect(messages[0]).toEqual({ role: 'user', content: [image] });
-  });
+  it.each([false, true])('charges an image by its visual cost, not by its base64 size, for imageInput=%s',
+    async (imageInput) => {
+      const image = { type: 'image' as const, mediaType: 'image/png', data: 'x'.repeat(10_000), filePath: '.images/a.png' };
+      const imageMessage: Message = { role: 'user', content: [image] };
+      const history = [userMessage('old '.repeat(100)), imageMessage];
+      const model = new FakeModel([textResponse('done')]);
+      const loop = new AgentLoop({ model, modelId: 'fake', imageInput, system: '', tools: registryWithEcho(),
+        permissions: allowAll, cwd: process.cwd(), sessionId: 'test',
+        contextWindowTokens: windowForMessageBudget(200), outputTokenReserveTokens: 0 });
+      const { events } = await collect(loop.run(history));
+      // A text-only model sees a short placeholder, so the budget is plenty. An
+      // image model is charged the fixed visual cost and must compact — with the
+      // 10k characters of base64 charged as one image, not as 2.5k tokens.
+      expect(events.some((event) => event.type === 'context.compacted')).toBe(imageInput);
+      const sent = model.requests[0]?.messages ?? [];
+      if (imageInput) {
+        expect(sent).toContainEqual(imageMessage);
+        expect(sent[0]).toMatchObject({
+          role: 'user',
+          content: [{ type: 'text', text: expect.stringContaining('summary') }],
+        });
+      } else {
+        expect(sent[0]).toEqual(history[0]);
+        expect(sent.at(-1)).toMatchObject({ role: 'user', content: [
+          { type: 'text', text: expect.stringContaining('.images/a.png') },
+        ] });
+        expect(JSON.stringify(sent)).not.toContain('x'.repeat(100));
+      }
+    });
 
   it('compacts oversized history before the next provider request', async () => {
     const model = new FakeModel([textResponse('done')]);
@@ -446,7 +481,8 @@ describe('AgentLoop', () => {
       permissions: allowAll,
       cwd: process.cwd(),
       sessionId: 'test',
-      contextWindowTokens: 8,
+      contextWindowTokens: windowForMessageBudget(8, { system: 'test' }),
+      outputTokenReserveTokens: 0,
       retainContextTokens: 2,
     });
 
@@ -488,6 +524,208 @@ describe('AgentLoop', () => {
       role: 'user',
       content: [{ type: 'text', text: expect.stringContaining('summary') }],
     });
+  });
+
+  it('compacts against the window minus the prompt, the tools and the output reserve', async () => {
+    const system = 'test';
+    const tools = registryWithEcho();
+    const overhead = contextBreakdown(system, tools.specs(), []);
+    const window = 300_000;
+    const reserve = 8_000;
+    const messageBudget = window - overhead.systemTokens - overhead.toolsTokens - reserve;
+    // Just over the derived budget but still below the raw window: exactly the
+    // range the old "window == message budget" rule never compacted.
+    const history = [userMessage('x'.repeat(1_170_000)), userMessage('current')];
+    const before = estimateMessages(history);
+    expect(before).toBeGreaterThan(messageBudget);
+    expect(before).toBeLessThan(window);
+
+    const model = new FakeModel([textResponse('done')]);
+    const loop = new AgentLoop({ model, modelId: 'fake', system, tools, permissions: allowAll,
+      cwd: process.cwd(), sessionId: 'test', contextWindowTokens: window, outputTokenReserveTokens: reserve });
+    const { events } = await collect(loop.run(history));
+
+    const compacted = events.find((event) => event.type === 'context.compacted');
+    expect(compacted).toMatchObject({ type: 'context.compacted', beforeTokens: before });
+    expect(model.requests[0]?.messages[0]).toMatchObject({
+      role: 'user', content: [{ type: 'text', text: expect.stringContaining('summary') }],
+    });
+    // The request that actually goes out is inside the window, which is the
+    // point of deriving the budget instead of using the window as the budget.
+    expect(estimateMessages(model.requests[0]?.messages ?? [])).toBeLessThan(window);
+
+    // The same window leaves a small history alone: the trigger is the derived
+    // budget, not a fraction of the window.
+    const smallModel = new FakeModel([textResponse('done')]);
+    const smallLoop = new AgentLoop({ model: smallModel, modelId: 'fake', system, tools, permissions: allowAll,
+      cwd: process.cwd(), sessionId: 'test', contextWindowTokens: window, outputTokenReserveTokens: reserve });
+    const small = await collect(smallLoop.run([userMessage('x'.repeat(10_000))]));
+    expect(small.events.some((event) => event.type === 'context.compacted')).toBe(false);
+  });
+
+  it('fails the turn before calling the provider when the window cannot hold a message', async () => {
+    const warn = vi.spyOn(console, 'warn').mockImplementation(() => {});
+    try {
+      const tools = registryWithEcho();
+      const overhead = contextBreakdown('test', tools.specs(), []);
+      // A window barely above the overhead: even the clamped reserve (half the
+      // window) leaves no room for a message.
+      const window = overhead.systemTokens + overhead.toolsTokens + 40;
+      const reserve = Math.min(1_000, Math.floor(window / 2));
+      const rawBudget = window - overhead.systemTokens - overhead.toolsTokens - reserve;
+      expect(rawBudget).toBeLessThan(1);
+      const model = new FakeModel([textResponse('never sent')]);
+      const loop = new AgentLoop({ model, modelId: 'fake', system: 'test', tools, permissions: allowAll,
+        cwd: process.cwd(), sessionId: 'test', contextWindowTokens: window, outputTokenReserveTokens: 1_000 });
+
+      const { events, messages } = await collect(loop.run([userMessage('hello')]));
+
+      expect(events.map((event) => event.type)).toEqual(['turn.start', 'error', 'turn.end']);
+      const error = events[1];
+      expect(error).toMatchObject({ type: 'error', error: { code: 'CONTEXT_BUDGET_TOO_SMALL' } });
+      const message = error?.type === 'error' ? error.error.message : '';
+      expect(message).toContain(`window=${window}`);
+      expect(message).toContain(`system=${overhead.systemTokens}`);
+      expect(message).toContain(`tools=${overhead.toolsTokens}`);
+      expect(message).toContain(`outputReserve=${reserve}`);
+      expect(message).toContain(`remaining=${rawBudget}`);
+      expect(message).toMatch(/raise/i);
+      expect(events.at(-1)).toEqual({ type: 'turn.end', reason: 'error' });
+      // Nothing was sent and nothing was compacted: the turn ended instead of
+      // clamping the budget to one message and overflowing the window.
+      expect(model.requests).toHaveLength(0);
+      expect(messages).toEqual([userMessage('hello')]);
+      expect(warn.mock.calls.filter(([line]) => String(line).includes('CONTEXT_BUDGET_TOO_SMALL')
+        || String(line).includes('Context budget too small'))).toHaveLength(1);
+    } finally {
+      warn.mockRestore();
+    }
+  });
+
+  it('warns once per turn and stays quiet when no window is configured', async () => {
+    const warn = vi.spyOn(console, 'warn').mockImplementation(() => {});
+    try {
+      const model = new FakeModel([
+        toolCallResponse([{ id: 'c1', name: 'echo', args: { text: 'go' } }]),
+        textResponse('done'),
+      ]);
+      const loop = new AgentLoop({ model, modelId: 'fake', system: '', tools: registryWithEcho(),
+        permissions: allowAll, cwd: process.cwd(), sessionId: 'test' });
+      const { events } = await collect(loop.run([userMessage('hello')]));
+      expect(events.some((event) => event.type === 'error')).toBe(false);
+      expect(events.some((event) => event.type === 'context.compacted')).toBe(false);
+      expect(warn.mock.calls.filter(([line]) => String(line).includes('no context window configured')))
+        .toHaveLength(1);
+    } finally {
+      warn.mockRestore();
+    }
+  });
+
+  it('warns once when the request is over budget but nothing can be compacted', async () => {
+    const warn = vi.spyOn(console, 'warn').mockImplementation(() => {});
+    try {
+      const tools = registryWithEcho();
+      const budget = 100;
+      const model = new FakeModel([textResponse('done')]);
+      const loop = new AgentLoop({ model, modelId: 'fake', system: '', tools, permissions: allowAll,
+        cwd: process.cwd(), sessionId: 'test',
+        contextWindowTokens: windowForMessageBudget(budget), outputTokenReserveTokens: 0 });
+      // The only message is the current user message, which is always protected.
+      const { events } = await collect(loop.run([userMessage('a'.repeat(1_000))]));
+      expect(events.some((event) => event.type === 'context.compacted')).toBe(false);
+      // Over budget is a warning, not a fatal error: the turn still completes.
+      expect(events.at(-1)).toEqual({ type: 'turn.end', reason: 'end_turn' });
+      const warnings = warn.mock.calls.map(([line]) => String(line))
+        .filter((line) => line.includes('compaction made no progress'));
+      expect(warnings).toHaveLength(1);
+      expect(warnings[0]).toContain('before=');
+      expect(warnings[0]).toContain(`budget=${budget}`);
+      expect(warnings[0]).toContain('removed=0');
+      expect(warnings[0]).toContain('reason=no-removable-group');
+    } finally {
+      warn.mockRestore();
+    }
+  });
+
+  it('warns when a summary would not shrink an over-budget request', async () => {
+    const warn = vi.spyOn(console, 'warn').mockImplementation(() => {});
+    try {
+      const tools = registryWithEcho();
+      const budget = 100;
+      const model = new FakeModel([textResponse('done')]);
+      const loop = new AgentLoop({ model, modelId: 'fake', system: '', tools, permissions: allowAll,
+        cwd: process.cwd(), sessionId: 'test',
+        contextWindowTokens: windowForMessageBudget(budget), outputTokenReserveTokens: 0 });
+      // A tiny removable prefix plus a protected message that alone exceeds the
+      // budget: the summary is larger than what it replaces.
+      const { events } = await collect(loop.run([userMessage('a'), userMessage('d'.repeat(1_000))]));
+      expect(events.some((event) => event.type === 'context.compacted')).toBe(false);
+      expect(events.at(-1)).toEqual({ type: 'turn.end', reason: 'end_turn' });
+      const warnings = warn.mock.calls.map(([line]) => String(line))
+        .filter((line) => line.includes('compaction made no progress'));
+      expect(warnings).toHaveLength(1);
+      expect(warnings[0]).toContain('reason=no-reduction');
+    } finally {
+      warn.mockRestore();
+    }
+  });
+
+  it('publishes the request history at every point the loop changes it', async () => {
+    const snapshots: Message[][] = [];
+    const steer = userMessage('steer');
+    let drains = 0;
+    const model = new FakeModel([
+      toolCallResponse([{ id: 'c1', name: 'echo', args: { text: 'go' } }]),
+      toolCallResponse([{ id: 'c2', name: 'echo', args: { text: 'again' } }]),
+      textResponse('done'),
+    ]);
+    const loop = new AgentLoop({ model, modelId: 'fake', system: '', tools: registryWithEcho(),
+      permissions: allowAll, cwd: process.cwd(), sessionId: 'test',
+      takeQueuedMessages: () => ++drains === 2 ? [steer] : [],
+      afterToolBatch: async () => [userMessage('batch settled')],
+      onTurnHistory: (messages) => snapshots.push([...messages]) });
+
+    const { messages } = await collect(loop.run([userMessage('start')]));
+
+    // Entry, then per step: assistant, tool batch, settled batch, plus the
+    // queued steer pushed before step two.
+    expect(snapshots).toHaveLength(9);
+    expect(snapshots[0]).toEqual([userMessage('start')]);
+    expect(snapshots[1]?.at(-1)).toMatchObject({ role: 'assistant' });
+    expect(snapshots[2]?.map((message) => message.role)).toEqual(['user', 'assistant', 'tool']);
+    expect(snapshots[3]?.at(-1)).toEqual(userMessage('batch settled'));
+    expect(snapshots[4]).toEqual(snapshots[3]!.concat([steer]));
+    expect(snapshots.at(-1)?.at(-1)).toMatchObject({
+      role: 'assistant', content: [{ type: 'text', text: 'done' }],
+    });
+    // The observers get copies: the loop keeps mutating its own array.
+    expect(snapshots.at(-1)).not.toBe(messages);
+    expect(snapshots.at(-1)).toEqual(messages);
+  });
+
+  it('publishes the compacted history right after compacting', async () => {
+    const snapshots: Array<{ types: string[]; messages: Message[] }> = [];
+    const model = new FakeModel([textResponse('done')]);
+    const loop = new AgentLoop({ model, modelId: 'fake', system: '', tools: registryWithEcho(),
+      permissions: allowAll, cwd: process.cwd(), sessionId: 'test',
+      contextWindowTokens: windowForMessageBudget(8), outputTokenReserveTokens: 0,
+      onTurnHistory: (messages) => snapshots.push({ types: [], messages: [...messages] }) });
+    const generator = loop.run([userMessage('old '.repeat(300)), userMessage('current')]);
+    const types: string[] = [];
+    let next = await generator.next();
+    while (!next.done) {
+      types.push(next.value.type);
+      next = await generator.next();
+    }
+    // The first snapshot is the raw history; the summary replaces it before the
+    // compaction event is emitted, so a reader never sees a stale pre-compaction
+    // layout after the event.
+    expect(snapshots[0]?.messages[0]).toEqual(userMessage('old '.repeat(300)));
+    const compactedIndex = snapshots.findIndex((snapshot) => snapshot.messages[0]?.role === 'user'
+      && snapshot.messages[0].content[0]?.type === 'text' && snapshot.messages[0].content[0].text.includes('summary'));
+    expect(compactedIndex).toBeGreaterThan(0);
+    expect(types[types.indexOf('context.compacted') - 1]).toBe('turn.start');
+    expect(snapshots.at(-1)?.messages.length).toBe(3);
   });
 
   it('未知工具不会抛异常，而是变成错误结果的 observation', async () => {

@@ -370,4 +370,10 @@ describe('workspace sidebar', () => {
     expect(html).not.toContain('title="/a">Alpha');
     expect(html).toContain('title="/b">Beta');
   });
+
+  it('labels the automation entry as 自动化, not as the automation tasks page', () => {
+    const html = renderSidebar({ locale: 'zh' });
+    expect(html).toContain('>自动化<');
+    expect(html).not.toContain('自动化任务');
+  });
 });

@@ -23,8 +23,11 @@ const writeCall = {
   args: { file_path: 'visible.txt', content: 'written', sandbox_permissions: 'workspace-write', justification: 'Write the requested file' },
 };
 
-/** A workspace whose single session asks for one approval, then finishes. */
-async function setup() {
+/**
+ * A workspace whose single session asks for one approval, then finishes.
+ * @param hostOptions - composition options, e.g. a short status heartbeat.
+ */
+async function setup(hostOptions: { statusHeartbeatMs?: number } = {}) {
   const root = await mkdtemp(join(tmpdir(), 'omniagent-web-status-'));
   roots.push(root);
   const workspacePath = join(root, 'status');
@@ -40,6 +43,7 @@ async function setup() {
     workspaces,
     store,
     approvalBroker: broker,
+    ...hostOptions,
     createSession: (target, session, permissions) => new Session({
       cwd: target.path,
       session,
@@ -51,7 +55,7 @@ async function setup() {
   hosts.push(host);
   const base = host.address()!;
   const sessions = `${base}/api/workspaces/${encodeURIComponent(workspace.id)}/sessions`;
-  return { base, workspace, sessions, path: `${sessions}/status-session` };
+  return { base, host, workspace, sessions, path: `${sessions}/status-session` };
 }
 
 /** Read one SSE data frame, failing instead of hanging when the host stays silent. */
@@ -219,5 +223,74 @@ describe('workspace session status stream', () => {
     const gone = fetch(`${base}/api/workspaces/${encodeURIComponent(workspace.id)}`, { method: 'DELETE' });
     await expect(status.next()).rejects.toThrow();
     expect((await gone).status).toBe(200);
+  });
+});
+
+/** Read a status stream as raw text so comment heartbeats are visible. */
+function rawStream(response: Response) {
+  const reader = response.body!.getReader();
+  const decoder = new TextDecoder();
+  let buffer = '';
+  return {
+    get seen(): string {
+      return buffer;
+    },
+    /** Read until `predicate` accepts everything seen so far. */
+    async until(predicate: (seen: string) => boolean, timeout = 4_000): Promise<string> {
+      const deadline = Date.now() + timeout;
+      while (!predicate(buffer)) {
+        if (Date.now() > deadline) throw new Error(`timed out waiting for stream text: ${JSON.stringify(buffer)}`);
+        const part = await reader.read();
+        if (part.done) throw new Error(`status stream ended: ${JSON.stringify(buffer)}`);
+        buffer += decoder.decode(part.value, { stream: true });
+      }
+      return buffer;
+    },
+    /** Whether the stream already ended, whether cleanly or with an aborted socket. */
+    async ended(): Promise<boolean> {
+      try {
+        const part = await reader.read();
+        return part.done === true || part.value === undefined;
+      } catch {
+        // A destroyed socket ends the stream too.
+        return true;
+      }
+    },
+    async cancel(): Promise<void> {
+      await reader.cancel();
+    },
+  };
+}
+
+describe('workspace status stream heartbeat', () => {
+  it('keeps an idle stream alive with comment lines instead of frames', async () => {
+    const { base, workspace } = await setup({ statusHeartbeatMs: 20 });
+    const stream = rawStream(await fetch(`${base}/api/workspaces/${workspace.id}/events`));
+    const seen = await stream.until((text) => (text.match(/: ping/g) ?? []).length >= 2, 4_000);
+    expect(seen).toContain(': connected\n\n');
+    // A heartbeat is a comment, so it never becomes a frame the client parses.
+    expect(seen.split('\n').filter((line) => line.startsWith('data: '))).toEqual([]);
+    await stream.cancel();
+  });
+
+  it('stops writing once the client closes the stream', async () => {
+    const { base, workspace } = await setup({ statusHeartbeatMs: 20 });
+    const stream = rawStream(await fetch(`${base}/api/workspaces/${workspace.id}/events`));
+    await stream.until((text) => text.includes(': ping'), 4_000);
+    await stream.cancel();
+    // Several heartbeat periods pass with nothing written to a closed stream.
+    await new Promise((resolve) => setTimeout(resolve, 120));
+    // Nothing was written to the closed stream: it is finished with no extra bytes.
+    expect(await stream.ended()).toBe(true);
+  });
+
+  it('ends the stream when the host closes', async () => {
+    const { base, host, workspace } = await setup({ statusHeartbeatMs: 20 });
+    const stream = rawStream(await fetch(`${base}/api/workspaces/${workspace.id}/events`));
+    await stream.until((text) => text.includes(': ping'), 4_000);
+    await host.close();
+    // All the pending listeners are dropped, so the client's stream ends here.
+    hosts.length = 0;
+    expect(await stream.ended()).toBe(true);
   });
 });

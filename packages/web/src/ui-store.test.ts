@@ -119,6 +119,89 @@ function sessionFetcher(
   };
 }
 
+interface StatusHarness {
+  store: AppStore;
+  /** Push one frame through the workspace status stream. */
+  push: (frame: Record<string, unknown>) => void;
+  /** Send frames on the newest followed run without closing it. */
+  sendFollow: (frames: unknown[]) => void;
+  /** Send frames plus `turn.end` on the newest followed run, then close it. */
+  finishFollow: (frames?: unknown[]) => void;
+  /** Every session detail request the store made. */
+  detailCalls: () => number;
+  /** Every followed-run request the store made. */
+  followCalls: () => number;
+}
+
+/**
+ * Boot a store whose workspace status stream, session details and followed runs
+ * are all driven by the test.
+ * @param options - response bodies and stream behaviour to substitute.
+ */
+async function bootStatus(options: {
+  detailBody?: () => unknown;
+  followBody?: () => Response;
+} = {}): Promise<StatusHarness> {
+  const encoder = new TextEncoder();
+  let status: ReadableStreamDefaultController<Uint8Array> | undefined;
+  const follows: ReadableStreamDefaultController<Uint8Array>[] = [];
+  const detailUrls: string[] = [];
+  const fetcher: typeof fetch = async (input, init) => {
+    const url = String(input);
+    const method = init?.method ?? 'GET';
+    if (url === '/api/workspaces/a/events' && method === 'GET') {
+      return new Response(new ReadableStream<Uint8Array>({
+        start(controller) { status = controller; },
+      }), { headers: { 'content-type': 'text/event-stream' } });
+    }
+    if (url === '/api/workspaces/a/sessions/shared/messages' && method === 'POST') {
+      return json({ accepted: true }, 202);
+    }
+    if (url === '/api/workspaces/a/sessions/shared/follow' && method === 'GET') {
+      if (options.followBody !== undefined) return options.followBody();
+      return new Response(new ReadableStream<Uint8Array>({
+        start(controller) { follows.push(controller); },
+      }), { headers: { 'content-type': 'text/event-stream' } });
+    }
+    if (url === '/api/workspaces/a/sessions/shared' && method === 'GET') {
+      detailUrls.push(url);
+      return json(options.detailBody?.() ?? detail());
+    }
+    return baseFetcher(input, init);
+  };
+  const store = await boot(fetcher);
+  const newestFollow = (): ReadableStreamDefaultController<Uint8Array> => {
+    const controller = follows.at(-1);
+    if (controller === undefined) throw new Error('no followed run to write to');
+    return controller;
+  };
+  const sendFollow = (frames: unknown[]): void => {
+    const controller = newestFollow();
+    for (const frame of frames) controller.enqueue(encoder.encode(`data: ${JSON.stringify(frame)}\n\n`));
+  };
+  return {
+    store,
+    push: (frame) => status?.enqueue(encoder.encode(`data: ${JSON.stringify(frame)}\n\n`)),
+    sendFollow,
+    finishFollow: (frames = []) => {
+      sendFollow([...frames, { type: 'turn.end', reason: 'end_turn' }]);
+      newestFollow().close();
+    },
+    detailCalls: () => detailUrls.length,
+    followCalls: () => follows.length,
+  };
+}
+
+/** Let queued promises and zero-delay timers run while fake timers are installed. */
+async function flush(turns = 4): Promise<void> {
+  for (let index = 0; index < turns; index += 1) await vi.advanceTimersByTimeAsync(0);
+}
+
+/** One persisted turn end, as the detail response reports it. */
+function turnEnd(seq: number, reason = 'end_turn'): Record<string, unknown> {
+  return { type: 'trace/turn.end', seq, ts: seq, data: { reason } };
+}
+
 beforeEach(() => {
   const values = new Map<string, string>();
   const pending = new Map<string, Promise<unknown>>();
@@ -445,23 +528,17 @@ describe('independent run observation', () => {
     store.dispose();
   });
 
-  it('discovers a run started in another tab and restores plan review', async () => {
+  it('discovers a run started in another tab from a pushed state change', async () => {
     let running = false;
-    let controller!: ReadableStreamDefaultController<Uint8Array>;
-    const store = await boot(sessionFetcher((url) => {
-      if (url === '/api/workspaces/a/sessions/shared/follow') {
-        return new Response(new ReadableStream<Uint8Array>({ start(value) { controller = value; } }));
-      }
-      if (url === '/api/workspaces/a/sessions/shared') return json(detail({ running }));
-      return undefined;
-    }));
+    const harness = await bootStatus({ detailBody: () => detail({ running }) });
     running = true;
-    await waitFor(() => controller !== undefined, 4000);
-    controller.enqueue(new TextEncoder().encode('data: {"type":"run.snapshot","events":[{"type":"plan.review.requested","requestId":"p1","plan":"Plan"}]}\n\n'));
-    await waitFor(() => store.currentEntry()?.run?.planReview?.requestId === 'p1');
-    expect(store.currentEntry()?.running).toBe(true);
-    store.dispose();
-    controller.close();
+    harness.push({ type: 'session.status', sessionId: 'shared', running: true, pending: null });
+    // The push is the only discovery channel now: no timer reloads the session.
+    await waitFor(() => harness.followCalls() === 1, 4000);
+    harness.sendFollow([{ type: 'run.snapshot', events: [{ type: 'plan.review.requested', requestId: 'p1', plan: 'Plan' }] }]);
+    await waitFor(() => harness.store.currentEntry()?.run?.planReview?.requestId === 'p1');
+    expect(harness.store.currentEntry()?.running).toBe(true);
+    harness.store.dispose();
   });
 
   it('drops the review once a resumed turn snapshot already carries the decision', async () => {
@@ -2095,5 +2172,178 @@ describe('workbench store', () => {
 
     await expect(store.copySessionId('shared')).resolves.toBe(false);
     expect(store.getSnapshot().alert).not.toBe('');
+  });
+});
+
+describe('refresh strategy and stable rendering', () => {
+  afterEach(() => {
+    vi.useRealTimers();
+  });
+
+  it('never re-reads a session on its own while it stays idle', async () => {
+    const harness = await bootStatus();
+    const before = harness.detailCalls();
+    vi.useFakeTimers();
+    try {
+      await vi.advanceTimersByTimeAsync(10_000);
+      expect(harness.detailCalls()).toBe(before);
+      // A frame that repeats the state already on screen is not news.
+      harness.push({ type: 'session.status', sessionId: 'shared', running: false, pending: null });
+      await flush();
+      expect(harness.detailCalls()).toBe(before);
+    } finally {
+      harness.store.dispose();
+    }
+  });
+
+  it('reconciles a finished turn exactly once per turn', async () => {
+    let events: unknown[] = [{ type: 'message/user', seq: 0, data: { content: 'Question' } }, turnEnd(1)];
+    const harness = await bootStatus({ detailBody: () => ({ ...detail({ text: 'Question' }), events }) });
+    const before = harness.detailCalls();
+    vi.useFakeTimers();
+    try {
+      harness.push({ type: 'session.status', sessionId: 'shared', running: true, pending: null });
+      await flush();
+      expect(harness.store.currentEntry()?.running).toBe(true);
+
+      events = [
+        { type: 'message/user', seq: 0, data: { content: 'Question' } },
+        turnEnd(2),
+        // Events that land after the turn end belong to the same finished turn.
+        { type: 'message/assistant', seq: 3, data: { message: { role: 'assistant', content: [{ type: 'text', text: 'Answer' }] } } },
+      ];
+      harness.push({ type: 'session.status', sessionId: 'shared', running: false, pending: null });
+      await flush();
+      expect(harness.detailCalls()).toBe(before + 1);
+
+      // The same transition again, and the discovery poll it scheduled, stay quiet.
+      harness.push({ type: 'session.status', sessionId: 'shared', running: false, pending: null });
+      await vi.advanceTimersByTimeAsync(2_000);
+      expect(harness.detailCalls()).toBe(before + 1);
+
+      // The next turn is a new reconcile target.
+      harness.push({ type: 'session.status', sessionId: 'shared', running: true, pending: null });
+      await flush();
+      events = [...events, turnEnd(4)];
+      harness.push({ type: 'session.status', sessionId: 'shared', running: false, pending: null });
+      await flush();
+      expect(harness.detailCalls()).toBe(before + 2);
+    } finally {
+      harness.store.dispose();
+    }
+  });
+
+  it('leaves a turn without a persisted end alone until one shows up', async () => {
+    const harness = await bootStatus();
+    const before = harness.detailCalls();
+    vi.useFakeTimers();
+    try {
+      harness.push({ type: 'session.status', sessionId: 'shared', running: true, pending: null });
+      await flush();
+      harness.push({ type: 'session.status', sessionId: 'shared', running: false, pending: null });
+      await vi.advanceTimersByTimeAsync(2_000);
+      expect(harness.detailCalls()).toBe(before);
+    } finally {
+      harness.store.dispose();
+    }
+  });
+
+  it('follows a run that started elsewhere once the state says it is running', async () => {
+    let running = false;
+    const harness = await bootStatus({ detailBody: () => detail({ running }) });
+    vi.useFakeTimers();
+    try {
+      running = true;
+      harness.push({ type: 'session.status', sessionId: 'shared', running: true, pending: null });
+      await flush();
+      expect(harness.followCalls()).toBe(0);
+      await vi.advanceTimersByTimeAsync(1_500);
+      harness.sendFollow([{ type: 'run.snapshot', events: [{ type: 'assistant.delta', text: 'live' }] }]);
+      await flush();
+      expect(harness.followCalls()).toBe(1);
+      expect(harness.store.currentEntry()?.run).toBeDefined();
+    } finally {
+      harness.store.dispose();
+    }
+  });
+
+  it('reconciles once when the state change arrives before the followed run ends', async () => {
+    let running = false;
+    let events: unknown[] = [{ type: 'message/user', seq: 0, data: { content: 'Question' } }, turnEnd(1)];
+    const harness = await bootStatus({ detailBody: () => ({ ...detail({ text: 'Question', running }), events }) });
+    const before = harness.detailCalls();
+    expect(await harness.store.sendMessage('Question')).toBe(true);
+    await waitFor(() => harness.followCalls() === 1);
+    running = true;
+    vi.useFakeTimers();
+    try {
+      harness.push({ type: 'session.status', sessionId: 'shared', running: true, pending: null });
+      await flush();
+      harness.push({ type: 'session.status', sessionId: 'shared', running: false, pending: null });
+      await flush();
+      // A followed run owns its own reconciliation, so the push must not ask.
+      expect(harness.detailCalls()).toBe(before);
+
+      running = false;
+      events = [...events, turnEnd(5)];
+      harness.finishFollow();
+      await flush(10);
+      expect(harness.detailCalls()).toBe(before + 1);
+
+      harness.push({ type: 'session.status', sessionId: 'shared', running: false, pending: null });
+      await flush();
+      expect(harness.detailCalls()).toBe(before + 1);
+    } finally {
+      harness.store.dispose();
+    }
+  });
+
+  it('reconciles once when the followed run ends before the state change arrives', async () => {
+    let running = false;
+    let events: unknown[] = [{ type: 'message/user', seq: 0, data: { content: 'Question' } }, turnEnd(1)];
+    const harness = await bootStatus({ detailBody: () => ({ ...detail({ text: 'Question', running }), events }) });
+    const before = harness.detailCalls();
+    expect(await harness.store.sendMessage('Question')).toBe(true);
+    await waitFor(() => harness.followCalls() === 1);
+    vi.useFakeTimers();
+    try {
+      harness.push({ type: 'session.status', sessionId: 'shared', running: true, pending: null });
+      await flush();
+      running = false;
+      events = [
+        { type: 'message/user', seq: 0, data: { content: 'Question' } },
+        turnEnd(7),
+        { type: 'message/assistant', seq: 8, data: { message: { role: 'assistant', content: [{ type: 'text', text: 'Answer' }] } } },
+      ];
+      harness.finishFollow();
+      await flush(10);
+      expect(harness.detailCalls()).toBe(before + 1);
+
+      harness.push({ type: 'session.status', sessionId: 'shared', running: false, pending: null });
+      await flush();
+      expect(harness.detailCalls()).toBe(before + 1);
+    } finally {
+      harness.store.dispose();
+    }
+  });
+
+  it('keeps the transcript arrays when a response repeats what is on screen', async () => {
+    let calls = 0;
+    const store = await boot(sessionFetcher((url) => {
+      if (url === '/api/workspaces/a/sessions/shared') {
+        calls += 1;
+        return json({ ...detail({ text: 'Question' }), events: [turnEnd(1)] });
+      }
+      return undefined;
+    }));
+    const first = store.currentEntry()!;
+    store.selectSession('shared');
+    await waitFor(() => calls === 2);
+    await waitFor(() => store.currentEntry()?.loading === false);
+    const second = store.currentEntry()!;
+    // Same arrays: a repeated response must not remount the conversation.
+    expect(second.transcript).toBe(first.transcript);
+    expect(second.turns).toBe(first.turns);
+    store.dispose();
   });
 });
