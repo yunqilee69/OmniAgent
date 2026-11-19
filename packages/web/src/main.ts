@@ -105,7 +105,7 @@ async function main(): Promise<void> {
       description: agent.description,
       role: agent.role,
       usage: agent.usage,
-      profile: agent.profile,
+
       builtIn: agent.sourcePath.startsWith('builtin:'),
       valid: true,
       warnings: [],
@@ -116,7 +116,7 @@ async function main(): Promise<void> {
       description: '',
       role: '',
       usage: 'both',
-      profile: '',
+
       valid: false,
       warnings: [error.error],
     }));

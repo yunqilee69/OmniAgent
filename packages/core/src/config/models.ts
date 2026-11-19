@@ -273,17 +273,6 @@ export function buildConfigCatalog(config: Config): ConfigCatalog {
   }
 
   const profiles = new Map<string, AgentProfileDefinition>();
-  if (config.agentProfiles === undefined) {
-    profiles.set('default', { id: 'default', tools: '*', skills: '*' });
-  } else {
-    for (const [id, profile] of Object.entries(config.agentProfiles)) {
-      profiles.set(id, {
-        id,
-        tools: profile.tools === '*' ? '*' : [...profile.tools],
-        skills: profile.skills === '*' ? '*' : [...(profile.skills ?? [])],
-      });
-    }
-  }
 
   for (const [provider, message] of errors) warnings.push(`Provider "${provider}": ${message}`);
   return { providers, roles, roleErrors, profiles, warnings };

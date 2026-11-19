@@ -157,7 +157,7 @@ export interface AgentSummary {
   description: string;
   role: string;
   usage: AgentUsage;
-  profile: string;
+
   /** Built-in definitions ship with OmniAgent instead of an agents/*.md file. */
   builtIn?: boolean;
   valid: boolean;
@@ -974,7 +974,6 @@ async function route(
     if (request.method === 'GET') {
       return json(response, 200, {
         agents: await options.agentAuthoring.list(),
-        profiles: await options.agentAuthoring.listProfiles(),
       });
     }
   }
@@ -985,7 +984,7 @@ async function route(
       try {
         return json(response, 200, {
           agent: await options.agentAuthoring.read(id),
-          profiles: await options.agentAuthoring.listProfiles(),
+          capabilities: { tools: [], skills: [] },
         });
       } catch (error) {
         if (error instanceof InvalidAgentSettings) throw new HttpError(404, error.message);
@@ -2568,7 +2567,7 @@ function agentSummary(runtime: ResolvedSessionRuntime): AgentSummary {
     description: runtime.agent.description,
     role: runtime.agent.role,
     usage: runtime.agent.usage,
-    profile: runtime.agent.profile,
+
     builtIn: runtime.agent.sourcePath.startsWith('builtin:'),
     valid: true,
     warnings: [],

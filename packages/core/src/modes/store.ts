@@ -350,7 +350,7 @@ export class ModeStore {
   private validate(
     mode: ModeDefinition,
     catalog: ConfigCatalog,
-    agents: readonly { id: string; role: string; profile: string; usage: 'primary' | 'subagent' | 'both' }[],
+    agents: readonly { id: string; role: string; usage: 'primary' | 'subagent' | 'both' }[],
   ): ModeSummary {
     const warnings: string[] = [];
     if (mode.type === 'team') this.validateTeam(mode, catalog, agents, warnings);
@@ -373,7 +373,7 @@ export class ModeStore {
   private validateTeam(
     mode: ModeDefinition,
     catalog: ConfigCatalog,
-    agents: readonly { id: string; role: string; profile: string; usage: 'primary' | 'subagent' | 'both' }[],
+    agents: readonly { id: string; role: string; usage: 'primary' | 'subagent' | 'both' }[],
     warnings: string[],
   ): void {
     if (mode.members.length === 0) warnings.push('A team mode requires at least one member');

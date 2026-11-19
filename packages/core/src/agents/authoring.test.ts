@@ -46,8 +46,7 @@ describe('creator agent authoring', () => {
       description: 'Writes focused code changes',
       role: 'quick',
       usage: 'primary',
-      profile: 'default',
-      instructions: 'You write code.',
+            instructions: 'You write code.',
     });
     expect(result).toEqual({ id: 'writer', path: join(dir, 'writer.md'), created: true });
     const source = await readFile(join(dir, 'writer.md'), 'utf8');
@@ -69,10 +68,6 @@ describe('creator agent authoring', () => {
     await expect(service.write({
       id: 'explorer', name: 'X', description: 'X', role: 'missing', instructions: '',
     })).rejects.toThrow(/unknown role/);
-    await expect(service.write({
-      id: 'explorer', name: 'X', description: 'X', profile: 'missing', instructions: '',
-    })).rejects.toThrow(/unknown profile/);
-
     await service.write({ id: 'explorer', name: 'Explorer', description: 'Finds', instructions: 'Explore.' });
     await expect(service.write({
       id: 'explorer', name: 'Again', description: 'Again', instructions: 'Again.',
@@ -86,14 +81,16 @@ describe('creator agent authoring', () => {
     const { dir, service } = await fixture();
     await service.write({ id: 'writer', name: 'Writer', description: '', instructions: 'You write code.' });
 
-    expect(await service.listProfiles()).toEqual(['default', 'search']);
+
     expect(await service.read('writer')).toEqual({
       id: 'writer',
       name: 'Writer',
       description: '',
       role: 'default',
       usage: 'both',
-      profile: 'default',
+            tools: '*',
+      skills: '*',
+      mcp: '*',
       builtIn: false,
       instructions: 'You write code.',
     });
@@ -138,7 +135,9 @@ describe('creator agent authoring', () => {
           description: 'Reviews changes',
           role: 'quick',
           usage: 'primary',
-          profile: 'default',
+          tools: ['read_file'],
+          skills: [],
+          mcp: '*',
           instructions: 'Review carefully.',
         },
       }]),
@@ -150,6 +149,7 @@ describe('creator agent authoring', () => {
       dshPermissions: snapshotDshPermissions({ status: 'ready', preset: 'workspace-write' }),
       agent: {
         id: 'creator', name: 'Creator', role: 'default', usage: 'primary', tools: '*', skills: '*',
+        mcp: '*',
       },
       agentAuthoring: service,
     });

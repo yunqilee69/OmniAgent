@@ -46,7 +46,6 @@ async function setup() {
     'description: Writes code',
     'role: quick',
     'usage: primary',
-    'profile: default',
     '---',
     'You write code.',
   ].join('\n'));
@@ -75,18 +74,14 @@ describe('agent settings API', () => {
     const { base } = await setup();
     const list = await (await fetch(`${base}/api/settings/agents`)).json() as {
       agents: Array<{ id: string; builtIn: boolean }>;
-      profiles: string[];
     };
-    expect(list.profiles).toEqual(['default', 'search']);
     expect(list.agents).toContainEqual(expect.objectContaining({ id: 'writer', builtIn: false }));
     expect(list.agents).toContainEqual(expect.objectContaining({ id: 'default', builtIn: true }));
 
     const detail = await (await fetch(`${base}/api/settings/agents/writer`)).json() as {
       agent: { id: string; instructions: string };
-      profiles: string[];
     };
     expect(detail.agent).toMatchObject({ id: 'writer', instructions: 'You write code.' });
-    expect(detail.profiles).toEqual(['default', 'search']);
     expect((await fetch(`${base}/api/settings/agents/missing`)).status).toBe(404);
   });
 
@@ -97,7 +92,9 @@ describe('agent settings API', () => {
       description: 'Reviews changes',
       role: 'quick',
       usage: 'primary',
-      profile: 'search',
+      tools: ['read_file'],
+      skills: ['docs'],
+      mcp: '*',
       instructions: 'Review carefully.',
     };
 
@@ -106,7 +103,8 @@ describe('agent settings API', () => {
     expect(await created.json()).toMatchObject({ created: true, agent: { id: 'reviewer', instructions: 'Review carefully.' } });
     const source = await readFile(join(dir, 'reviewer.md'), 'utf8');
     expect(source).toContain('name: Reviewer');
-    expect(source).toContain('role: quick');
+    expect(source).toContain('tools: read_file');
+    expect(source).toContain('skills: docs');
     expect(source).toContain('Review carefully.');
 
     const duplicate = await put(`${base}/api/settings/agents/reviewer`, definition);
@@ -141,7 +139,7 @@ describe('agent settings API', () => {
     expect((await put(`${base}/api/settings/agents/default`, definition)).status).toBe(400);
     expect((await put(`${base}/api/settings/agents/creator`, definition)).status).toBe(400);
     expect((await put(`${base}/api/settings/agents/explorer`, { ...definition, role: 'missing' })).status).toBe(400);
-    expect((await put(`${base}/api/settings/agents/explorer`, { ...definition, profile: 'missing' })).status).toBe(400);
+    expect((await put(`${base}/api/settings/agents/explorer`, { ...definition, tools: [''] })).status).toBe(400);
     expect((await put(`${base}/api/settings/agents/explorer`, { ...definition, secret: true })).status).toBe(400);
     expect((await put(`${base}/api/settings/agents/explorer`, { ...definition, name: 42 })).status).toBe(400);
     await expect(readFile(join(dir, 'explorer.md'))).rejects.toThrow();

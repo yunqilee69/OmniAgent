@@ -1043,6 +1043,7 @@ describe('Session', () => {
         usage: 'both',
         tools: new Set(['mcp__demo__echo']),
         skills: '*',
+        mcp: '*',
       },
       dshPermissions: snapshot('read-only'),
       mcpTools: [mcpTool],

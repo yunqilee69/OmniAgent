@@ -67,7 +67,6 @@ async function setup(hold?: TurnHold) {
     'description: Writes code',
     'role: quick',
     'usage: primary',
-    'profile: default',
     '---',
     'You write code.',
   ].join('\n'));
@@ -76,7 +75,9 @@ async function setup(hold?: TurnHold) {
     'name: Explorer',
     'description: Searches only',
     'usage: subagent',
-    'profile: search',
+    'tools: read_file, skill, subagent',
+    'skills: allowed-skill',
+    'mcp: *',
     '---',
     'You search.',
   ].join('\n'));
@@ -86,7 +87,8 @@ async function setup(hold?: TurnHold) {
     'description: Searches without skills',
     'role: quick',
     'usage: primary',
-    'profile: search',
+    'skills: none',
+    'mcp: *',
     '---',
     'You search.',
   ].join('\n'));
@@ -129,7 +131,7 @@ async function setup(hold?: TurnHold) {
         description: agent.description,
         role: agent.role,
         usage: agent.usage,
-        profile: agent.profile,
+
         valid: true,
         warnings: [],
       }));
@@ -363,7 +365,7 @@ describe('configured session API', () => {
     const switchedAgent = await fetch(`${sessionUrl}/agent`, post({ agent: 'writer' }));
     expect(switchedAgent.status).toBe(200);
     expect(await switchedAgent.json()).toEqual({
-      agent: expect.objectContaining({ id: 'writer', role: 'quick', usage: 'primary', profile: 'default' }),
+      agent: expect.objectContaining({ id: 'writer', role: 'quick', usage: 'primary' }),
     });
 
     const switchedModel = await fetch(`${sessionUrl}/model`, post({

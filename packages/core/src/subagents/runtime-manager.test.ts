@@ -33,7 +33,7 @@ async function fixture() {
       search: { tools: ['read_file'], skills: '*' },
     },
   }));
-  await writeFile(join(configDir, 'agents', 'explorer.md'), '---\nname: Explorer\nusage: subagent\nprofile: search\n---\nEXPLORER BODY');
+  await writeFile(join(configDir, 'agents', 'explorer.md'), '---\nname: Explorer\nusage: subagent\ntools: read_file\nskills: *\nmcp: *\n---\nEXPLORER BODY');
   await writeFile(join(configDir, 'agents', 'primary.md'), '---\nname: Primary\nusage: primary\n---\nPRIMARY BODY');
   const store = new SessionStore(join(root, 'sessions'));
   const parentHandle = await store.create({ id: 'parent', workspace: cwd, cwd });

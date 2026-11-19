@@ -42,7 +42,9 @@ async function fixture() {
     'description: Searches',
     'role: quick',
     'usage: subagent',
-    'profile: search',
+    'tools: read_file, skill, subagent',
+    'skills: allowed-skill',
+    'mcp: *',
     '---',
     'EXPLORER BODY',
   ].join('\n'));
@@ -214,7 +216,7 @@ describe('RuntimeResolver', () => {
 
   it('warns about unavailable skills without granting them', async () => {
     const { runtime, workspace, configDir, configStore } = await fixture();
-    await writeFile(join(configDir, 'agents', 'missing-skill.md'), '---\nprofile: missing\n---\n');
+    await writeFile(join(configDir, 'agents', 'missing-skill.md'), '---\ntools: *\nskills: absent-skill\nmcp: *\n---\n');
     const config = JSON.parse(await readFile(join(configDir, 'config.json'), 'utf8'));
     await writeFile(join(configDir, 'config.json'), JSON.stringify({
       ...config,

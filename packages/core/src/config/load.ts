@@ -132,8 +132,7 @@ export const ConfigSchema = z.object({
   providers: z.record(nonEmpty, route).optional(),
   /** Additional named model roles. `default` may override the top-level default role. */
   roles: z.record(nonEmpty, role).optional(),
-  /** Named tool/skill allowlists referenced by agent Markdown files. */
-  agentProfiles: z.record(nonEmpty, agentProfile).optional(),
+
   /**
    * MCP servers keyed by server id. Entries stay opaque here so one broken
    * server can be repaired from Settings instead of invalidating all config;

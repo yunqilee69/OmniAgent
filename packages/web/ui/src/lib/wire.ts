@@ -83,7 +83,9 @@ export interface AgentSummary {
   description: string;
   role: string;
   usage: 'primary' | 'subagent' | 'both';
-  profile: string;
+  tools?: '*' | string[];
+  skills?: '*' | string[];
+  mcp?: '*' | string[];
   builtIn?: boolean;
   valid: boolean;
   warnings: string[];
@@ -96,7 +98,9 @@ export interface AgentDefinitionDetail {
   description: string;
   role: string;
   usage: AgentSummary['usage'];
-  profile: string;
+  tools: '*' | string[];
+  skills: '*' | string[];
+  mcp: '*' | string[];
   builtIn?: boolean;
   instructions: string;
 }
@@ -106,7 +110,9 @@ export interface AgentDefinitionWrite {
   description: string;
   role?: string;
   usage?: AgentSummary['usage'];
-  profile?: string;
+  tools?: '*' | string[];
+  skills?: '*' | string[];
+  mcp?: '*' | string[];
   instructions: string;
   overwrite?: boolean;
 }
@@ -809,7 +815,6 @@ export function validateAgent(value: unknown): AgentSummary | null {
     || typeof agent.description !== 'string'
     || typeof agent.role !== 'string'
     || !agentUsages.includes(agent.usage as (typeof agentUsages)[number])
-    || typeof agent.profile !== 'string'
     || typeof agent.valid !== 'boolean'
     || !Array.isArray(agent.warnings) || !agent.warnings.every((item) => typeof item === 'string')) {
     throw new Error('Invalid agent response.');
@@ -820,7 +825,6 @@ export function validateAgent(value: unknown): AgentSummary | null {
     description: agent.description,
     role: agent.role,
     usage: agent.usage as AgentSummary['usage'],
-    profile: agent.profile,
     ...(agent.builtIn === true ? { builtIn: true } : {}),
     valid: agent.valid,
     warnings: agent.warnings.slice() as string[],
@@ -837,7 +841,6 @@ export function validateAgentDefinition(value: unknown): AgentDefinitionDetail {
     || typeof agent.description !== 'string'
     || typeof agent.role !== 'string'
     || !agentUsages.includes(agent.usage as (typeof agentUsages)[number])
-    || typeof agent.profile !== 'string'
     || typeof agent.instructions !== 'string') {
     throw new Error('Invalid agent definition response.');
   }
@@ -847,10 +850,20 @@ export function validateAgentDefinition(value: unknown): AgentDefinitionDetail {
     description: agent.description,
     role: agent.role,
     usage: agent.usage as AgentDefinitionDetail['usage'],
-    profile: agent.profile,
+    tools: validateSelector(agent.tools),
+    skills: validateSelector(agent.skills),
+    mcp: validateSelector(agent.mcp),
     ...(agent.builtIn === true ? { builtIn: true } : {}),
     instructions: agent.instructions,
   };
+}
+
+function validateSelector(value: unknown): '*' | string[] {
+  if (value === '*') return '*';
+  if (!Array.isArray(value) || value.some((item) => typeof item !== 'string')) {
+    throw new Error('Invalid agent capability list.');
+  }
+  return value;
 }
 
 export function validateAgentProfiles(value: unknown): string[] {

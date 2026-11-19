@@ -11,7 +11,7 @@ import type { AgentCatalogSnapshot, AgentDefinition, AgentError } from './types'
 
 export const MAX_AGENT_BYTES = 512 * 1024;
 const AGENT_ID = /^[a-z0-9][a-z0-9._-]{0,63}$/;
-const KNOWN_FIELDS = new Set(['name', 'description', 'role', 'usage', 'profile']);
+const KNOWN_FIELDS = new Set(['name', 'description', 'role', 'usage', 'tools', 'skills', 'mcp']);
 
 const BUILTIN_DEFAULT: AgentDefinition = {
   id: 'default',
@@ -19,7 +19,9 @@ const BUILTIN_DEFAULT: AgentDefinition = {
   description: '处理日常任务、编码、调研与文件工作的通用智能体。',
   role: 'default',
   usage: 'both',
-  profile: 'default',
+  tools: '*',
+  skills: '*',
+  mcp: '*',
   body: '',
   sourcePath: 'builtin:default',
 };
@@ -35,7 +37,9 @@ const BUILTIN_CREATOR: AgentDefinition = {
   description: '通过对话创建任务、智能体、模式、模型、MCP 与通用设置。',
   role: 'default',
   usage: 'primary',
-  profile: 'default',
+  tools: '*',
+  skills: '*',
+  mcp: '*',
   body: [
     '你是 OmniAgent 的创造模式（Creator mode）。',
     '',
@@ -83,6 +87,16 @@ async function readAgentFile(path: string): Promise<string> {
   }
 }
 
+function parseSelector(value: string | undefined, field: string): '*' | string[] {
+  if (value === undefined) return '*';
+  const normalized = value.trim();
+  if (normalized === '*') return '*';
+  if (normalized === 'none') return [];
+  const names = normalized.split(',').map((item) => item.trim()).filter((item) => item !== '');
+  if (names.length === 0) throw new Error(`${field} must be "*" or a comma-separated list`);
+  return names;
+}
+
 function validateUsage(value: string | undefined): AgentUsage {
   if (value === undefined) return 'both';
   if (!AGENT_USAGES.includes(value as AgentUsage)) {
@@ -110,12 +124,14 @@ function validateAgent(
   if (description.length > 2_000) throw new Error('description must be at most 2000 characters');
   if (Buffer.byteLength(body, 'utf8') > MAX_AGENT_BYTES) throw new Error('agent body is too large');
   const role = frontmatter.role ?? 'default';
-  const profile = frontmatter.profile ?? 'default';
+  const tools = parseSelector(frontmatter.tools, 'tools');
+  const skills = parseSelector(frontmatter.skills, 'skills');
+  const mcp = parseSelector(frontmatter.mcp, 'mcp');
   if (catalog !== undefined) {
     if (role !== 'default' && !catalog.roles.has(role)) {
       throw new Error(catalog.roleErrors.get(role) ?? `unknown role "${role}"`);
     }
-    if (!catalog.profiles.has(profile)) throw new Error(`unknown profile "${profile}"`);
+
   }
   return {
     id,
@@ -123,7 +139,9 @@ function validateAgent(
     description,
     role,
     usage: validateUsage(frontmatter.usage),
-    profile,
+    tools: tools === '*' ? '*' : [...tools],
+    skills: skills === '*' ? '*' : [...skills],
+    mcp: mcp === '*' ? '*' : [...mcp],
     body,
     sourcePath: path,
   };

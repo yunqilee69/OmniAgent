@@ -5,15 +5,15 @@ import type { AgentSummary } from '../ui/src/lib/wire.ts';
 
 const defaultAgent: AgentSummary = {
   id: 'default', name: 'Default', description: '', role: 'default',
-  usage: 'both', profile: 'default', valid: true, warnings: [],
+  usage: 'both', valid: true, warnings: [],
 };
 const writerAgent: AgentSummary = {
   id: 'writer', name: 'Writer', description: 'Writes code', role: 'default',
-  usage: 'primary', profile: 'default', valid: true, warnings: [],
+  usage: 'primary', valid: true, warnings: [],
 };
 const explorerAgent: AgentSummary = {
   id: 'explorer', name: 'Explorer', description: '', role: 'default',
-  usage: 'subagent', profile: 'default', valid: true, warnings: [],
+  usage: 'subagent', valid: true, warnings: [],
 };
 
 const standardMode = {

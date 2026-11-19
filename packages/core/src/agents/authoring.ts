@@ -35,7 +35,9 @@ export interface AgentDefinitionSummary {
   description: string;
   role: string;
   usage: AgentUsage;
-  profile: string;
+  tools: '*' | string[];
+  skills: '*' | string[];
+  mcp: '*' | string[];
   builtIn: boolean;
 }
 
@@ -52,7 +54,9 @@ export interface AgentDefinitionWrite {
   description: string;
   role?: string;
   usage?: AgentUsage;
-  profile?: string;
+  tools?: '*' | string[];
+  skills?: '*' | string[];
+  mcp?: '*' | string[];
   instructions: string;
   overwrite?: boolean;
 }
@@ -69,11 +73,20 @@ export interface AgentAuthoringServiceOptions {
   configStore: ConfigStore;
 }
 
+function formatSelector(value: '*' | readonly string[]): string {
+  return value === '*' ? '*' : value.length === 0 ? 'none' : value.join(', ');
+}
+
 function oneLine(value: string, field: string, max: number): string {
   const normalized = value.replace(/\s+/g, ' ').trim();
   if (normalized.length === 0) throw new InvalidAgentSettings(`${field} must not be empty`);
   if (normalized.length > max) throw new InvalidAgentSettings(`${field} must be at most ${max} characters`);
   return normalized;
+}
+
+function validateSelector(value: '*' | readonly string[] | undefined, field: string): void {
+  if (value === undefined || value === '*') return;
+  if (value.some((item) => item.trim() === '')) throw new InvalidAgentSettings(`${field} contains an empty name`);
 }
 
 function optionalOneLine(value: string, field: string, max: number): string {
@@ -96,7 +109,9 @@ function renderDefinition(input: AgentDefinitionWrite): string {
     ...(description === '' ? [] : [`description: ${description}`]),
     `role: ${input.role ?? 'default'}`,
     `usage: ${input.usage ?? 'both'}`,
-    `profile: ${input.profile ?? 'default'}`,
+    `tools: ${formatSelector(input.tools ?? '*')}`,
+    `skills: ${formatSelector(input.skills ?? '*')}`,
+    `mcp: ${formatSelector(input.mcp ?? '*')}`,
     '---',
   ];
   const body = input.instructions.trim();
@@ -110,7 +125,9 @@ function summary(agent: AgentDefinition): AgentDefinitionSummary {
     description: agent.description,
     role: agent.role,
     usage: agent.usage,
-    profile: agent.profile,
+    tools: agent.tools,
+    skills: agent.skills,
+    mcp: agent.mcp,
     builtIn: agent.sourcePath.startsWith('builtin:'),
   };
 }
@@ -127,15 +144,6 @@ export class AgentAuthoringService {
     const snapshot = await this.options.configStore.refresh();
     const agents = await this.options.catalog.refresh(snapshot.catalog);
     return agents.agents.map(summary);
-  }
-
-  /** Profile ids accepted by the `profile` field, including the implicit default. */
-  async listProfiles(): Promise<string[]> {
-    const snapshot = await this.options.configStore.refresh();
-    return [...snapshot.catalog.profiles.keys()].sort((left, right) => {
-      const order = (id: string): number => id === 'default' ? 0 : 1;
-      return order(left) - order(right) || left.localeCompare(right);
-    });
   }
 
   /** Load one definition, including its system-prompt body, for editing. */
@@ -164,10 +172,9 @@ export class AgentAuthoringService {
     if (role !== 'default' && !snapshot.catalog.roles.has(role)) {
       throw new InvalidAgentSettings(`unknown role "${role}"`);
     }
-    const profile = input.profile ?? 'default';
-    if (!snapshot.catalog.profiles.has(profile)) {
-      throw new InvalidAgentSettings(`unknown profile "${profile}"`);
-    }
+    validateSelector(input.tools, 'tools');
+    validateSelector(input.skills, 'skills');
+    validateSelector(input.mcp, 'mcp');
     if (Buffer.byteLength(input.instructions, 'utf8') > MAX_AGENT_BYTES) {
       throw new InvalidAgentSettings(`agent body exceeds ${MAX_AGENT_BYTES} bytes`);
     }
@@ -241,7 +248,9 @@ export const AgentDefinitionWriteSchema = z.object({
   description: z.string().describe('Short description shown in the agent picker and subagent catalog, at most 2000 characters.'),
   role: z.string().describe('Model role id from config.json roles, or "default".').optional(),
   usage: z.enum(AGENT_USAGES).describe('primary for main-agent only, subagent for delegation only, both for either.').optional(),
-  profile: z.string().describe('Agent profile id from config.json agentProfiles; defaults to "default".').optional(),
+  tools: z.union([z.literal('*'), z.array(z.string())]).optional(),
+  skills: z.union([z.literal('*'), z.array(z.string())]).optional(),
+  mcp: z.union([z.literal('*'), z.array(z.string())]).optional(),
   instructions: z.string().describe('System prompt body for the agent. Describe identity, responsibilities, constraints and working style.'),
   overwrite: z.boolean().describe('Replace an existing agent definition with the same id. Defaults to false.').optional(),
 }).strict();

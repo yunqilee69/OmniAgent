@@ -90,6 +90,7 @@ describe('Session agent profiles', () => {
         usage: 'both',
         tools: new Set(['read_file', 'skill']),
         skills: '*',
+        mcp: '*',
       },
     });
     const collected = await events(session.send('go'));
@@ -122,6 +123,7 @@ describe('Session agent profiles', () => {
         usage: 'both',
         tools: new Set(['skill']),
         skills: new Set(['allowed']),
+        mcp: '*',
       },
     });
     const collected = await events(session.send('go'));
@@ -200,6 +202,7 @@ describe('Session agent profiles', () => {
         usage: 'both',
         tools: new Set(['read_file']),
         skills: '*',
+        mcp: '*',
       },
     });
     await expect(events(session.send('plan'))).rejects.toThrow(/must allow exit_plan_mode/i);

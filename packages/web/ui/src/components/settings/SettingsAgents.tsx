@@ -1,5 +1,5 @@
 import { useEffect, useState, type ReactNode } from 'react';
-import { Button, Input, Modal, Tag } from '../../../vendor/primitives/index.ts';
+import { Button, Checkbox, Input, Modal, Tag } from '../../../vendor/primitives/index.ts';
 import { SelectMenu } from '../SelectMenu.tsx';
 import { store, useApp } from '../../lib/store.ts';
 import { translator, type Translate } from '../../lib/i18n.ts';
@@ -7,6 +7,41 @@ import type { AgentDefinitionDetail, AgentDefinitionWrite, AgentSummary } from '
 import css from '../../styles/settings.module.css';
 
 const AGENT_ID = /^[a-z0-9][a-z0-9._-]{0,63}$/;
+
+function toggleSet(values: Set<string>, value: string): Set<string> {
+  const next = new Set(values);
+  if (next.has(value)) next.delete(value);
+  else next.add(value);
+  return next;
+}
+
+function CapabilityPicker({ label, allLabel, all, values, options, empty, onAll, onToggle }: {
+  label: string;
+  allLabel: string;
+  all: boolean;
+  values: Set<string>;
+  options: { id: string; label: string }[];
+  empty: string;
+  onAll: (value: boolean) => void;
+  onToggle: (value: string) => void;
+}): ReactNode {
+  return (
+    <section className={css.choiceGroup}>
+      <div className={css.choiceHead}>
+        <span className={css.fieldLabel}>{label}</span>
+        <Checkbox checked={all} label={allLabel} onChange={onAll} />
+      </div>
+      {!all && (
+        <div className={css.choiceGrid}>
+          {options.map((option) => (
+            <Checkbox key={option.id} checked={values.has(option.id)} label={option.label} onChange={() => { onToggle(option.id); }} />
+          ))}
+          {options.length === 0 && <p className={css.hint}>{empty}</p>}
+        </div>
+      )}
+    </section>
+  );
+}
 
 function usageText(usage: AgentSummary['usage'], t: Translate): string {
   if (usage === 'primary') return t('Main agent');
@@ -51,7 +86,7 @@ function AgentRow({ agent, t, onEdit }: {
         <span className={css.presetDot} aria-hidden>·</span>
         <span>{t('Role: {role}', { role: roleLabel(agent, app) })}</span>
         <span className={css.presetDot} aria-hidden>·</span>
-        <span>{t('Profile: {profile}', { profile: agent.profile })}</span>
+        <span>{agent.tools === '*' ? t('All tools') : t('{count} tools', { count: agent.tools?.length ?? 0 })}</span>
       </div>
       {!agent.valid && agent.warnings.length > 0 && (
         <span className={css.presetWarning} role="alert">{agent.warnings.join(' · ')}</span>
@@ -77,12 +112,21 @@ function AgentEditor({ editing, onClose }: AgentEditorProps): ReactNode {
   const [description, setDescription] = useState(editing?.description ?? '');
   const [role, setRole] = useState(editing?.role ?? 'default');
   const [usage, setUsage] = useState<AgentSummary['usage']>(editing?.usage ?? 'both');
-  const [profile, setProfile] = useState(editing?.profile ?? 'default');
+  const [allTools, setAllTools] = useState(true);
+  const [tools, setTools] = useState<Set<string>>(new Set());
+  const [allSkills, setAllSkills] = useState(true);
+  const [skills, setSkills] = useState<Set<string>>(new Set());
+  const [allMcp, setAllMcp] = useState(true);
+  const [mcp, setMcp] = useState<Set<string>>(new Set());
   const [instructions, setInstructions] = useState('');
-  const [profiles, setProfiles] = useState<string[]>([]);
   const [loading, setLoading] = useState(editing !== null);
   const [saving, setSaving] = useState(false);
   const [error, setError] = useState('');
+
+  useEffect(() => {
+    void store.loadModeOptions();
+    void store.loadMcpServers();
+  }, []);
 
   useEffect(() => {
     let active = true;
@@ -92,14 +136,18 @@ function AgentEditor({ editing, onClose }: AgentEditorProps): ReactNode {
         setLoading(false);
         return;
       }
-      setProfiles(loaded.profiles);
       if (loaded.agent !== null) {
         const agent: AgentDefinitionDetail = loaded.agent;
         setName(agent.name);
         setDescription(agent.description);
         setRole(agent.role);
         setUsage(agent.usage);
-        setProfile(agent.profile);
+        setAllTools(agent.tools === '*');
+        setTools(new Set(agent.tools === '*' ? [] : agent.tools));
+        setAllSkills(agent.skills === '*');
+        setSkills(new Set(agent.skills === '*' ? [] : agent.skills));
+        setAllMcp(agent.mcp === '*');
+        setMcp(new Set(agent.mcp === '*' ? [] : agent.mcp));
         setInstructions(agent.instructions);
       }
       setLoading(false);
@@ -109,8 +157,6 @@ function AgentEditor({ editing, onClose }: AgentEditorProps): ReactNode {
 
   const roleItems = app.roles.map((item) => ({ id: item.id, label: `${item.name} (${item.id})` }));
   if (!roleItems.some((item) => item.id === role)) roleItems.unshift({ id: role, label: role });
-  const profileItems = [profile, ...profiles.filter((item) => item !== profile)]
-    .map((item) => ({ id: item, label: item }));
   const usageItems = [
     { id: 'both', label: t('Main and subagent') },
     { id: 'primary', label: t('Main agent') },
@@ -132,7 +178,9 @@ function AgentEditor({ editing, onClose }: AgentEditorProps): ReactNode {
       description: description.trim(),
       role,
       usage,
-      profile,
+      tools: allTools ? '*' : [...tools].sort(),
+      skills: allSkills ? '*' : [...skills].sort(),
+      mcp: allMcp ? '*' : [...mcp].sort(),
       instructions,
       ...(editing === null ? {} : { overwrite: true }),
     };
@@ -219,21 +267,36 @@ function AgentEditor({ editing, onClose }: AgentEditorProps): ReactNode {
             <span className={css.fieldHint}>{t('Where this agent can run: as a main agent, a subagent, or both.')}</span>
           </div>
         </div>
-        <div className={css.field}>
-          <span className={css.fieldLabel}>{t('Profile')}</span>
-          <SelectMenu
-            value={profile}
-            items={profileItems}
-            onSelect={setProfile}
-            ariaLabel={t('Profile')}
-            title={t('Profile')}
-            triggerClassName={css.editorSelect}
-            disabled={loading}
-          >
-            {profile}
-          </SelectMenu>
-          <span className={css.fieldHint}>{t('An agent profile from config.json narrows the tools and skills this agent can see.')}</span>
-        </div>
+        <CapabilityPicker
+          label={t('Tools')}
+          allLabel={t('All tools')}
+          all={allTools}
+          values={tools}
+          options={app.modeOptions.tools.map((tool) => ({ id: tool, label: tool }))}
+          empty={t('Loading tool catalog…')}
+          onAll={setAllTools}
+          onToggle={(value) => { setTools((current) => toggleSet(current, value)); }}
+        />
+        <CapabilityPicker
+          label={t('Skills')}
+          allLabel={t('All skills')}
+          all={allSkills}
+          values={skills}
+          options={app.modeOptions.skills.map((skill) => ({ id: skill.name, label: skill.description === '' ? skill.name : `${skill.name} · ${skill.description}` }))}
+          empty={t('No skills were discovered in this workspace.')}
+          onAll={setAllSkills}
+          onToggle={(value) => { setSkills((current) => toggleSet(current, value)); }}
+        />
+        <CapabilityPicker
+          label={t('MCP servers')}
+          allLabel={t('All MCP servers')}
+          all={allMcp}
+          values={mcp}
+          options={app.mcpServers.map((server) => ({ id: server.id, label: server.id }))}
+          empty={t('No MCP servers are configured.')}
+          onAll={setAllMcp}
+          onToggle={(value) => { setMcp((current) => toggleSet(current, value)); }}
+        />
         <label className={css.field}>
           <span className={css.fieldLabel}>{t('Instructions')}</span>
           <textarea

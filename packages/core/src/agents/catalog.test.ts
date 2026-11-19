@@ -42,10 +42,10 @@ describe('agent Markdown catalog', () => {
     const snapshot = await agents.refresh(catalog);
     expect(snapshot.agents).toEqual([
       expect.objectContaining({
-        id: 'creator', name: '创造智能体', role: 'default', usage: 'primary', profile: 'default', sourcePath: 'builtin:creator',
+        id: 'creator', name: '创造智能体', role: 'default', usage: 'primary', sourcePath: 'builtin:creator',
       }),
       expect.objectContaining({
-        id: 'default', name: '默认智能体', role: 'default', usage: 'both', profile: 'default', sourcePath: 'builtin:default',
+        id: 'default', name: '默认智能体', role: 'default', usage: 'both', sourcePath: 'builtin:default',
       }),
     ]);
 
@@ -72,7 +72,9 @@ describe('agent Markdown catalog', () => {
       'description: Finds things',
       'role: quick',
       'usage: subagent',
-      'profile: search',
+      'tools: read_file',
+      'skills: docs',
+      'mcp: *',
       'x-team: research',
       '---',
       'Explore body.',
@@ -85,7 +87,9 @@ describe('agent Markdown catalog', () => {
       description: 'Finds things',
       role: 'quick',
       usage: 'subagent',
-      profile: 'search',
+      tools: ['read_file'],
+      skills: ['docs'],
+      mcp: '*',
       body: 'Explore body.',
       sourcePath: join(dir, 'explorer.md'),
     });
@@ -96,18 +100,18 @@ describe('agent Markdown catalog', () => {
     await agent(dir, 'unknown-field.md', '---\nname: X\nbogus: 1\n---\n');
     await agent(dir, 'bad-usage.md', '---\nusage: root\n---\n');
     await agent(dir, 'unknown-role.md', '---\nrole: missing\n---\n');
-    await agent(dir, 'unknown-profile.md', '---\nprofile: missing\n---\n');
+    await agent(dir, 'bad-tools.md', '---\ntools: \n---\n');
     await agent(dir, 'BadName.md', '---\n---\n');
     await agent(dir, 'good.md', '---\nusage: primary\n---\nGood');
     const agents = new AgentCatalog(dir);
     const snapshot = await agents.refresh(catalog);
-    expect(snapshot.agents.map((entry) => entry.id).sort()).toEqual(['creator', 'default', 'good']);
+    expect(snapshot.agents.map((entry) => entry.id).sort()).toEqual(['bad-tools', 'creator', 'default', 'good']);
     expect(snapshot.errors.map((entry) => entry.id).sort())
-      .toEqual(['BadName', 'bad-usage', 'unknown-field', 'unknown-profile', 'unknown-role']);
+      .toEqual(['BadName', 'bad-usage', 'unknown-field', 'unknown-role']);
     expect(snapshot.errors.find((entry) => entry.id === 'unknown-field')?.error).toMatch(/unknown agent frontmatter/i);
     expect(snapshot.errors.find((entry) => entry.id === 'bad-usage')?.error).toMatch(/usage must be/i);
     expect(snapshot.errors.find((entry) => entry.id === 'unknown-role')?.error).toMatch(/unknown role/i);
-    expect(snapshot.errors.find((entry) => entry.id === 'unknown-profile')?.error).toMatch(/unknown profile/i);
+    expect(snapshot.errors.find((entry) => entry.id === 'bad-tools')).toBeUndefined();
     expect(snapshot.errors.find((entry) => entry.id === 'BadName')?.error).toMatch(/invalid agent file name/i);
   });
 

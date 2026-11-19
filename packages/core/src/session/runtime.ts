@@ -24,6 +24,7 @@ export interface SessionAgent {
   usage: AgentUsage;
   tools: '*' | ReadonlySet<string>;
   skills: '*' | ReadonlySet<string>;
+  mcp: '*' | ReadonlySet<string>;
 }
 
 export interface ResolvedSessionRuntime {
@@ -122,13 +123,9 @@ export class RuntimeResolver {
       throw new Error(`Agent "${agent.id}" is not available as a subagent`);
     }
 
-    const profile = catalog.profiles.get(agent.profile);
-    if (!profile) throw new Error(`Agent "${agent.id}" references unknown profile "${agent.profile}"`);
-    const selectedTools = profile.tools;
-    const selectedSkills = profile.skills;
-    const tools = toolsForSelector(selectedTools, input.mode === undefined
-      ? `Agent profile "${profile.id}"`
-      : `Mode "${input.mode.id}"`);
+    const selectedTools = agent.tools;
+    const selectedSkills = agent.skills;
+    const tools = toolsForSelector(selectedTools, `Agent "${agent.id}"`);
     const skills = skillsForSelector(selectedSkills);
 
     const warnings = [...configSnapshot.catalog.warnings];
@@ -173,7 +170,7 @@ export class RuntimeResolver {
       agentSnapshot.revision,
       agent.id,
       agent.role,
-      agent.profile,
+
       input.mode?.id,
       JSON.stringify(binding),
       resolvedModel.reasoningEffort,
@@ -193,6 +190,7 @@ export class RuntimeResolver {
         usage: agent.usage,
         tools: tools === '*' ? '*' : new Set(tools),
         skills,
+        mcp: agent.mcp === '*' ? '*' : new Set(agent.mcp),
       },
       skills: availableSkills.map((skill) => ({ ...skill })),
       ...(model === undefined ? {} : { model }),

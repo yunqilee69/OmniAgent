@@ -326,7 +326,10 @@ export class Session {
         if (this.#dshPermissions?.sandbox === 'danger-full-access') this.trusted.add(tool);
       }
     }
+    const allowedMcp = options.agent?.mcp ?? '*';
     for (const tool of options.mcpTools ?? []) {
+      const serverId = tool.name.split('__')[1];
+      if (allowedMcp !== '*' && (serverId === undefined || !allowedMcp.has(serverId))) continue;
       if (!allows(tool.name) || this.tools.has(tool.name)) continue;
       this.tools.register(tool);
       // MCP calls execute in the configured server process, not inside the

@@ -6,7 +6,9 @@ export interface AgentDefinition {
   description: string;
   role: string;
   usage: AgentUsage;
-  profile: string;
+  tools: '*' | string[];
+  skills: '*' | string[];
+  mcp: '*' | string[];
   body: string;
   sourcePath: string;
 }

@@ -101,15 +101,8 @@ describe('config catalog', () => {
     expect(JSON.stringify(listCatalogModels(catalog))).not.toContain('SECRET_KEY');
   });
 
-  it('uses the built-in unrestricted profile only when agentProfiles is omitted', () => {
-    const implicit = buildConfigCatalog(dshConfig());
-    expect(implicit.profiles.get('default')).toEqual({ id: 'default', tools: '*', skills: '*' });
-
-    const explicit = buildConfigCatalog(dshConfig({
-      agentProfiles: { coding: { tools: ['read_file'], skills: ['x'] } },
-    }));
-    expect(explicit.profiles.has('default')).toBe(false);
-    expect(explicit.profiles.get('coding')).toEqual({ id: 'coding', tools: ['read_file'], skills: ['x'] });
+  it('does not synthesize agent profiles', () => {
+    expect(buildConfigCatalog(dshConfig()).profiles.size).toBe(0);
   });
 
   it('rejects unsafe reasoning wire paths at configuration load', () => {

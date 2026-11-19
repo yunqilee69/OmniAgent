@@ -693,7 +693,7 @@ async function main(): Promise<void> {
             const active = selected.status === 'selected' && selected.agent === agent.id;
             const mark = active ? roles.accent('*') : ' ';
             const label = active ? roles.accent(sanitizeTerminal(agent.id)) : sanitizeTerminal(agent.id);
-            const detail = [agent.name, agent.role, agent.usage, agent.profile].map((value) => sanitizeTerminal(value));
+            const detail = [agent.name, agent.role, agent.usage].map((value) => sanitizeTerminal(value));
             say(sayIndent(`${mark} ${label}  ${roles.dim(detail.join(' · '))}`));
           }
           sayIndented(paintDim('使用 /agent <id> 切换智能体。'));

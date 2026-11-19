@@ -51,7 +51,8 @@ async function callJson(tools: readonly Tool[], name: string, args: unknown = {}
 
 const modeSummary = {
   id: 'standard', type: 'single', name: '标准模式', agent: 'default',
-  tools: '*', skills: '*', members: [], policy: {}, builtIn: true, customized: false,
+  tools: '*', skills: '*',
+        mcp: '*', members: [], policy: {}, builtIn: true, customized: false,
   valid: true, warnings: [],
 } as unknown as ModeSummary;
 
@@ -345,7 +346,7 @@ describe('creator configuration tools', () => {
     };
     const agent = {
       id: 'creator', name: 'Creator', role: 'default', usage: 'primary' as const,
-      tools: '*' as const, skills: '*' as const,
+      tools: '*' as const, skills: '*' as const, mcp: '*' as const,
     };
     const model = new FakeModel([
       toolCallResponse([{
