@@ -38,6 +38,7 @@ import {
   TODO_WRITE_TOOL_NAME,
   UPDATE_GOAL_TOOL_NAME,
   WEB_FETCH_TOOL_NAME,
+  WEB_SEARCH_TOOL_NAME,
 } from '../tools/names';
 import {
   SCHEDULE_CREATE_TOOL_NAME,
@@ -221,6 +222,7 @@ function builtinModes(): ModeDefinition[] {
         GLOB_TOOL_NAME,
         GREP_TOOL_NAME,
         WEB_FETCH_TOOL_NAME,
+        WEB_SEARCH_TOOL_NAME,
         SKILL_TOOL_NAME,
         TODO_WRITE_TOOL_NAME,
         EXIT_PLAN_MODE_TOOL_NAME,

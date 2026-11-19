@@ -20,7 +20,8 @@ import { writeFileTool } from './write-file';
  * - `subagent` 组 → session.ts（要 SubagentService）
  *
  * 文件读取、glob/grep、web_fetch 及 `list_dir` 是只读能力；`web_fetch` 带
- * 默认 SSRF 防护，并允许注入 fetch/解析器做测试。
+ * 默认 SSRF 防护，并允许注入 fetch/解析器做测试。`web_search` 由 Session
+ * 注入，因为它要读取当前的 Tavily 配置。
  */
 export const builtinTools: Tool[] = [
   readFileTool,

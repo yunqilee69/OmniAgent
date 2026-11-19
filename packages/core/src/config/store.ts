@@ -96,7 +96,7 @@ export class ConfigStore {
         const allowedFields = new Set(['web', 'host', 'port', 'auth', 'enabled', 'username', 'password', 'model', 'provider',
           'providers', 'roles', 'mcpServers', 'reasoningEffort', 'maxTokens', 'contextWindowTokens',
           'retainContextTokens', 'dsh', 'maxSteps', 'subagents', 'maxDepth', 'maxActive', 'todo', 'allowParallelInProgress',
-          'askUser', 'archive', 'retentionMs', 'system']);
+          'askUser', 'archive', 'retentionMs', 'webSearch', 'tavily', 'apiKey', 'apiKeyEnv', 'maxResults', 'system']);
         const issues = error.issues.map((issue) => {
           const path = issue.path.map((part) => typeof part === 'string' && allowedFields.has(part) ? part : '*').join('.');
           return `${path || '<root>'}: ${issue.code}`;

@@ -197,6 +197,8 @@ export interface AppState {
   permissionsError: string;
   askUserTimeout: { timeoutSec: number; requiresSelection: boolean } | null;
   askUserTimeoutSaving: boolean;
+  webSearch: { apiKeyConfigured: boolean; apiKeyEnv?: string; maxResults: number; requiresRepair: boolean } | null;
+  webSearchSaving: boolean;
   /** Automatic archiving. Null until the settings page has loaded it. */
   archiveSettings: ArchiveSettings | null;
   archiveSettingsSaving: boolean;
@@ -503,6 +505,8 @@ export class AppStore {
     permissionsError: '',
     askUserTimeout: null,
     askUserTimeoutSaving: false,
+    webSearch: null,
+    webSearchSaving: false,
     archiveSettings: null,
     archiveSettingsSaving: false,
     models: [],
@@ -875,6 +879,7 @@ export class AppStore {
     this.patch({ tab: 'settings' });
     void this.loadPermissions();
     void this.loadAskUserTimeout();
+    void this.loadWebSearch();
     void this.loadArchiveSettings();
     void this.loadCatalogs();
     void this.loadModes();
@@ -1215,6 +1220,7 @@ export class AppStore {
   async bootstrap(): Promise<void> {
     void this.loadPermissions();
     void this.loadAskUserTimeout();
+    void this.loadWebSearch();
     void this.loadArchiveSettings();
     void this.loadCatalogs();
     void this.loadModelSources();
@@ -2591,6 +2597,7 @@ export class AppStore {
           }
           if (result.name === 'update_ask_user_timeout') {
             void this.loadAskUserTimeout();
+    void this.loadWebSearch();
           }
           if (['write_mcp_server', 'delete_mcp_server'].includes(result.name)) {
             void this.loadMcpServers();
@@ -2949,6 +2956,51 @@ export class AppStore {
       this.emit();
     }
     return removed;
+  }
+
+  async loadWebSearch(): Promise<void> {
+    try {
+      const body = await this.api<{ settings?: unknown }>('/api/settings/web-search');
+      const settings = body.settings;
+      if (typeof settings !== 'object' || settings === null || Array.isArray(settings)) return;
+      const value = settings as { apiKeyConfigured?: unknown; apiKeyEnv?: unknown; maxResults?: unknown; requiresRepair?: unknown };
+      this.patch({
+        webSearch: {
+          apiKeyConfigured: value.apiKeyConfigured === true,
+          ...(typeof value.apiKeyEnv === 'string' ? { apiKeyEnv: value.apiKeyEnv } : {}),
+          maxResults: typeof value.maxResults === 'number' ? value.maxResults : 5,
+          requiresRepair: value.requiresRepair === true,
+        },
+      });
+    } catch {
+      // The card stays empty until settings load.
+    }
+  }
+
+  async saveWebSearch(input: { apiKey?: string; clearApiKey?: boolean; apiKeyEnv?: string; clearApiKeyEnv?: boolean; maxResults?: number }): Promise<void> {
+    if (this.state.webSearchSaving) return;
+    this.patch({ webSearchSaving: true });
+    try {
+      const body = await this.api<{ settings?: unknown }>('/api/settings/web-search', jsonOptions('PUT', input));
+      const settings = body.settings;
+      if (typeof settings === 'object' && settings !== null && !Array.isArray(settings)) {
+        const value = settings as { apiKeyConfigured?: unknown; apiKeyEnv?: unknown; maxResults?: unknown; requiresRepair?: unknown };
+        this.patch({
+          webSearchSaving: false,
+          webSearch: {
+            apiKeyConfigured: value.apiKeyConfigured === true,
+            ...(typeof value.apiKeyEnv === 'string' ? { apiKeyEnv: value.apiKeyEnv } : {}),
+            maxResults: typeof value.maxResults === 'number' ? value.maxResults : 5,
+            requiresRepair: value.requiresRepair === true,
+          },
+        });
+      } else {
+        this.patch({ webSearchSaving: false });
+      }
+    } catch (error) {
+      this.patch({ webSearchSaving: false });
+      this.showAlert(translator(this.state.locale)('Could not save web search settings: {message}', { message: (error as Error).message }));
+    }
   }
 
   async loadAskUserTimeout(): Promise<void> {

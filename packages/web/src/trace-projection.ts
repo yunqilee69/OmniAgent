@@ -13,6 +13,7 @@ export type TraceToolName =
   | 'glob'
   | 'grep'
   | 'web_fetch'
+  | 'web_search'
   | 'skill'
   | 'bash'
   | 'todo_write'
@@ -28,7 +29,7 @@ export type TraceToolName =
   | 'interrupt_agent';
 
 const TRACE_TOOL_NAMES = new Set<string>([
-  'read_file', 'write_file', 'edit_file', 'list_dir', 'glob', 'grep', 'web_fetch',
+  'read_file', 'write_file', 'edit_file', 'list_dir', 'glob', 'grep', 'web_search', 'web_fetch',
   'skill', 'bash', 'todo_write',
   'exit_plan_mode', 'ask_user', 'get_goal', 'create_goal', 'update_goal', 'subagent', 'send_message', 'list_agents', 'wait_agent', 'interrupt_agent',
 ]);

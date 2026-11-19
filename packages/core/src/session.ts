@@ -37,6 +37,8 @@ import { readFileTool } from './tools/builtin/read-file';
 import { skillTool, createSkillTool } from './tools/builtin/skill';
 import { formatWriteOutput, parseWriteArgs, writeFileTool } from './tools/builtin/write-file';
 import { webFetchTool } from './tools/builtin/web-fetch';
+import { createWebSearchTool } from './tools/builtin/web-search';
+import type { WebSearchProvider } from './tools/builtin/web-search';
 import { createDshShellTool } from './tools/builtin/dsh-shell';
 import { createTodoWriteTool } from './tools/builtin/todo-write';
 import { createExitPlanModeTool, EXIT_PLAN_MODE_TOOL_NAME } from './tools/builtin/exit-plan-mode';
@@ -192,6 +194,11 @@ export interface SessionOptions {
   mcpTools?: readonly Tool[];
   /** Called for events produced by turns started outside a UI send() call. */
   onBackgroundEvent?: (event: AgentEvent) => void;
+  /** Latest Tavily credentials for web_search. Absence keeps the tool visible but failing closed. */
+  webSearch?: {
+    resolve: () => Promise<{ apiKey?: string; maxResults?: number } | undefined> | { apiKey?: string; maxResults?: number } | undefined;
+    provider?: WebSearchProvider;
+  };
 }
 
 /** Observe background-turn events without replacing the listener the host set. */
@@ -349,6 +356,20 @@ export class Session {
     if (allows('glob')) this.trusted.add(globTool);
     if (allows('grep')) this.trusted.add(grepTool);
     if (allows('web_fetch')) this.trusted.add(webFetchTool);
+    if (allows('web_search') && !this.tools.has('web_search')) {
+      const searchTool = createWebSearchTool({
+        resolve: async () => {
+          const resolved = await options.webSearch?.resolve();
+          return resolved?.apiKey === undefined ? undefined : {
+            apiKey: resolved.apiKey,
+            ...(resolved.maxResults === undefined ? {} : { maxResults: resolved.maxResults }),
+          };
+        },
+        ...(options.webSearch?.provider === undefined ? {} : { provider: options.webSearch.provider }),
+      });
+      this.tools.register(searchTool);
+      this.trusted.add(searchTool);
+    }
     if (allows('skill')) this.trusted.add(skillTool);
 
     if (allows('todo_write')) {

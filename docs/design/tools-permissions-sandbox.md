@@ -98,6 +98,13 @@ export interface ToolOutput {
 
 ### 3.3 网络
 
+`web_search`：
+
+- 全局只读工具，使用 Tavily；未配置密钥时工具仍可见，调用返回配置错误；
+- 一次 1 到 5 条查询，最多返回 8 个去重来源；
+- 密钥写在 `config.json` 的 `webSearch.tavily.apiKey`，也可只写 `apiKeyEnv`；
+- 输出带外部内容提示，模型应把结果当资料并引用来源 URL。
+
 `web_fetch`：
 
 - 只允许 `http:` / `https:`，拒绝 URL 内凭据；

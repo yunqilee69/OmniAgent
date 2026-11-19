@@ -216,7 +216,7 @@ TUI 的排版只有一条规则：四类内容各有自己的左缘。
 | --- | --- | --- | --- |
 | `bash` | 6 行 | 14 行 | 200 行 |
 | `read_file` | 5 行 | — | 60 行 |
-| `list_dir` / `glob` / `grep` / `web_fetch` / `skill` / `todo_write` | 只给 meta | 同左 | 展开 |
+| `list_dir` / `glob` / `grep` / `web_search` / `web_fetch` / `skill` / `todo_write` | 只给 meta | 同左 | 展开 |
 | 未知工具 | 非 verbose 时安静 | 显示 | 展开 |
 
 工具卡整行按结果状态着色：

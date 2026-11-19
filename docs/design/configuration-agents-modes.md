@@ -305,7 +305,7 @@ profile: search-only
 
 ### 6.3 内置 agent
 
-- `default`：默认智能体，role `default`，usage `both`，profile `default`；
+- `default`：通用智能体，role `default`，usage `both`，profile `default`；
 - `creator`：创造智能体，role `default`，usage `primary`，profile `default`；
   - 用于通过对话调整 OmniAgent；
   - 可使用 `schedule_*`、`list_agent_definitions`、`write_agent_definition`，以及模式、模型、通用设置和 MCP 配置工具；

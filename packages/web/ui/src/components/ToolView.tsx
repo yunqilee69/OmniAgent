@@ -35,6 +35,7 @@ const TITLES: Record<string, string> = {
   glob: 'Glob',
   list_dir: 'List',
   web_fetch: 'Web fetch',
+  web_search: 'Web search',
   todo_write: 'Todo',
   exit_plan_mode: 'Plan',
   subagent: 'Subagent',
@@ -53,6 +54,7 @@ const ICONS: Record<string, ToolIcon> = {
   glob: IconSearchOutlineRegular,
   list_dir: IconSearchOutlineRegular,
   web_fetch: IconGlobeOutlineRegular,
+  web_search: IconGlobeOutlineRegular,
   todo_write: IconChecklistOutlineRegular,
   subagent: IconUsersOutlineRegular,
   send_message: IconUsersOutlineRegular,
@@ -160,6 +162,7 @@ function summaryFor(item: ToolItem, t: Translate): string {
     case 'glob': return stringArg(args, 'pattern');
     case 'list_dir': return stringArg(args, 'path') || '.';
     case 'web_fetch': return stringArg(args, 'url');
+    case 'web_search': return Array.isArray(args.queries) ? args.queries.map(String).join(' · ') : '';
     case 'todo_write': return t('Update task list');
     case 'exit_plan_mode': return t('Submit plan for review');
     case 'subagent': return stringArg(args, 'agent') || stringArg(args, 'description') || t('Run subagent');
@@ -275,6 +278,26 @@ function toolBody(item: ToolItem, t: Translate): ReactNode | null {
           labels={searchLabels(t)}
           maxLines={Infinity}
           className={css.searchBody}
+        />
+      );
+    }
+    case 'web_search': {
+      if (result === undefined || !result.ok) return detailBody(item, t);
+      const sources = [...result.content.matchAll(/^- \[([^\]]+)\]\((https?:\/\/[^)\s]+)\)(?: — ([^\n]+))?/gm)]
+        .map((match) => ({
+          url: match[2] ?? '',
+          ...(match[1] === match[2] ? {} : { title: match[1] }),
+          ...(match[3] === undefined ? {} : { snippet: match[3] }),
+        }));
+      const answer = result.content.split('\nSources:')[0]?.replace(/^[\s\S]*?搜索结果来自外部网页[\s\S]*?\n\n/, '').trim();
+      return (
+        <WebBlock
+          kind="search"
+          {...(answer === undefined || answer === '' ? {} : { answer })}
+          sources={sources}
+          truncated={result.truncated || result.content.includes('Refine the query for more')}
+          labels={webLabels(t)}
+          className={css.webBody}
         />
       );
     }

@@ -17,6 +17,69 @@ import css from '../../styles/app.module.css';
  * Foreground wait for ask_user. A blank or illegal stored value shows the
  * five-minute default until the user saves a replacement. -1 waits indefinitely.
  */
+function WebSearchSettings(): ReactNode {
+  const app = useApp();
+  const t = translator(app.locale);
+  const stored = app.webSearch;
+  const [apiKey, setApiKey] = useState('');
+  const [apiKeyEnv, setApiKeyEnv] = useState(stored?.apiKeyEnv ?? '');
+  const [maxResults, setMaxResults] = useState(String(stored?.maxResults ?? 5));
+  const [seen, setSeen] = useState(stored?.apiKeyEnv);
+  if (stored !== null && stored.apiKeyEnv !== seen) {
+    setSeen(stored.apiKeyEnv);
+    setApiKeyEnv(stored.apiKeyEnv ?? '');
+    setMaxResults(String(stored.maxResults));
+  }
+  const save = (): void => {
+    const results = Number(maxResults);
+    void store.saveWebSearch({
+      ...(apiKey.trim() === '' ? {} : { apiKey: apiKey.trim() }),
+      ...(apiKeyEnv.trim() === '' ? { clearApiKeyEnv: true } : { apiKeyEnv: apiKeyEnv.trim() }),
+      ...(Number.isInteger(results) && results >= 1 && results <= 20 ? { maxResults: results } : {}),
+    }).then(() => setApiKey(''));
+  };
+  return (
+    <div className={css.settingsRow}>
+      <div>
+        <span className={css.settingsLabel}>{t('Web search')}</span>
+        <span className={css.settingsDescription}>
+          {t('Tavily powers the global web_search tool. A stored key is write-only; an environment variable is used when no key is stored.')}
+        </span>
+      </div>
+      <div>
+        <input
+          aria-label={t('Tavily API key')}
+          type="password"
+          value={apiKey}
+          placeholder={stored?.apiKeyConfigured === true ? t('Key configured') : t('Not configured')}
+          disabled={app.webSearchSaving}
+          onChange={(event) => setApiKey(event.target.value)}
+        />
+        <input
+          aria-label={t('Tavily API key environment variable')}
+          value={apiKeyEnv}
+          placeholder="TAVILY_API_KEY"
+          disabled={app.webSearchSaving}
+          onChange={(event) => setApiKeyEnv(event.target.value)}
+        />
+        <input
+          aria-label={t('Maximum search results')}
+          inputMode="numeric"
+          value={maxResults}
+          disabled={app.webSearchSaving}
+          onChange={(event) => setMaxResults(event.target.value)}
+        />
+        <Button variant="outline" size="sm" disabled={app.webSearchSaving} onClick={save}>{t('Save')}</Button>
+        {stored?.apiKeyConfigured === true && (
+          <Button variant="outline" size="sm" disabled={app.webSearchSaving} onClick={() => { void store.saveWebSearch({ clearApiKey: true }); }}>
+            {t('Clear stored key')}
+          </Button>
+        )}
+      </div>
+    </div>
+  );
+}
+
 function QuestionTimeout(): ReactNode {
   const app = useApp();
   const t = translator(app.locale);
@@ -140,6 +203,11 @@ export function SettingsGeneral(): ReactNode {
           && defaultPreset === null && (
             <p className={css.settingsHint}>{t('New sessions wait for a permission choice until a default is set.')}</p>
           )}
+      </section>
+
+      <section className={css.settingsSection}>
+        <h3>{t('Web search')}</h3>
+        <WebSearchSettings />
       </section>
 
       <section className={css.settingsSection}>

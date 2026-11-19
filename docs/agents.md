@@ -98,7 +98,7 @@ MCP 服务器的工具会以 `mcp__<server-id>__<tool-name>` 的形式注册到�
 
 ## agents/*.md
 
-目录：`~/.omniagent/agents/`。文件名（去掉 `.md`）就是 agent id，例如 `explorer.md` → `explorer`。
+目录：`~/.omniagent/agents/`。文件名（去掉 `.md`）就是 agent id。没有 `explorer.md` 时，内置一个只读 `explorer`，工具为 `read_file`、`list_dir`、`glob`、`grep`、`web_search`、`web_fetch`、`todo_write`。同名文件会替换它。它不是独立的搜索智能体，网页搜索由全局 `web_search` 提供。
 
 ```markdown
 ---

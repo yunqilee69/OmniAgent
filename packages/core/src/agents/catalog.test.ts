@@ -45,13 +45,25 @@ describe('agent Markdown catalog', () => {
         id: 'creator', name: '创造智能体', role: 'default', usage: 'primary', sourcePath: 'builtin:creator',
       }),
       expect.objectContaining({
-        id: 'default', name: '默认智能体', role: 'default', usage: 'both', sourcePath: 'builtin:default',
+        id: 'default', name: '通用智能体', role: 'default', usage: 'both', sourcePath: 'builtin:default',
+      }),
+      expect.objectContaining({
+        id: 'explorer', name: '探索智能体', role: 'quick', usage: 'subagent', sourcePath: 'builtin:explorer',
+        tools: ['read_file', 'list_dir', 'glob', 'grep', 'web_search', 'web_fetch', 'todo_write'],
       }),
     ]);
 
     await agent(dir, 'default.md', '---\nname: Custom\n---\nCustom body');
     await agents.refresh(catalog);
     expect(agents.get('default')).toMatchObject({ name: 'Custom', body: 'Custom body', sourcePath: join(dir, 'default.md') });
+  });
+
+  it('uses explorer.md instead of the built-in explorer', async () => {
+    const { dir } = await fixture();
+    await agent(dir, 'explorer.md', '---\nname: Custom explorer\nusage: subagent\ntools: read_file\n---\nCustom body');
+    const agents = new AgentCatalog(dir);
+    await agents.refresh(catalog);
+    expect(agents.get('explorer')).toMatchObject({ name: 'Custom explorer', sourcePath: join(dir, 'explorer.md') });
   });
 
   it('uses a creator.md file instead of the built-in Creator mode', async () => {
@@ -105,7 +117,7 @@ describe('agent Markdown catalog', () => {
     await agent(dir, 'good.md', '---\nusage: primary\n---\nGood');
     const agents = new AgentCatalog(dir);
     const snapshot = await agents.refresh(catalog);
-    expect(snapshot.agents.map((entry) => entry.id).sort()).toEqual(['bad-tools', 'creator', 'default', 'good']);
+    expect(snapshot.agents.map((entry) => entry.id).sort()).toEqual(['bad-tools', 'creator', 'default', 'explorer', 'good']);
     expect(snapshot.errors.map((entry) => entry.id).sort())
       .toEqual(['BadName', 'bad-usage', 'unknown-field', 'unknown-role']);
     expect(snapshot.errors.find((entry) => entry.id === 'unknown-field')?.error).toMatch(/unknown agent frontmatter/i);
@@ -120,7 +132,7 @@ describe('agent Markdown catalog', () => {
     await agent(dir, 'default.md', '---\nusage: nope\n---\n');
     const agents = new AgentCatalog(dir);
     const snapshot = await agents.refresh(catalog);
-    expect(snapshot.agents.map((entry) => entry.id)).toEqual(['creator']);
+    expect(snapshot.agents.map((entry) => entry.id)).toEqual(['creator', 'explorer']);
     expect(snapshot.errors).toEqual([expect.objectContaining({ id: 'default' })]);
   });
 
@@ -132,7 +144,7 @@ describe('agent Markdown catalog', () => {
     await agent(dir, 'large.md', `${'x'.repeat(MAX_AGENT_BYTES + 1)}`);
     const agents = new AgentCatalog(dir);
     const snapshot = await agents.refresh(catalog);
-    expect(snapshot.agents.map((entry) => entry.id)).toEqual(['creator', 'default']);
+    expect(snapshot.agents.map((entry) => entry.id)).toEqual(['creator', 'default', 'explorer']);
     expect(snapshot.errors).toEqual([expect.objectContaining({ id: 'large', error: expect.stringMatching(/exceeds/) })]);
   });
 

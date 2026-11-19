@@ -10,6 +10,7 @@ export const LIST_DIR_TOOL_NAME = 'list_dir';
 export const GREP_TOOL_NAME = 'grep';
 export const GLOB_TOOL_NAME = 'glob';
 export const WEB_FETCH_TOOL_NAME = 'web_fetch';
+export const WEB_SEARCH_TOOL_NAME = 'web_search';
 export const SKILL_TOOL_NAME = 'skill';
 export const TODO_WRITE_TOOL_NAME = 'todo_write';
 export const EXIT_PLAN_MODE_TOOL_NAME = 'exit_plan_mode';
@@ -45,6 +46,7 @@ export const KNOWN_TOOL_NAMES = new Set<string>([
   GREP_TOOL_NAME,
   GLOB_TOOL_NAME,
   WEB_FETCH_TOOL_NAME,
+  WEB_SEARCH_TOOL_NAME,
   SKILL_TOOL_NAME,
   TODO_WRITE_TOOL_NAME,
   EXIT_PLAN_MODE_TOOL_NAME,

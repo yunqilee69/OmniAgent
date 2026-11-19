@@ -2,6 +2,7 @@ import { homedir } from 'node:os';
 import { join } from 'node:path';
 import {
   AgentAuthoringService,
+  resolveTavilyApiKey,
   AgentCatalog,
   ConfigStore,
   FakeModel,
@@ -30,6 +31,7 @@ import { LiveSessionRegistry } from './live-sessions';
 import { AskUserConfigSettings } from './ask-user-settings';
 import { ArchiveConfigSettings } from './archive-settings';
 import { PermissionSettings } from './permissions';
+import { WebSearchConfigSettings } from './web-search-settings';
 import { SessionScheduleHost } from './schedule-host';
 import { parseWebPort, startWebHost } from './server';
 import { WorkspaceRegistry } from './workspaces';
@@ -39,6 +41,7 @@ async function main(): Promise<void> {
   const configDir = defaultConfigDir();
   const permissionSettings = await PermissionSettings.open(join(configDir, 'config.json'), { trustedHome: homedir() });
   const askUserSettings = await AskUserConfigSettings.open(permissionSettings);
+  const webSearchSettings = await WebSearchConfigSettings.open(permissionSettings);
   const archiveSettings = await ArchiveConfigSettings.open(permissionSettings);
   const configStore = await ConfigStore.open(join(configDir, 'config.json'));
   const roleSettings = await RoleSettings.open(join(configDir, 'config.json'), { trustedHome: homedir() });
@@ -94,6 +97,9 @@ async function main(): Promise<void> {
     maxDepth: initialConfig.subagents?.maxDepth ?? 1,
     maxActive: initialConfig.subagents?.maxActive ?? 8,
     mcpTools: () => mcp.tools(),
+    webSearch: {
+      resolve: async () => resolveTavilyApiKey((await configStore.refresh()).config),
+    },
   });
 
   async function listAgents(): Promise<AgentSummary[]> {
@@ -208,6 +214,9 @@ async function main(): Promise<void> {
         teamMaxActive: team.maxActive,
       }),
       mcpTools: mcp.tools(),
+      webSearch: {
+        resolve: async () => resolveTavilyApiKey((await configStore.refresh()).config),
+      },
       schedule: schedules,
       ...(interactive && resolved.agent.id === 'creator'
         ? { agentAuthoring, creator: creatorServices }
@@ -220,6 +229,7 @@ async function main(): Promise<void> {
     store,
     permissionSettings,
     askUserSettings,
+    webSearchSettings,
     archiveSettings,
     approvalBroker: approvals,
     runtime,

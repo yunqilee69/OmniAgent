@@ -51,6 +51,8 @@ export interface SubagentManagerOptions {
   runtime: RuntimeResolver;
   /** MCP tools are re-read for every child so config changes are picked up. */
   mcpTools?: () => readonly import('../domain/tool').Tool[];
+  /** Shared with child sessions so the built-in explorer can search the web. */
+  webSearch?: SessionOptions['webSearch'];
 }
 
 interface ManagedChild {
@@ -427,6 +429,7 @@ export class SubagentManager implements SubagentService {
       depth,
       subagents: this,
       ...(this.options.mcpTools === undefined ? {} : { mcpTools: this.options.mcpTools() }),
+      ...(this.options.webSearch === undefined ? {} : { webSearch: this.options.webSearch }),
       onBackgroundEvent: (event) => {
         this.options.onBackgroundEvent?.(handle.id, event);
         const managed = this.children.get(handle.id);

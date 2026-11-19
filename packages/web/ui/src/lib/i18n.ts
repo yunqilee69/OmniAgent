@@ -265,6 +265,16 @@ const zh: Record<string, string> = {
   'Close settings': '关闭设置',
   'Permissions': '权限',
   'Questions': '提问',
+  'Web search': '网页搜索',
+  'Tavily powers the global web_search tool. A stored key is write-only; an environment variable is used when no key is stored.':
+    'Tavily 为全局 web_search 工具提供搜索。保存的密钥只写不回显；未保存密钥时使用环境变量。',
+  'Tavily API key': 'Tavily API 密钥',
+  'Tavily API key environment variable': 'Tavily API 密钥环境变量',
+  'Maximum search results': '最大搜索结果数',
+  'Key configured': '已配置密钥',
+  'Not configured': '未配置',
+  'Clear stored key': '清除已存密钥',
+  'Could not save web search settings: {message}': '无法保存网页搜索设置：{message}',
   'Question': '提问',
   'Waiting for an answer': '等待回答',
   'Question wait': '提问等待',
@@ -316,7 +326,7 @@ const zh: Record<string, string> = {
   'Default mode': '默认模式',
   'Creator mode': '创造模式',
   'The general-purpose agent for everyday tasks, coding, research and file work.':
-    '用于日常任务、编码、调研与文件处理的通用智能体。',
+    '处理日常任务、编码、调研与文件工作。',
   'Adjust OmniAgent through conversation: create scheduled tasks, write agent definitions and refine your setup.':
     '通过对话调整 OmniAgent：创建自动化任务、编写智能体定义并完善你的配置。',
   'No description.': '暂无描述。',

@@ -153,7 +153,7 @@ export function safeEventMetadata(event: unknown): Metadata {
   } else if (type !== 'audit.tool' && timestamp(raw.Timestamp)) {
     metadata.Timestamp = raw.Timestamp as number;
   }
-  if (['read_file', 'write_file', 'edit_file', 'list_dir', 'glob', 'grep', 'web_fetch'].includes(String(raw['Tool name']))) {
+  if (['read_file', 'write_file', 'edit_file', 'list_dir', 'glob', 'grep', 'web_search', 'web_fetch'].includes(String(raw['Tool name']))) {
     metadata['Tool name'] = raw['Tool name'] as string;
   }
   if (['allow', 'ask', 'deny'].includes(String(raw.Decision))) metadata.Decision = raw.Decision as string;

@@ -95,6 +95,8 @@ import { InvalidPermissionSettings } from './permissions';
 import type { PermissionSettings } from './permissions';
 import { InvalidAskUserSettings } from './ask-user-settings';
 import type { AskUserConfigSettings } from './ask-user-settings';
+import { InvalidWebSearchSettings } from './web-search-settings';
+import type { WebSearchConfigSettings } from './web-search-settings';
 import { InvalidArchiveSettings } from './archive-settings';
 import type { ArchiveConfigSettings } from './archive-settings';
 import { scanAutomaticArchives } from './archive-scan';
@@ -224,6 +226,8 @@ export interface WebHostOptions {
   permissionSettings?: Pick<PermissionSettings, 'read' | 'update' | 'snapshot' | 'current'>;
   /** Global ask_user foreground wait, stored beside the permission default. */
   askUserSettings?: Pick<AskUserConfigSettings, 'read' | 'update'>;
+  /** Tavily credentials for the global web_search tool. The key is write-only. */
+  webSearchSettings?: Pick<WebSearchConfigSettings, 'read' | 'update'>;
   /**
    * Automatic session archiving. The host scans on its own cadence; this is
    * only the stored on/off switch and retention window.
@@ -1047,6 +1051,18 @@ async function route(
         return json(response, 200, { settings: await options.askUserSettings.update(body) });
       } catch (error) {
         if (error instanceof InvalidAskUserSettings) throw new HttpError(400, 'Invalid question timeout');
+        throw error;
+      }
+    }
+  }
+  if (url.pathname === '/api/settings/web-search' && options.webSearchSettings) {
+    if (request.method === 'GET') return json(response, 200, { settings: await options.webSearchSettings.read() });
+    if (request.method === 'PUT') {
+      const body = await readJson(request);
+      try {
+        return json(response, 200, { settings: await options.webSearchSettings.update(body) });
+      } catch (error) {
+        if (error instanceof InvalidWebSearchSettings) throw new HttpError(400, 'Invalid web search settings');
         throw error;
       }
     }

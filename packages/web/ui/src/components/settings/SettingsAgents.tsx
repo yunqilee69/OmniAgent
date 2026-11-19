@@ -317,7 +317,7 @@ function AgentEditor({ editing, onClose }: AgentEditorProps): ReactNode {
 
 /**
  * Agent catalog. Modes choose one of these agents; the two built-ins are
- * 默认智能体 and 创造智能体. Custom definitions can be written manually here or
+ * 通用智能体 and 创造智能体. Custom definitions can be written manually here or
  * authored through a conversation in Creator mode.
  */
 export function SettingsAgents(): ReactNode {

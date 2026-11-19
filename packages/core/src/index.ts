@@ -433,6 +433,8 @@ export {
   loadConfig,
 } from './config/load';
 export type { Config, LoadedConfig, ProviderConfig } from './config/load';
+export { resolveTavilyApiKey, resolveWebSearchSettings } from './config/web-search';
+export type { WebSearchSettings } from './config/web-search';
 export { isAskUserTimeout, resolveAskUserTimeout } from './config/ask-user';
 export type { AskUserSettings } from './config/ask-user';
 export {

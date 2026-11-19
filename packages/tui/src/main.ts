@@ -21,6 +21,7 @@ import {
   defaultConfigDir,
   defaultModelBinding,
   resolveAskUserTimeout,
+  resolveTavilyApiKey,
   isInitCommand,
   listCatalogModels,
   projectAgentSelection,
@@ -312,6 +313,7 @@ async function main(): Promise<void> {
     maxDepth: config.subagents?.maxDepth ?? 1,
     maxActive: config.subagents?.maxActive ?? 8,
     mcpTools: () => mcp.tools(),
+    webSearch: { resolve: () => resolveTavilyApiKey(configStore.snapshot.config) },
     onBackgroundEvent: (sessionId, event) => {
       if (event.type === 'assistant.delta' || event.type === 'assistant.reasoning.delta' || event.type === 'assistant.message') return;
       backgroundNotice(sanitizeTerminal(sessionId.slice(0, 8)), event);
@@ -429,6 +431,7 @@ async function main(): Promise<void> {
       askUserTimeoutSec: resolveAskUserTimeout(configStore.snapshot.config).timeoutSec,
       audit: (entry) => audit.record(entry),
       session: nextHandle,
+      webSearch: { resolve: () => resolveTavilyApiKey(configStore.snapshot.config) },
       system: resolved.system,
       title: {
         ...(resolved.model === undefined || resolved.modelId === undefined ? {} : {

@@ -29,6 +29,7 @@ const PRESENTATION: Record<string, { title: string; icon: string }> = {
   glob: { title: '查找文件', icon: '⌕' },
   grep: { title: '搜索内容', icon: '⌕' },
   web_fetch: { title: '抓取网页', icon: '↗' },
+  web_search: { title: '网页搜索', icon: '⌕' },
   skill: { title: '加载技能', icon: '◆' },
   todo_write: { title: '更新任务', icon: '☑' },
   subagent: { title: '子代理', icon: '⑂' },
@@ -96,6 +97,8 @@ function summarizeArguments(name: string, args: Record<string, unknown>): string
     }
     case 'web_fetch':
       return stringValue(args['url']) ?? '';
+    case 'web_search':
+      return Array.isArray(args['queries']) ? args['queries'].filter((item): item is string => typeof item === 'string').join(' · ') : '';
     case 'list_dir':
       return stringValue(args['path']) ?? '.';
     case 'skill':
@@ -226,6 +229,14 @@ export function describeToolResult(
 
   if (call.name === 'edit_file' && result.ok) {
     meta.unshift('已修改');
+    return { meta, body, hiddenBodyLines: 0 };
+  }
+
+  if (call.name === 'web_search' && result.ok) {
+    const sources = result.content.match(/^- \[/gm)?.length ?? 0;
+    meta.unshift(`${sources} 个来源`);
+    if (!options.verbose) return { meta, body, hiddenBodyLines: 0 };
+    body.push(...trimBlankLines(result.content.split('\n')).slice(0, 20));
     return { meta, body, hiddenBodyLines: 0 };
   }
 

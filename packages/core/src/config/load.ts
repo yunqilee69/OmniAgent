@@ -162,6 +162,11 @@ export const ConfigSchema = z.object({
    * settings page can repair them; resolution applies the off-by-default fallback.
    */
   archive: z.unknown().optional(),
+  /**
+   * Tavily credentials for the global web_search tool. Kept opaque so an
+   * invalid section remains readable for the settings page to repair.
+   */
+  webSearch: z.unknown().optional(),
   /** Model-facing todo policy. Parallel active items suit workflows that delegate work to subagents. */
   todo: z.object({
     allowParallelInProgress: z.boolean().default(false),
