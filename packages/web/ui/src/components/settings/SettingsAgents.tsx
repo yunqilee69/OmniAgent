@@ -102,7 +102,7 @@ interface AgentEditorProps {
 
 /**
  * Manual definition editor for `~/.omniagent/agents/<id>.md`. The id is fixed
- * after creation; role and profile ids come from the current config catalog.
+ * after creation; role ids come from the current config catalog.
  */
 function AgentEditor({ editing, onClose }: AgentEditorProps): ReactNode {
   const app = useApp();

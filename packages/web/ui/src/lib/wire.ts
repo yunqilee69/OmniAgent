@@ -866,13 +866,6 @@ function validateSelector(value: unknown): '*' | string[] {
   return value;
 }
 
-export function validateAgentProfiles(value: unknown): string[] {
-  if (!Array.isArray(value) || !value.every((item) => typeof item === 'string' && item.trim() !== '')) {
-    throw new Error('Invalid agent profiles response.');
-  }
-  return value.slice() as string[];
-}
-
 export function validateRole(value: unknown): RoleSummary {
   if (typeof value !== 'object' || value === null) throw new Error('Invalid role response.');
   const role = value as Record<string, unknown>;

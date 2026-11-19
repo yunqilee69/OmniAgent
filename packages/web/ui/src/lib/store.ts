@@ -15,7 +15,6 @@ import {
   validateAgent,
   validateArchiveSettings,
   validateAgentDefinition,
-  validateAgentProfiles,
   validateAgentSkills,
   validateArchivedSessions,
   validateBinding,
@@ -1152,19 +1151,13 @@ export class AppStore {
    * Load one editable agent definition plus the profile ids the editor may
    * assign. A null id opens a blank editor backed by the same option list.
    */
-  async loadAgentDefinition(id: string | null): Promise<{ agent: AgentDefinitionDetail | null; profiles: string[] } | null> {
+  async loadAgentDefinition(id: string | null): Promise<{ agent: AgentDefinitionDetail | null } | null> {
     try {
-      if (id === null) {
-        const body = await this.api<{ profiles?: unknown }>('/api/settings/agents');
-        return { agent: null, profiles: validateAgentProfiles(body.profiles) };
-      }
-      const body = await this.api<{ agent?: unknown; profiles?: unknown }>(
+      if (id === null) return { agent: null };
+      const body = await this.api<{ agent?: unknown }>(
         `/api/settings/agents/${encodeURIComponent(id)}`,
       );
-      return {
-        agent: validateAgentDefinition(body.agent),
-        profiles: validateAgentProfiles(body.profiles),
-      };
+      return { agent: validateAgentDefinition(body.agent) };
     } catch (error) {
       this.showAlert(translator(this.state.locale)('Could not load agent definition: {message}', { message: (error as Error).message }));
       return null;

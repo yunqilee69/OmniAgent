@@ -82,6 +82,7 @@ describe('agent settings API', () => {
       agent: { id: string; instructions: string };
     };
     expect(detail.agent).toMatchObject({ id: 'writer', instructions: 'You write code.' });
+    expect(detail).not.toHaveProperty('profiles');
     expect((await fetch(`${base}/api/settings/agents/missing`)).status).toBe(404);
   });
 
