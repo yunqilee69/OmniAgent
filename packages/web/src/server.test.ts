@@ -769,7 +769,7 @@ describe('workspace web host', () => {
     });
     const sourceEvents = source.events.length;
 
-    const response = await fetch(`${url}/source/fork`, jsonRequest({}));
+    const response = await fetch(`${url}/source/fork`, { method: 'POST' });
     expect(response.status).toBe(201);
     const { session } = await response.json() as {
       session: { id: string; title?: string; pinned?: boolean; blank: boolean; updatedAt: number };
@@ -789,6 +789,47 @@ describe('workspace web host', () => {
       data: { sourceSessionId: 'source' },
     });
     expect((await store.open(first.path, 'source')).events).toHaveLength(sourceEvents);
+  });
+
+  it('forks through a selected assistant reply, preserving only its event prefix and source', async () => {
+    const { base, first, second, store } = await setup();
+    const url = sessionsUrl(base, first.id);
+    const source = await store.create({ id: 'branch-source', workspace: first.path, cwd: first.path });
+    await source.append({ type: 'permission/dsh-preset', data: { preset: 'workspace-write' }, ts: 1 });
+    await source.append({ type: 'session/title', data: { title: 'Earlier title', messageSeqs: [], source: { kind: 'user' } }, ts: 2 });
+    await source.append({ type: 'message/user', data: { text: 'Question' }, ts: 3 });
+    const answerEvent = { type: 'message/assistant', data: { role: 'assistant', content: [{ type: 'text', text: 'Chosen answer' }], toolCalls: [] }, ts: 4 };
+    await source.append(answerEvent);
+    await source.append({ type: 'trace/turn.end', data: { reason: 'end_turn' }, ts: 5 });
+    await source.append({ type: 'message/user', data: { text: 'Later question' }, ts: 6 });
+    await source.append({ type: 'session/title', data: { title: 'Later title', messageSeqs: [], source: { kind: 'user' } }, ts: 7 });
+    await source.append({ type: 'session/pinned', data: { pinned: true }, ts: 8 });
+    await source.append({ type: 'goal/grant', data: { messageSeq: 2 }, ts: 9 });
+    await source.append({ type: 'message/assistant', data: { role: 'assistant', content: [{ type: 'text', text: 'Tool preamble' }], toolCalls: [{ id: 'tool-1', name: 'bash', arguments: {} }] }, ts: 10 });
+    await source.append({ type: 'message/user', data: { text: 'Not an assistant' }, ts: 11 });
+    const { publicMessageId } = await import('../../core/src/session/projection');
+    const persistedReply = source.events.find((event) => event.type === 'message/assistant')!;
+    const messageId = publicMessageId(source.header, persistedReply);
+
+    const response = await fetch(`${url}/branch-source/fork?throughMessageId=${messageId}`, jsonRequest({}));
+    expect(response.status).toBe(201);
+    const { session } = await response.json() as { session: { id: string; title?: string } };
+    expect(session.title).toBe('Earlier title (fork)');
+    const fork = await store.open(first.path, session.id);
+    expect(fork.events.map((event) => event.type)).toEqual([
+      'permission/dsh-preset', 'message/user', 'message/assistant', 'trace/turn.end', 'session/title', 'session/fork',
+    ]);
+    expect((fork.events.find((event) => event.type === 'message/assistant')?.data as { content: Array<{ text: string }> }).content[0]?.text).toBe('Chosen answer');
+    expect((await store.open(first.path, 'branch-source')).events).toHaveLength(11);
+    expect(fork.events.some((event) => event.type === 'goal/grant')).toBe(false);
+    const toolReply = source.events.find((event) => event.type === 'message/assistant' && (event.data as { toolCalls?: unknown[] }).toolCalls?.length);
+    const userMessage = source.events.find((event) => event.type === 'message/user');
+    expect((await fetch(`${url}/branch-source/fork?throughMessageId=${publicMessageId(source.header, toolReply!)}`, jsonRequest({}))).status).toBe(400);
+    expect((await fetch(`${url}/branch-source/fork?throughMessageId=${publicMessageId(source.header, userMessage!)}`, jsonRequest({}))).status).toBe(400);
+    expect((await fetch(`${sessionsUrl(base, second.id)}/branch-source/fork?throughMessageId=${messageId}`, jsonRequest({}))).status).toBe(404);
+    for (const value of ['bad', `${messageId}&throughMessageId=${messageId}`]) {
+      expect((await fetch(`${url}/branch-source/fork?throughMessageId=${value}`, jsonRequest({}))).status).toBe(400);
+    }
   });
 
   it('does not unregister a workspace while a permission change is being persisted', async () => {

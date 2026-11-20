@@ -64,6 +64,24 @@ describe('composer model picker', () => {
     expect(render(false, 'effort')).toContain('模型默认值');
   });
 
+  it('keeps the main menu and marks its rows separately from the source submenu', () => {
+    const markup = render(true, 'root');
+    expect(markup).toContain('模型来源');
+    expect(markup).toContain('Model One');
+    expect(markup).toContain('data-menu-row=""');
+    expect(markup).toContain('role="menu" aria-label="模型来源"');
+  });
+
+  it('reports the effective preview position on the effort track', () => {
+    expect(render(true, 'root')).toContain('--effort-progress:100%');
+  });
+
+  it('keeps every settings row in the main menu contract', () => {
+    const markup = render(false, 'root');
+    expect(markup.match(/data-menu-row=""/g)).toHaveLength(1);
+    expect(markup).not.toContain('模型来源');
+  });
+
   it('persists the effective effort for the current model and the default for a different model', () => {
     expect(concreteModelBinding(model, resolved)).toEqual({
       version: 2, kind: 'model', provider: 'provider-a', model: 'model-1', reasoningEffort: 'high',

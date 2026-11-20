@@ -155,6 +155,7 @@ const zh: Record<string, string> = {
   'Unpin session': '取消置顶',
   'Rename session': '重命名会话',
   'Fork session': '分叉会话',
+  'Branch from this reply': '从此回复分叉',
   'Archive session': '归档会话',
   'Archived sessions': '归档会话',
   'Restore session': '恢复会话',
@@ -960,6 +961,9 @@ const zh: Record<string, string> = {
   'Keep at least one model in the list.': '列表中至少保留一个模型。',
   'Update list': '更新列表',
   'Search models': '搜索模型',
+  'Vision': '视觉',
+  'No model sources': '无模型来源',
+  'Manage models': '管理模型',
   'No matching models.': '没有匹配的模型。',
   'No matching models': '没有匹配的模型',
   'No models are configured yet. Add one in Settings → Model configuration.':

@@ -3,6 +3,7 @@ import clsx from 'clsx';
 import {
   DisclosureRow,
   IconChevronDownOutlineRegular,
+  IconBranchOutlineRegular,
   IconCheckOutlineRegular,
   IconContextInjectionOutlineRegular,
   IconCopyOutlineRegular,
@@ -19,13 +20,14 @@ import {
 import {
   groupTurns,
   userMessageCopyText,
+  type AssistantItem,
   type DisplayTurn,
   type LiveTurnState,
   type MessageUsage,
   type TranscriptItem,
   type UserItem,
 } from '../lib/events.ts';
-import { useApp } from '../lib/store.ts';
+import { store, useApp } from '../lib/store.ts';
 import type { SessionEntry } from '../lib/store.ts';
 import { markdownLabels } from '../lib/labels.ts';
 import { formatTokens } from '../lib/session-readings.ts';
@@ -96,10 +98,11 @@ function UsageChip({ usage, locale, t }: { usage: MessageUsage; locale: Locale; 
   );
 }
 
-export function MessageActions({ text, timestamp, usage, durationSeconds, locale, t }: {
+export function MessageActions({ text, timestamp, usage, durationSeconds, branch, locale, t }: {
   text: string;
   timestamp?: number;
   usage?: MessageUsage;
+  branch?: () => void;
   /** Whole seconds a finished reply took, from its persisted turn bounds. */
   durationSeconds?: number;
   locale: Locale;
@@ -119,6 +122,11 @@ export function MessageActions({ text, timestamp, usage, durationSeconds, locale
       {text !== '' && <Tooltip label={label} side="top" delayMs={400}>
         <button type="button" className={messageCss.action} aria-label={label} onClick={onCopy}>
           {copied ? <IconCheckOutlineRegular /> : <IconCopyOutlineRegular />}
+        </button>
+      </Tooltip>}
+      {branch !== undefined && text.trim() !== '' && <Tooltip label={t('Branch from this reply')} side="top" delayMs={400}>
+        <button type="button" className={messageCss.action} aria-label={t('Branch from this reply')} onClick={branch}>
+          <IconBranchOutlineRegular />
         </button>
       </Tooltip>}
       {failed && <span role="status">{t('Could not copy message')}</span>}
@@ -366,6 +374,20 @@ function RunningStatus({ run, startedAt, t }: { run: LiveTurnState; startedAt: n
   );
 }
 
+/** A reply branch always carries its stable id; it never falls back to a full fork. */
+function branchFromReply(
+  reply: AssistantItem,
+  live: boolean,
+  sessionId: string | null,
+  workspaceId: string | null,
+): (() => void) | undefined {
+  const messageId = reply.messageId;
+  if (messageId === undefined || messageId === '' || reply.text.trim() === ''
+    || reply.error !== undefined || reply.retry !== undefined || reply.streaming || live
+    || sessionId === null || workspaceId === null) return undefined;
+  return () => { void store.forkSession(sessionId, workspaceId, messageId); };
+}
+
 function TurnView({ turn, processDisplay, reviewing, locale, t }: {
   turn: DisplayTurn;
   processDisplay: 'collapsed' | 'expanded';
@@ -373,6 +395,7 @@ function TurnView({ turn, processDisplay, reviewing, locale, t }: {
   locale: Locale;
   t: Translate;
 }): ReactNode {
+  const app = useApp();
   const [override, setOverride] = useState<boolean | null>(null);
   const open = override ?? (turn.live || processDisplay === 'expanded');
   const hasProcess = turn.process.length > 0;
@@ -445,6 +468,7 @@ function TurnView({ turn, processDisplay, reviewing, locale, t }: {
             timestamp={turn.final.timestamp}
             usage={turn.final.usage}
             durationSeconds={duration}
+            branch={branchFromReply(turn.final, turn.live, app.sessionId, app.workspaceId)}
             locale={locale}
             t={t}
           />

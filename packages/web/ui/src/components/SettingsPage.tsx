@@ -28,7 +28,7 @@ type SettingsTab = 'general' | 'archive' | 'models' | 'mcp' | 'modes' | 'agents'
 export function SettingsPage(): ReactNode {
   const app = useApp();
   const t = translator(app.locale);
-  const [active, setActive] = useState<SettingsTab>('general');
+  const [active, setActive] = useState<SettingsTab>(app.settingsTab ?? 'general');
 
   const tabs: Array<{ id: SettingsTab; label: string; icon: ReactNode }> = [
     { id: 'general', label: t('General'), icon: <IconSettingsOutlineRegular size={16} /> },

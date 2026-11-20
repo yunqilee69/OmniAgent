@@ -192,6 +192,22 @@ describe('web client protocol', () => {
       error: { message: 'HTTP 503 · overloaded', code: 'overloaded', status: 503 },
     });
   });
+  it('keeps persisted assistant identities separate from React transcript identities', () => {
+    const { transcript } = hydrateTranscript([
+      { role: 'user', content: [{ type: 'text', text: 'Question' }] },
+      { role: 'assistant', content: [{ type: 'text', text: 'Answer' }], messageId: 'stable-message' },
+      { role: 'assistant', content: [{ type: 'text', text: '' }], messageId: 'empty' },
+    ]);
+    expect(transcript.find((item) => item.kind === 'assistant')).toMatchObject({ id: 'a:1', messageId: 'stable-message' });
+    expect(groupTurns(transcript, [], false)[0]?.final).toMatchObject({ messageId: 'stable-message' });
+    const t = translator('en');
+    const markup = renderToStaticMarkup(createElement(MessageActions, {
+      text: 'Answer', branch: () => undefined, locale: 'en', t,
+    }));
+    expect(markup).toContain('aria-label="Branch from this reply"');
+    expect(renderToStaticMarkup(createElement(MessageActions, { text: 'Answer', locale: 'en', t }))).not.toContain('Branch from this reply');
+  });
+
   it('renders accessible copy controls and valid message times', () => {
     const t = translator('en');
     const markup = renderToStaticMarkup(createElement(MessageActions, { text: 'Hello', timestamp: 1234, locale: 'en', t }));

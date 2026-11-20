@@ -42,7 +42,8 @@ describe('session readings', () => {
     expect(html).toContain('20 轮 438 步');
     expect(html).toContain('58 tok/s');
     // The pill labels the whole-session scope; the meter next to it is occupancy.
-    expect(html).toContain('整会话累计 178M tok');
+    expect(html).toContain('178M tok');
+    expect(html).not.toContain('整会话累计');
     expect(html).toContain('缓存命中 73%');
   });
 
@@ -75,8 +76,11 @@ describe('session readings', () => {
       expect(html).toContain('data-composer-stat="activity"');
       expect(html).toContain('data-composer-stat="usage"');
       expect(html).toContain('0 轮 0 步');
-      expect(html).toContain('整会话累计 0 tok');
-      expect(html).toContain('缓存命中 —');
+      expect(html).toContain('0 tok');
+      expect(html).not.toContain('整会话累计');
+      expect(html).toContain('缓存命中 0%');
+      expect(html).not.toContain('未缓存输入');
+      expect(html).not.toContain('缓存读取');
     }
   });
 
@@ -90,6 +94,7 @@ describe('session readings', () => {
     const html = render({ metrics, run: undefined }, 'en');
     expect(html).toContain('20 turns 438 steps');
     expect(html).toContain('Cache hit 73%');
-    expect(html).toContain('Session total 178M tok');
+    expect(html).toContain('178M tok');
+    expect(html).not.toContain('Session total');
   });
 });

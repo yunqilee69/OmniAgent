@@ -13,7 +13,9 @@ import {
   useMemo,
   useRef,
   useState,
+  type CSSProperties,
   type KeyboardEvent,
+  type PointerEvent as ReactPointerEvent,
   type ReactNode,
 } from 'react';
 import clsx from 'clsx';
@@ -27,8 +29,9 @@ import {
   useAnchoredPosition,
   useDismissOnOutsidePointer,
 } from '../../vendor/primitives/index.ts';
+import { usePointerGrace } from '../../vendor/primitives/pointer-grace.ts';
 import { translator, type Translate } from '../lib/i18n.ts';
-import { useApp } from '../lib/store.ts';
+import { store, useApp } from '../lib/store.ts';
 import type {
   ModelBinding,
   ModelSummary,
@@ -97,6 +100,20 @@ function bindingLabel(
   return effort === undefined ? name : `${name} · ${effort}`;
 }
 
+/** Composer source flyout placement against the live main-menu rect. */
+type SourcePlacement = 'right' | 'left' | 'inline';
+
+const SOURCE_FLYOUT_WIDTH = 220;
+const SOURCE_FLYOUT_GAP = 8;
+
+function placeSourceFlyout(menu: DOMRect, viewportWidth: number, margin: number): SourcePlacement {
+  const right = viewportWidth - menu.right - margin;
+  const left = menu.left - margin;
+  if (right >= SOURCE_FLYOUT_WIDTH + SOURCE_FLYOUT_GAP) return 'right';
+  if (left >= SOURCE_FLYOUT_WIDTH + SOURCE_FLYOUT_GAP) return 'left';
+  return 'inline';
+}
+
 export function ModelPicker({
   binding,
   models,
@@ -113,6 +130,7 @@ export function ModelPicker({
   side = 'bottom',
   align = 'start',
   showLeading = true,
+  saving = false,
 }: {
   binding: ModelBinding | null;
   models: readonly ModelSummary[];
@@ -131,15 +149,26 @@ export function ModelPicker({
   side?: 'top' | 'bottom';
   align?: 'start' | 'end';
   showLeading?: boolean;
+  /** Prevent transient range previews and writes while the host is saving. */
+  saving?: boolean;
 }): ReactNode {
   const app = useApp();
   const t = translator(app.locale);
   const [open, setOpen] = useState(false);
   const [pane, setPane] = useState<'root' | 'model' | 'effort'>('root');
+  const [sourceOpen, setSourceOpen] = useState(false);
+  const [sourcePlacement, setSourcePlacement] = useState<SourcePlacement>('right');
   const [query, setQuery] = useState('');
+  const [selectedProvider, setSelectedProvider] = useState<string | null>(null);
+  const [previewEffort, setPreviewEffort] = useState<number | null>(null);
+  const effortPointerActive = useRef(false);
+  const sourceTriggerRef = useRef<HTMLButtonElement | null>(null);
+  const sourcePaneRef = useRef<HTMLButtonElement | null>(null);
+  const sourceFocusFromKeyboard = useRef(false);
   const rootRef = useRef<HTMLDivElement | null>(null);
   const triggerRef = useRef<HTMLButtonElement | null>(null);
   const menuRef = useRef<HTMLDivElement | null>(null);
+  const sourceMenuRef = useRef<HTMLDivElement | null>(null);
   const searchRef = useRef<HTMLInputElement | null>(null);
   const id = useId();
   useDismissOnOutsidePointer(rootRef, open, setOpen, menuRef);
@@ -151,8 +180,10 @@ export function ModelPicker({
     align,
     gap: 8,
     margin: 12,
-    layoutKey: pane,
+    layoutKey: `${pane}:${sourceOpen ? sourcePlacement : 'closed'}`,
   });
+  const closeSource = (): void => { setSourceOpen(false); };
+  const sourceGrace = usePointerGrace(closeSource);
 
   useEffect(() => {
     if (!open || pane !== 'model') return;
@@ -161,12 +192,36 @@ export function ModelPicker({
     });
     return () => { cancelAnimationFrame(frame); };
   }, [allowAgent, allowRoles, concreteOnly, models.length, open, pane, roles.length]);
+  useEffect(() => {
+    if (!open || !concreteOnly || pane !== 'root' || !sourceOpen || sourcePlacement === 'inline') return;
+    const menu = menuRef.current;
+    const view = menu?.ownerDocument.defaultView;
+    if (menu === null || menu === undefined || view === null || view === undefined) return;
+    const place = (): void => {
+      const next = placeSourceFlyout(menu.getBoundingClientRect(), view.innerWidth, 12);
+      setSourcePlacement((current) => current === next ? current : next);
+    };
+    place();
+    view.addEventListener('resize', place);
+    return () => { view.removeEventListener('resize', place); };
+  }, [concreteOnly, open, pane, sourceOpen, sourcePlacement]);
+  useEffect(() => {
+    if (!open || !concreteOnly || !sourceOpen || !sourceFocusFromKeyboard.current) return;
+    const frame = requestAnimationFrame(() => { sourcePaneRef.current?.focus(); });
+    return () => { cancelAnimationFrame(frame); };
+  }, [concreteOnly, open, sourceOpen]);
 
   const effectiveBinding: ModelBinding | null = concreteOnly && resolved !== null
     ? { version: 2, kind: 'model', provider: resolved.provider, model: resolved.model,
       ...(resolved.reasoningEffort === undefined ? {} : { reasoningEffort: resolved.reasoningEffort }) }
     : binding;
   const current = effortEffect(effectiveBinding, models);
+  useEffect(() => {
+    if (!open) return;
+    const provider = effectiveBinding?.kind === 'model' ? effectiveBinding.provider : models[0]?.provider;
+    setSelectedProvider(provider ?? null);
+    setPreviewEffort(null);
+  }, [open, effectiveBinding?.kind, effectiveBinding !== null && effectiveBinding.kind === 'model' ? effectiveBinding.provider : undefined, models]);
   const effortChoices = useMemo<EffortChoice[]>(() => {
     if (current.model === undefined) return [];
     const choices: EffortChoice[] = concreteOnly ? [] : [{
@@ -189,6 +244,16 @@ export function ModelPicker({
     }
     return [...groups.entries()];
   }, [models]);
+  const currentProvider = effectiveBinding !== null && effectiveBinding.kind === 'model' ? effectiveBinding.provider : undefined;
+  const activeProvider = selectedProvider !== null && grouped.some(([provider]) => provider === selectedProvider)
+    ? selectedProvider
+    : currentProvider !== undefined && grouped.some(([provider]) => provider === currentProvider)
+      ? currentProvider
+      : grouped[0]?.[0] ?? null;
+  const activeModels = activeProvider === null ? [] : models.filter((model) => model.provider === activeProvider);
+  const effortLevels = current.model?.reasoningEfforts ?? [];
+  const effortIndex = current.effort === undefined ? -1 : effortLevels.indexOf(current.effort);
+  const previewIndex = effortPointerActive.current && previewEffort !== null ? previewEffort : effortIndex;
   const normalizedQuery = query.trim().toLowerCase();
   const filteredGroups = grouped.flatMap(([provider, groupModels]) => {
     const filtered = normalizedQuery === ''
@@ -211,6 +276,11 @@ export function ModelPicker({
   const hasResults = agentVisible || filteredRoles.length > 0 || filteredGroups.length > 0;
 
   const close = (restore = false): void => {
+    effortPointerActive.current = false;
+    sourceFocusFromKeyboard.current = false;
+    sourceGrace.cancel();
+    setPreviewEffort(null);
+    setSourceOpen(false);
     setOpen(false);
     setPane('root');
     setQuery('');
@@ -222,40 +292,88 @@ export function ModelPicker({
     close(true);
   };
 
-  const chooseModel = (model: ModelSummary): void => {
+  const chooseModel = (model: ModelSummary, keepFocus?: HTMLElement): void => {
+    if (saving) return;
+    if (keepFocus !== undefined) keepFocus.focus();
+    const next = concreteOnly ? concreteModelBinding(model, resolved) : (() => {
+      const same = binding?.kind === 'model'
+        && binding.provider === model.provider && binding.model === model.model;
+      const effort = same && binding.reasoningEffort !== undefined && model.reasoningEfforts.includes(binding.reasoningEffort)
+        ? binding.reasoningEffort
+        : model.defaultReasoningEffort;
+      return {
+        version: 2 as const,
+        kind: 'model' as const,
+        provider: model.provider,
+        model: model.model,
+        ...(effort === undefined ? {} : { reasoningEffort: effort }),
+      };
+    })();
     if (concreteOnly) {
-      choose(concreteModelBinding(model, resolved));
+      sourceGrace.cancel();
+      sourceFocusFromKeyboard.current = false;
+      setSourceOpen(false);
+      setQuery('');
+      onSelect(next);
       return;
     }
-    const same = binding?.kind === 'model'
-      && binding.provider === model.provider && binding.model === model.model;
-    const effort = same && binding.reasoningEffort !== undefined && model.reasoningEfforts.includes(binding.reasoningEffort)
-      ? binding.reasoningEffort
-      : model.defaultReasoningEffort;
-    choose({
-      version: 2,
-      kind: 'model',
-      provider: model.provider,
-      model: model.model,
-      ...(effort === undefined ? {} : { reasoningEffort: effort }),
-    });
+    choose(next);
   };
 
-  const chooseEffort = (effort: ReasoningEffort | undefined): void => {
-    if (effectiveBinding?.kind !== 'model' || current.model === undefined) return;
-    choose({
-      version: 2,
-      kind: 'model',
+  const chooseEffort = (effort: ReasoningEffort | undefined, closeMenu = true): void => {
+    if (saving || effectiveBinding?.kind !== 'model' || current.model === undefined) return;
+    const next = {
+      version: 2 as const,
+      kind: 'model' as const,
       provider: effectiveBinding.provider,
       model: effectiveBinding.model,
       ...(effort === undefined ? {} : { reasoningEffort: effort }),
-    });
+    };
+    onSelect(next);
+    if (closeMenu) close(true);
+  };
+
+  const commitRange = (index: number): void => {
+    if (index < 0 || index >= effortLevels.length || saving) return;
+    const effort = effortLevels[index];
+    if (effort === undefined || effort === current.effort) return;
+    chooseEffort(effort, false);
+  };
+
+  const openSource = (fromKeyboard: boolean): void => {
+    sourceGrace.cancel();
+    sourceFocusFromKeyboard.current = fromKeyboard;
+    const menu = menuRef.current;
+    const width = menu?.ownerDocument.defaultView?.innerWidth ?? 0;
+    setSourcePlacement(menu === null ? 'right' : placeSourceFlyout(menu.getBoundingClientRect(), width, 12));
+    setSourceOpen(true);
+  };
+
+  const hoverSource = (event: ReactPointerEvent<HTMLElement>): void => {
+    if (!concreteOnly || event.pointerType === 'touch') return;
+    if (event.pointerType === 'mouse' && window.matchMedia('(any-hover: hover)').matches !== true) return;
+    openSource(false);
+  };
+
+  const leaveSourceRegion = (event: ReactPointerEvent<HTMLElement>): void => {
+    if (event.pointerType === 'touch') return;
+    const next = event.relatedTarget;
+    if (next instanceof Node
+      && (event.currentTarget.contains(next)
+        || sourceMenuRef.current?.contains(next) === true
+        || sourceTriggerRef.current?.contains(next) === true)) return;
+    sourceGrace.arm();
   };
 
   const onKeyDown = (event: KeyboardEvent<HTMLDivElement>): void => {
     if (event.key === 'Escape' && open) {
       event.preventDefault();
-      if (pane !== 'root') {
+      if (concreteOnly && sourceOpen) {
+        sourceGrace.cancel();
+        sourceFocusFromKeyboard.current = false;
+        sourceTriggerRef.current?.focus();
+        setSourceOpen(false);
+      } else if (pane !== 'root') {
         setPane('root');
         setQuery('');
         queueMicrotask(() => { triggerRef.current?.focus(); });
@@ -264,8 +382,33 @@ export function ModelPicker({
       }
       return;
     }
+    if (event.target instanceof HTMLInputElement && event.target.type === 'range') return;
+    const target = event.target instanceof HTMLElement ? event.target : null;
+    const inSource = concreteOnly && target !== null && sourceMenuRef.current?.contains(target) === true;
+    if (event.key === 'ArrowRight' && concreteOnly && target === sourceTriggerRef.current) {
+      event.preventDefault();
+      if (!sourceOpen) openSource(true);
+      else (sourcePaneRef.current ?? sourceMenuRef.current?.querySelector('button:not([disabled])'))?.focus();
+      return;
+    }
+    if (event.key === 'Enter' && concreteOnly && target === sourceTriggerRef.current && !sourceOpen) {
+      event.preventDefault();
+      openSource(true);
+      return;
+    }
+    if (event.key === 'ArrowLeft' && inSource && sourceOpen) {
+      event.preventDefault();
+      sourceGrace.cancel();
+      sourceFocusFromKeyboard.current = false;
+      sourceTriggerRef.current?.focus();
+      setSourceOpen(false);
+      return;
+    }
     if (event.key !== 'ArrowDown' && event.key !== 'ArrowUp') return;
-    const rows = [...(menuRef.current?.querySelectorAll<HTMLButtonElement>('button:not([disabled])') ?? [])];
+    const rows = [...((inSource ? sourceMenuRef.current : menuRef.current)?.querySelectorAll<HTMLButtonElement>(
+      inSource ? 'button:not([disabled])' : 'button[data-menu-row]:not([disabled])',
+    ) ?? [])].filter((row) => row.getAttribute('aria-disabled') !== 'true'
+      && (inSource || sourceMenuRef.current?.contains(row) !== true));
     if (rows.length === 0) return;
     event.preventDefault();
     const active = rows.findIndex((row) => row === document.activeElement);
@@ -282,9 +425,64 @@ export function ModelPicker({
   const openMenu = (): void => {
     if (disabled) return;
     setQuery('');
-    setPane(current.model !== undefined && current.model.reasoningEfforts.length > 0 ? 'root' : 'model');
+    setSourceOpen(false);
+    setPane(concreteOnly ? 'root' : (current.model !== undefined && current.model.reasoningEfforts.length > 0 ? 'root' : 'model'));
     setOpen(true);
   };
+
+  const sourceSubmenu = (
+    <div
+      ref={sourceMenuRef}
+      className={clsx(css.sourceSubmenu, sourcePlacement === 'inline' && css.sourceInline)}
+      id={`${id}-source`}
+      data-source-submenu=""
+      role="menu"
+      aria-label={t('Model source')}
+      onPointerEnter={hoverSource}
+      onPointerLeave={leaveSourceRegion}
+    >
+      <div className={css.scroll}>
+        {grouped.map(([provider], index) => (
+          <button ref={index === 0 ? sourcePaneRef : undefined} key={provider} type="button" role="menuitemradio" aria-checked={provider === activeProvider}
+            className={css.option} onClick={() => { sourceTriggerRef.current?.focus(); setSelectedProvider(provider); sourceGrace.cancel(); sourceFocusFromKeyboard.current = false; setSourceOpen(false); setQuery(''); }}>
+            <span className={css.optionText}>{provider}</span>
+            <span className={css.check}>{provider === activeProvider ? <IconCheckOutlineRegular /> : null}</span>
+          </button>
+        ))}
+        {grouped.length === 0 && <div className={css.empty}>{t('No model sources')}</div>}
+        <button type="button" className={css.option} onClick={() => { store.openSettings('models'); close(true); }}>
+          {t('Manage models')}
+        </button>
+      </div>
+    </div>
+  );
+
+  const modelRows = (groups: readonly (readonly [string, readonly ModelSummary[]])[]): ReactNode => groups.map(([provider, groupModels]) => (
+    <section key={provider} className={css.group}>
+      <div className={css.groupHead}>{provider}</div>
+      {groupModels.map((model) => {
+        const selected = effectiveBinding?.kind === 'model'
+          && effectiveBinding.provider === model.provider && effectiveBinding.model === model.model;
+        return (
+          <button key={`${provider}/${model.model}`} type="button" role="menuitemradio"
+            aria-checked={selected} aria-disabled={concreteOnly && saving ? true : undefined}
+            data-menu-row="" data-model-key={`${provider}/${model.model}`}
+            className={css.option} title={`${provider}/${model.model}`}
+            onClick={(event) => { chooseModel(model, event.currentTarget); }}>
+            <span className={css.optionCopy}>
+              <span className={css.optionText}>{model.name}</span>
+              <span className={css.optionMeta}>
+                {model.model}
+                {model.contextWindow === undefined ? '' : ` · ${Math.round(model.contextWindow / 1024)}K`}
+                {model.capabilities.imageInput ? ` · ${t('Vision')}` : ''}
+              </span>
+            </span>
+            <span className={css.check}>{selected ? <IconCheckOutlineRegular /> : null}</span>
+          </button>
+        );
+      })}
+    </section>
+  ));
 
   return (
     <div ref={rootRef} className={css.root} onKeyDown={onKeyDown}>
@@ -314,23 +512,113 @@ export function ModelPicker({
           role="menu"
           aria-label={ariaLabel}
           onBlur={(event) => {
-            if (event.relatedTarget instanceof Node
-              && (rootRef.current?.contains(event.relatedTarget) === true
-                || menuRef.current?.contains(event.relatedTarget) === true)) return;
+            const next = event.relatedTarget;
+            if (next instanceof Node
+              && (rootRef.current?.contains(next) === true
+                || menuRef.current?.contains(next) === true
+                || sourceMenuRef.current?.contains(next) === true)) return;
             close();
           }}
         >
-          {pane === 'root' && (
+          {pane === 'root' && concreteOnly && (
             <>
-              <button type="button" role="menuitem" className={css.cell} onClick={() => { setPane('model'); }}>
+              <div
+                className={css.sourceRow}
+                onPointerEnter={hoverSource}
+                onPointerLeave={leaveSourceRegion}
+              >
+                <button ref={sourceTriggerRef} type="button" role="menuitem" className={css.cell} data-menu-row=""
+                  aria-haspopup="menu" aria-expanded={sourceOpen}
+                  aria-controls={sourceOpen ? `${id}-source` : undefined}
+                  onClick={() => { if (sourceOpen) { sourceGrace.cancel(); setSourceOpen(false); } else openSource(true); }}>
+                  <span className={css.cellLabel}>{t('Model source')}</span>
+                  <span className={css.cellValue}>{activeProvider ?? t('No model sources')}</span>
+                  <IconChevronRightOutlineRegular className={css.cellChevron} aria-hidden />
+                </button>
+                {sourceOpen && sourcePlacement !== 'inline' && (
+                  <MenuSurface
+                    className={clsx(css.sourceSurface, sourcePlacement === 'left' && css.sourceSurfaceLeft)}
+                    data-placement={sourcePlacement}
+                    role="presentation"
+                  >
+                    {sourceSubmenu}
+                  </MenuSurface>
+                )}
+              </div>
+              {sourceOpen && sourcePlacement === 'inline' && sourceSubmenu}
+              {showSearch && (
+                <div className={css.searchRow}>
+                  <Input ref={searchRef} className={css.search} type="search" value={query}
+                    placeholder={t('Search models')} aria-label={t('Search models')}
+                    onChange={(event) => { setQuery(event.target.value); }} />
+                </div>
+              )}
+              <div className={css.scroll}>
+                {modelRows(normalizedQuery === ''
+                  ? (activeProvider === null ? [] : [[activeProvider, activeModels] as const])
+                  : filteredGroups)}
+                {models.length === 0 && <div className={css.empty}>{t('No model sources')}</div>}
+                {normalizedQuery !== '' && filteredGroups.length === 0 && <div className={css.empty}>{t('No matching models')}</div>}
+              </div>
+              {effortLevels.length > 0 ? (
+                <label className={clsx(css.effortSlider, concreteOnly && css.effortTrack)}>
+                  <span>{t('Reasoning effort')}</span>
+                  <input type="range" min={effortIndex < 0 ? -1 : 0} max={Math.max(0, effortLevels.length - 1)} step={1}
+                    value={previewIndex} aria-label={t('Reasoning effort')}
+                    aria-valuetext={previewIndex < 0 ? t('Model default') : effortLevels[previewIndex] ?? t('Model default')}
+                    aria-disabled={saving}
+                    style={{
+                      '--effort-stops': Math.max(1, effortLevels.length),
+                      '--effort-progress': `${(() => {
+                        const min = effortIndex < 0 ? -1 : 0;
+                        const max = Math.max(0, effortLevels.length - 1);
+                        return max <= min ? 0 : (previewIndex - min) / (max - min) * 100;
+                      })()}%`,
+                    } as CSSProperties}
+                    onKeyDown={(event) => {
+                      if (saving) event.preventDefault();
+                    }}
+                    onChange={(event) => {
+                      if (effortPointerActive.current) setPreviewEffort(Number(event.target.value));
+                      else commitRange(Number(event.target.value));
+                    }}
+                    onPointerDown={(event) => {
+                      if (saving) return;
+                      effortPointerActive.current = true;
+                      event.currentTarget.setPointerCapture(event.pointerId);
+                    }}
+                    onPointerUp={(event) => {
+                      const index = Number(event.currentTarget.value);
+                      effortPointerActive.current = false;
+                      setPreviewEffort(null);
+                      commitRange(index);
+                    }}
+                    onLostPointerCapture={() => {
+                      if (!effortPointerActive.current) return;
+                      effortPointerActive.current = false;
+                      setPreviewEffort(null);
+                    }}
+                    onPointerCancel={() => {
+                      effortPointerActive.current = false;
+                      setPreviewEffort(null);
+                    }} />
+                  <output>{previewIndex < 0 ? t('Model default') : effortLevels[previewIndex] ?? t('Model default')}</output>
+                </label>
+              ) : <div className={css.empty}>{t('Model default')}</div>}
+            </>
+          )}
+
+          {pane === 'root' && !concreteOnly && (
+            <>
+              <button type="button" role="menuitem" className={css.cell} data-menu-row="" onClick={() => { setPane('model'); }}>
                 <span className={css.cellLabel}>{t('Model')}</span>
                 <span className={css.cellValue}>{displayLabel}</span>
                 <IconChevronRightOutlineRegular className={css.cellChevron} aria-hidden />
               </button>
-              {effortChoices.length > (concreteOnly ? 0 : 1) && (
-                <button type="button" role="menuitem" className={css.cell} onClick={() => { setPane('effort'); }}>
+              {effortChoices.length > 1 && (
+                <button type="button" role="menuitem" className={css.cell} data-menu-row="" onClick={() => { setPane('effort'); }}>
                   <span className={css.cellLabel}>{t('Reasoning effort')}</span>
-                  <span className={css.cellValue}>{current.label ?? (concreteOnly ? '—' : t('Model default'))}</span>
+                  <span className={css.cellValue}>{current.label ?? t('Model default')}</span>
                   <IconChevronRightOutlineRegular className={css.cellChevron} aria-hidden />
                 </button>
               )}
@@ -357,7 +645,7 @@ export function ModelPicker({
                   <section className={css.group}>
                     <div className={css.groupHead}>{t('Bindings')}</div>
                     <button type="button" role="menuitemradio" aria-checked={binding?.kind === 'agent'}
-                      className={css.option} onClick={() => { choose({ version: 2, kind: 'agent' }); }}>
+                      data-menu-row="" className={css.option} onClick={() => { choose({ version: 2, kind: 'agent' }); }}>
                       <span className={css.optionText}>{t('Follow agent')}</span>
                       <span className={css.check}>{binding?.kind === 'agent' ? <IconCheckOutlineRegular /> : null}</span>
                     </button>
@@ -369,7 +657,7 @@ export function ModelPicker({
                     {filteredRoles.map((role) => (
                       <button key={role.id} type="button" role="menuitemradio"
                         aria-checked={binding?.kind === 'role' && binding.role === role.id}
-                        className={css.option}
+                        data-menu-row="" className={css.option}
                         onClick={() => { choose({ version: 2, kind: 'role', role: role.id }); }}>
                         <span className={css.optionCopy}>
                           <span className={css.optionText}>{role.name}</span>
@@ -380,30 +668,9 @@ export function ModelPicker({
                     ))}
                   </section>
                 )}
-                {filteredGroups.map(([provider, groupModels]) => (
-                  <section key={provider} className={css.group}>
-                    <div className={css.groupHead}>{provider}</div>
-                    {groupModels.map((model) => {
-                      const selected = effectiveBinding?.kind === 'model'
-                        && effectiveBinding.provider === model.provider && effectiveBinding.model === model.model;
-                      return (
-                        <button key={`${provider}/${model.model}`} type="button" role="menuitemradio"
-                          aria-checked={selected} className={css.option}
-                          title={`${provider}/${model.model}`}
-                          onClick={() => { chooseModel(model); }}>
-                          <span className={css.optionCopy}>
-                            <span className={css.optionText}>{model.name}</span>
-                            <span className={css.optionMeta}>
-                              {model.model}
-                              {model.contextWindow === undefined ? '' : ` · ${Math.round(model.contextWindow / 1024)}K`}
-                            </span>
-                          </span>
-                          <span className={css.check}>{selected ? <IconCheckOutlineRegular /> : null}</span>
-                        </button>
-                      );
-                    })}
-                  </section>
-                ))}
+                {modelRows(concreteOnly && normalizedQuery === ''
+                  ? (activeProvider === null ? [] : [[activeProvider, activeModels] as const])
+                  : filteredGroups)}
                 {!hasResults && (
                   <div className={css.empty} role="status">
                     {models.length === 0 && roles.length === 0
@@ -425,7 +692,7 @@ export function ModelPicker({
                     : binding?.kind === 'model' && binding.reasoningEffort === choice.effort;
                 return (
                   <button key={choice.id} type="button" role="menuitemradio" aria-checked={selected}
-                    className={css.option} onClick={() => { chooseEffort(choice.effort); }}>
+                    data-menu-row="" className={css.option} onClick={() => { chooseEffort(choice.effort); }}>
                     <span className={css.optionText}>{choice.label}</span>
                     <span className={css.check}>{selected ? <IconCheckOutlineRegular /> : null}</span>
                   </button>

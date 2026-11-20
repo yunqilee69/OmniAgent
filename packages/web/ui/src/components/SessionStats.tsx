@@ -122,20 +122,20 @@ const UsagePill = memo(function UsagePill({ stats, locale, t }: {
   const cachedInput = stats.cache.count > 0 ? stats.cache.cachedInputTokens : null;
   const uncachedInput = cachedInput === null ? null : Math.max(0, promptTokens - cachedInput);
   const total = promptTokens + outputTokens;
-  const cacheHit = cachedInput === null ? null : formatCacheHitPercent(cachedInput, promptTokens);
-  // An unknown cache hit rate is unknown, never 0% or 100%: the dash keeps it
-  // from being read as a measurement.
-  const cacheHitText = cacheHit === null ? t('Cache hit —') : t('Cache hit {percent}%', { percent: cacheHit });
+  // Keep the compact pill stable when the server has not reported cache data yet.
+  // The detailed input rows below remain conditional, so 0% never implies fake counts.
+  const displayCacheHit = formatCacheHitPercent(cachedInput ?? 0, promptTokens) ?? '0';
+  const cacheHitText = t('Cache hit {percent}%', { percent: displayCacheHit });
   const icon = <IconDatabaseOutlineRegular />;
   // The pill labels its own scope: this is the whole session's spend, while the
   // meter beside it is the current occupancy of the session's model window.
   return (
     <DialogPill stat="usage" icon={icon}
-      {...reading(t('Session total {count} tok', { count: formatTokens(total, t) }), cacheHitText)}
+      {...reading(t('{count} tok', { count: formatTokens(total, t) }), cacheHitText)}
       title={t('Token usage')} titleValue={t('{count} tok', { count: formatExactTokens(total, locale) })}
       details={(
         <dl className={dialogCss.details} data-session-stats-usage>
-          {cacheHit !== null && <><dt>{t('Cache hit')}</dt><dd>{cacheHit}%</dd></>}
+          <><dt>{t('Cache hit')}</dt><dd>{displayCacheHit}%</dd></>
           {uncachedInput !== null && (
             <><dt>{t('Uncached input')}</dt><dd>{t('{count} tok', { count: formatExactTokens(uncachedInput, locale) })}</dd></>
           )}

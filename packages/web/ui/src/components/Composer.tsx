@@ -1256,6 +1256,7 @@ export function Composer({ hero = false, onOpenPlanPreview }: { hero?: boolean; 
                       : busy ? t('Model source for this session · applies from your next message')
                         : t('Model source for this session')}
                     disabled={saving || (!available && !creating)}
+                    saving={saving}
                     side="top"
                     align="end"
                   />

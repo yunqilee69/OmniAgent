@@ -192,6 +192,7 @@ export interface AppState {
   creatingSession: boolean;
   alert: string;
   tab: Tab;
+  settingsTab: 'general' | 'archive' | 'models' | 'mcp' | 'modes' | 'agents';
   theme: Theme;
   locale: Locale;
   processDisplay: ProcessDisplay;
@@ -508,6 +509,7 @@ export class AppStore {
     creatingSession: false,
     alert: '',
     tab: 'conversation',
+    settingsTab: 'general',
     theme: initialTheme(),
     locale: initialLocale(),
     processDisplay: storageGet('omniagent.processDisplay') === 'expanded' ? 'expanded' : 'collapsed',
@@ -570,6 +572,7 @@ export class AppStore {
   private readonly followBases = new Map<string, { transcript: TranscriptItem[]; turns: TurnMeta[]; metrics?: SessionMetrics }>();
   private readonly followEvents = new Map<string, unknown[]>();
   private readonly flushingQueues = new Set<string>();
+  private readonly forkingSessions = new Set<string>();
   private readonly liveRuns = new Map<string, LiveTurnState>();
   private readonly statusObservers = new Map<string, AbortController>();
   private readonly statusReconnects = new Map<string, ReturnType<typeof setTimeout>>();
@@ -897,8 +900,8 @@ export class AppStore {
   }
 
   /** Show the settings page in the main area and refresh its catalogs. */
-  openSettings(): void {
-    this.patch({ tab: 'settings' });
+  openSettings(settingsTab: AppState['settingsTab'] = 'general'): void {
+    this.patch({ tab: 'settings', settingsTab });
     void this.loadPermissions();
     void this.loadAskUserTimeout();
     void this.loadWebSearch();
@@ -1729,17 +1732,20 @@ export class AppStore {
         || left.id.localeCompare(right.id));
   }
 
-  async forkSession(id: string, workspaceId = this.state.workspaceId): Promise<string | null> {
+  async forkSession(id: string, workspaceId = this.state.workspaceId, sourceMessageId?: string): Promise<string | null> {
     if (workspaceId === null) return null;
     const selection = { workspaceId: this.state.workspaceId, sessionId: this.state.sessionId };
     const entry = this.state.entries[sessionKey(workspaceId, id)];
+    const key = sessionKey(workspaceId, id);
+    if (this.forkingSessions.has(key)) return null;
     if (entry?.run !== undefined || entry?.running === true) {
       this.showAlert(translator(this.state.locale)('Stop the active turn before forking this session.'));
       return null;
     }
+    this.forkingSessions.add(key);
     try {
       const body = await this.api<{ session?: SessionSummary }>(
-        sessionApiPath(workspaceId, id, 'fork'),
+        `${sessionApiPath(workspaceId, id, 'fork')}${sourceMessageId === undefined ? '' : `?throughMessageId=${encodeURIComponent(sourceMessageId)}`}`,
         jsonOptions('POST', {}),
       );
       const session = body.session;
@@ -1754,6 +1760,8 @@ export class AppStore {
     } catch (error) {
       this.showAlert(translator(this.state.locale)('Could not fork session: {message}', { message: (error as Error).message }));
       return null;
+    } finally {
+      this.forkingSessions.delete(key);
     }
   }
 

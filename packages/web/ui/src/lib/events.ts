@@ -131,6 +131,8 @@ export interface AssistantItem {
   turn: number;
   text: string;
   timestamp?: number;
+  /** Stable server-side identity used only for operations targeting this reply. */
+  messageId?: string;
   streaming: boolean;
   usage?: MessageUsage;
   error?: AssistantFailure;
@@ -926,11 +928,14 @@ export function hydrateTranscript(
       const calls = message.toolCalls ?? [];
       const failure = calls.length === 0 ? assistantFailureForTurn(events, turnIndex) : undefined;
       if (text !== '' || failure !== undefined) {
+        const persistedMessageId = typeof message.messageId === 'string' && message.messageId !== ''
+          ? message.messageId : undefined;
         transcript.push({
           kind: 'assistant',
           id: takePreviousId(`assistant|${turnIndex}|${text}|${usageKey(usage)}`) ?? hydratedMessageId('a', messageIndex),
           turn: turnIndex,
           text,
+          ...(persistedMessageId === undefined ? {} : { messageId: persistedMessageId }),
           streaming: false,
           ...(typeof message.timestamp === 'number' && Number.isFinite(message.timestamp) ? { timestamp: message.timestamp } : {}),
           ...(usage === undefined ? {} : { usage }),

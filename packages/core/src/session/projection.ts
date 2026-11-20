@@ -8,6 +8,11 @@ import { isInitCommand } from './init-command';
 
 export type PublicHistoryMessage = Message & { messageId: string; timestamp: number; goalRound?: number };
 
+/** Stable session-scoped identity shared by public history and targeted forks. */
+export function publicMessageId(identity: unknown, event: SessionEvent): string {
+  return createHash('sha256').update(JSON.stringify([identity, event])).digest('hex');
+}
+
 export function projectPublicHistory(identity: unknown, events: readonly SessionEvent[]): PublicHistoryMessage[] {
   const result: PublicHistoryMessage[] = [];
   for (const event of events) {
@@ -26,7 +31,7 @@ export function projectPublicHistory(identity: unknown, events: readonly Session
     const goalRound = source?.kind === 'goal' && typeof source.round === 'number' ? source.round : undefined;
     result.push({
       ...safe,
-      messageId: createHash('sha256').update(JSON.stringify([identity, event])).digest('hex'),
+      messageId: publicMessageId(identity, event),
       timestamp: event.ts,
       ...(goalRound === undefined ? {} : { goalRound }),
     });

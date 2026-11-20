@@ -48,6 +48,7 @@ import type {
   ScheduleService,
   ScheduleTargetRequest,
   ScheduleTiming,
+  SessionEvent,
   SessionHandle,
   SessionStore,
   SessionSummary,
@@ -76,7 +77,7 @@ import {
   projectDshPermissions, resolveDshDefaultPreset, snapshotDshPermissions,
 } from '../../core/src/permissions/dsh-permissions';
 import type { DshPermissionProjection, DshPermissionSnapshot } from '../../core/src/permissions/dsh-permissions';
-import { projectPublicHistory, safePublicMessages } from '../../core/src/session/projection';
+import { projectPublicHistory, publicMessageId, safePublicMessages } from '../../core/src/session/projection';
 import { projectTodos } from '../../core/src/session/todo';
 import {
   createPlanModeEvent,
@@ -1525,6 +1526,10 @@ async function route(
     return json(response, 200, { archived: body.archived });
   }
   if (request.method === 'POST' && parts.length === 6 && parts[5] === 'fork') {
+    const requestedIds = url.searchParams.getAll('throughMessageId');
+    if (requestedIds.length > 1 || (requestedIds.length === 1 && !/^[a-f0-9]{64}$/.test(requestedIds[0]!))) {
+      throw new HttpError(400, 'A valid throughMessageId is required');
+    }
     if (running.size > 0 || creating.size > 0) {
       throw new HttpError(409, 'Cannot fork a session while a turn or session creation is active');
     }
@@ -1532,7 +1537,13 @@ async function route(
     const registered = await options.workspaces.get(workspace.id);
     if (!registered || registered.path !== workspace.path) throw new HttpError(404, 'Workspace not found');
     const source = await openSession(options.store, workspace, sessionId);
-    const created = await forkSession(options.store, source, workspace);
+    const prefix = requestedIds[0] === undefined ? undefined : eventsThroughMessage(source, requestedIds[0]);
+    const created = await forkSession(options.store, source, workspace, prefix, () => {
+      if (running.size > 0 || creating.size > 0) {
+        throw new HttpError(409, 'Cannot fork a session while a turn or session creation is active');
+      }
+      if (removing.has(workspace.id)) throw new HttpError(409, 'Workspace is being unregistered');
+    });
     await options.workspaces.touch(workspace.id);
     return json(response, 201, { session: summarize(created) });
   }
@@ -2825,13 +2836,45 @@ async function openSession(store: WebHostOptions['store'], workspace: Workspace,
  * conversation with copied events, not a child. The user-visible title keeps a
  * `(fork)` suffix so two identical origins stay distinguishable in the list.
  */
+function forkableAssistantText(data: unknown): boolean {
+  if (typeof data !== 'object' || data === null || Array.isArray(data)) return false;
+  const record = data as { content?: unknown; toolCalls?: unknown };
+  if (Array.isArray(record.toolCalls) && record.toolCalls.length > 0) return false;
+  const parts = Array.isArray(record.content) ? record.content : [];
+  return parts.some((part) => typeof part === 'object' && part !== null
+    && (part as { type?: unknown }).type === 'text'
+    && typeof (part as { text?: unknown }).text === 'string'
+    && (part as { text: string }).text.trim() !== '');
+}
+
+function eventsThroughMessage(source: SessionHandle, messageId: string): SessionEvent[] {
+  let targetIndex = -1;
+  for (const [index, event] of source.events.entries()) {
+    if (publicMessageId(source.header, event) !== messageId) continue;
+    if (event.type !== 'message/assistant' && event.type !== 'assistant/message') {
+      throw new HttpError(400, 'This message cannot be branched');
+    }
+    if (!forkableAssistantText(event.data)) throw new HttpError(400, 'This reply cannot be branched');
+    targetIndex = index;
+    break;
+  }
+  if (targetIndex < 0) throw new HttpError(404, 'Reply not found');
+  let end = targetIndex + 1;
+  const next = source.events[end];
+  if (next?.type === 'trace/turn.end') end += 1;
+  return source.events.slice(0, end);
+}
+
 async function forkSession(
   store: WebHostOptions['store'],
   source: SessionHandle,
   workspace: Workspace,
+  prefix = source.events,
+  beforeWrite?: () => void,
 ): Promise<SessionHandle> {
-  const sourceTitle = foldSessionTitle(source.events);
-  const events = source.events
+  beforeWrite?.();
+  const sourceTitle = foldSessionTitle(prefix);
+  const events = prefix
     .filter((event) => event.type !== SESSION_TITLE_EVENT
       && event.type !== SESSION_PIN_EVENT
       && event.type !== SESSION_ARCHIVE_EVENT

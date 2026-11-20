@@ -350,6 +350,7 @@ describe('independent run observation', () => {
     const controllers: ReadableStreamDefaultController<Uint8Array>[] = [];
     const encoder = new TextEncoder();
     let running = false;
+    let settled = false;
     const decisions: unknown[] = [];
     const store = await boot(sessionFetcher((url, init) => {
       if (url === '/api/workspaces/a/sessions/shared/messages' && init?.method === 'POST') {
@@ -365,7 +366,19 @@ describe('independent run observation', () => {
         decisions.push(JSON.parse(String(init?.body)));
         return json({ ok: true });
       }
-      if (url === '/api/workspaces/a/sessions/shared') return json(detail({ text: running ? 'Question' : 'Saved answer', running }));
+      if (url === '/api/workspaces/a/sessions/shared') return json(detail({
+        running,
+        messages: settled
+          ? [
+            { role: 'user', content: [{ type: 'text', text: 'Question' }] },
+            {
+              role: 'assistant',
+              content: [{ type: 'text', text: 'Saved answer' }],
+              messageId: 'a'.repeat(64),
+            },
+          ]
+          : [{ role: 'user', content: [{ type: 'text', text: 'Question' }] }],
+      }));
       return undefined;
     }));
     expect(await store.sendMessage('Question')).toBe(true);
@@ -386,10 +399,16 @@ describe('independent run observation', () => {
     await store.resolveApproval('allow');
     expect(decisions).toEqual([{ requestId: 'r1', decision: 'allow' }]);
     running = false;
+    settled = true;
     controllers[1]!.enqueue(encoder.encode('data: {"type":"turn.end","reason":"end_turn"}\n\n'));
     controllers[1]!.close();
     await waitFor(() => store.currentEntry()?.run === undefined);
-    expect(store.currentEntry()?.transcript).toMatchObject([{ kind: 'user', text: 'Saved answer' }]);
+    const finalTranscript = store.currentEntry()?.transcript ?? [];
+    expect(finalTranscript).toMatchObject([
+      { kind: 'user', text: 'Question' },
+      { kind: 'assistant', text: 'Saved answer', messageId: 'a'.repeat(64) },
+    ]);
+    expect(groupTurns(finalTranscript, store.currentEntry()?.turns ?? [], false).at(-1)?.final?.messageId).toBe('a'.repeat(64));
     store.dispose();
   });
 
@@ -2050,6 +2069,22 @@ describe('workbench store', () => {
     expect(store.getSnapshot().sessions[0]?.title).toBe('Alpha (fork)');
     await waitFor(() => store.currentEntry()?.loaded === true);
     expect(store.currentEntry()?.transcript.some((item) => item.kind === 'user' && item.text === 'Alpha history')).toBe(true);
+  });
+
+  it('routes targeted forks through the stable reply id', async () => {
+    let requested = '';
+    const store = await boot(sessionFetcher(async (url, init) => {
+      if (url.startsWith('/api/workspaces/a/sessions/shared/fork?') && init?.method === 'POST') {
+        requested = url;
+        return json({ session: { id: 'target-fork', updatedAt: 20, blank: false } }, 201);
+      }
+      if (url === '/api/workspaces/a/sessions/target-fork') return json(detail());
+      if (url === '/api/workspaces/a/sessions/shared') return json(detail());
+      return undefined;
+    }));
+    await expect(store.forkSession('shared', 'a', 'id/with spaces')).resolves.toBe('target-fork');
+    expect(requested).toBe('/api/workspaces/a/sessions/shared/fork?throughMessageId=id%2Fwith%20spaces');
+    expect(store.getSnapshot().sessionId).toBe('target-fork');
   });
 
   it('deletes the selected session and selects the next one', async () => {

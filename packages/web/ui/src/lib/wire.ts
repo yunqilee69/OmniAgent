@@ -664,6 +664,8 @@ export function messageBodyFits(text: string, attachments: readonly SendAttachme
 
 export interface PublicMessage {
   role: 'system' | 'user' | 'assistant' | 'tool';
+  /** Stable persisted identity; distinct from local transcript/React identity. */
+  messageId?: string;
   timestamp?: number;
   content?: Array<ContentPart | ImageContentPart>;
   toolCalls?: ToolCall[];
