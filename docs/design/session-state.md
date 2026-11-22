@@ -134,7 +134,7 @@
 
 `contextSample` 在每次成功请求后写入 assistant 消息，包含 provider / model、历史哈希和三段估算。它和 `usage` 一样不发给 provider；估算使用 UTF-8 JSON 字节 / 4，图片按每张 1,024 token 的固定近似，不读取图片真实尺寸。
 
-`Session.contextProjection()` / `contextMessageEstimate()` 随时可用：空闲时基于 `this.history`；回合中基于 AgentLoop 在 `turn.start` / `assistant.message` / `tool.result` / `turn.end` 之后发布的「下一步请求快照」，所以压缩后的读数就是下一次请求真正发送的内容，不会退回压缩前。Web 的 `GET .../context` 优先使用匹配当前 preset / 模型 / revision 的 live Session，其次用 replay 构造临时 Session：回合中只有在本 host 没有对应 live Session 时才不返回估算（replay 看不到回合内的临时历史）。`breakdown` 只描述请求构成；`window` 的语义见 §4.3——它是模型窗口，不是历史消息预算。
+`Session.contextProjection()` / `contextMessageEstimate()` 随时可用：空闲时基于 `this.history`；回合中基于 AgentLoop 在 `turn.start` / `assistant.message` / `tool.result` / `turn.end` 之后发布的「下一步请求快照」，所以压缩后的读数就是下一次请求真正发送的内容，不会退回压缩前。Web 的 `GET .../context` 优先使用匹配当前 preset / 模型 / revision 的 live Session，其次用 replay 构造临时 Session：回合中只有在本 host 没有对应 live Session 时才不返回估算（replay 看不到回合内的临时历史）。`breakdown` 只描述请求构成；`window` 的语义见 §4.3——它是模型窗口，不是历史消息预算。宿主在每个 step 边界（`turn.start` / `assistant.message` / `tool.result` / `turn.end` / `context.compacted`）把同一份读数作为 `run.context` 帧推给该回合的 follower，值不变就不推；因此 Web 客户端在回合中不需要任何请求，`GET .../context` 只是同算法的 pull 通道。
 
 会话指标（runs / steps / requests / usage / cache / throughput）不是新的持久化事件，而是 `projectSessionMetrics()` 对持久化 trace 和 assistant usage 的投影；Web UI 在流式过程中增量维护同一形状，并在 reconnect 时用服务器 baseline 重建。
 

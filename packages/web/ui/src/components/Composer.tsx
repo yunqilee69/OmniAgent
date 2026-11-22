@@ -1331,10 +1331,8 @@ export function Composer({ hero = false, onOpenPlanPreview }: { hero?: boolean; 
       <div className={clsx(css.dock, appCss.composerDock)}>
         <div className={appCss.composerReadings}>
           <SessionStats entry={entry} />
-          <ContextMeter workspaceId={app.workspaceId} sessionId={app.sessionId}
-            draft={draftSession} busy={busy} modelSaving={entry?.modelSaving === true}
-            modelKey={JSON.stringify(binding)} locale={app.locale}
-            turnTick={entry?.contextTick ?? 0} />
+          <ContextMeter workspaceId={app.workspaceId} locale={app.locale}
+            value={entry?.contextEstimate ?? null} />
         </div>
       </div>
       <RiskConfirmation

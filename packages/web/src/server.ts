@@ -337,6 +337,10 @@ interface RunningTurn {
   replayBytes: number;
   replayOverflow: boolean;
   followers: Set<ServerResponse>;
+  /** Window fields the admission-time runtime fixed, carried into every reading. */
+  contextScope?: ContextWindowScope;
+  /** Last reading pushed to followers, so an unchanged one is not re-sent. */
+  lastContext?: string;
   /**
    * A model or permission switch landed while this turn was running. The turn
    * keeps the runtime it captured at admission, so the cached runtime is
@@ -1449,6 +1453,7 @@ async function route(
     const audit = await options.readAudit?.(workspace, sessionId) ?? [];
     await options.workspaces.touch(workspace.id);
     const selection = await describeSelection(options, workspace, handle);
+    const { runtime: selectionRuntime, ...selectionSummary } = selection;
     const title = foldSessionTitle(handle.events);
     const mode = projectModeSelection(handle.events);
     return json(response, 200, {
@@ -1460,7 +1465,7 @@ async function route(
       running: running.has(key),
       messages: projectPublicHistory(handle.header, handle.events),
       permission: { preset: permissionProjection(handle, key, failedPermissions).preset },
-      ...selection,
+      ...selectionSummary,
       plan: projectPlanMode(handle.events),
       planReview: projectPendingPlanReview(handle.events),
       goal: projectGoal(handle.events).current,
@@ -1471,6 +1476,12 @@ async function route(
       events: projectTraceEvents(handle.events),
       trajectory: projectTrajectory(handle.events),
       metrics: projectSessionMetrics(handle.events),
+      // The reading travels with the session so opening a conversation costs no
+      // second request, and a turn keeps it current with `run.context` frames.
+      context: await contextReading({
+        options, workspace, handle, key, failedPermissions,
+        runtime: selectionRuntime, cached: sessions.get(key), running: running.has(key),
+      }),
       audit,
     });
   }
@@ -1566,41 +1577,9 @@ async function route(
         } catch { /* An unavailable runtime has no known window. */ }
       }
     }
-    const shared = options.liveSessions?.get(key);
-    const cached = sessions.get(key);
-    const modelKey = runtime === undefined ? '' : JSON.stringify(runtime.modelBinding);
-    const revision = runtime?.revision;
-    const preset = permissionProjection(handle, key, failedPermissions).preset;
-    const matches = (candidate: { preset: unknown; modelKey: string; runtimeKey?: string }): boolean =>
-      candidate.preset === preset && candidate.modelKey === modelKey && candidate.runtimeKey === revision;
-    const sharedSession = shared?.session as WebSession | undefined;
-    let live: WebSession | undefined;
-    if (shared && matches(shared)) live = sharedSession;
-    else if (cached && matches(cached)) live = await cached.pending.catch(() => undefined);
-    const runningNow = running.has(key) || sharedSession?.activeTurn === true || live?.activeTurn === true;
-    // A live runtime owns the authoritative post-compaction history, mid-turn
-    // included: it publishes the request it will send at every step boundary.
-    // Only a session this host has no live runtime for falls back to the log —
-    // and only when idle, because replay cannot see a turn's interim history.
-    const estimatedMessageTokens = live ? live.contextMessageEstimate?.()
-      : runningNow ? undefined : estimateModelHistory(projectMessages(handle.events));
-    let projection = live?.contextProjection?.();
-    if (!live && !runningNow && runtime && options.replayContext) {
-      const permission = permissionProjection(handle, key, failedPermissions);
-      if (permission.status === 'ready') {
-        try {
-          projection = options.replayContext(workspace, handle, snapshotDshPermissions(permission), runtime);
-        } catch { /* A failed or unavailable runtime is not an estimate. */ }
-      }
-    }
-    return json(response, 200, {
-      ...(estimatedMessageTokens === undefined ? {} : { estimatedMessageTokens }),
-      ...(projection === undefined ? {} : { projection }),
-      ...(runtime?.modelDescriptor?.contextWindow === undefined ? {} : { modelWindow: runtime.modelDescriptor.contextWindow }),
-      ...(runtime?.contextWindowTokens === undefined || runtime.contextWindowSource === undefined ? {} : {
-        window: { tokens: runtime.contextWindowTokens, source: runtime.contextWindowSource },
-      }),
-    });
+    return json(response, 200, await contextReading({
+      options, workspace, handle, key, failedPermissions, runtime, cached: sessions.get(key), running: running.has(key),
+    }));
   }
   if (request.method === 'GET' && parts.length === 6 && parts[5] === 'messages') {
     const handle = await openSession(options.store, workspace, sessionId);
@@ -1704,7 +1683,11 @@ async function route(
       }
       const event = createModelSwitch(projectModelSelection(handle.events), binding);
       const next = {
-        result: { model: binding, resolvedModel: resolvedModelSummary(resolved) },
+        // The switch changes the window the meter divides by, so the new scope
+        // travels with the answer instead of waiting for the next turn. The
+        // breakdown is not re-estimated here: it describes the same history, and
+        // the next turn's `run.context` frames settle it.
+        result: { model: binding, resolvedModel: resolvedModelSummary(resolved), context: contextWindowScope(resolved) },
         changed: event !== undefined,
       };
       if (event !== undefined) await handle.append(event);
@@ -2144,6 +2127,10 @@ async function route(
         return { handle, permissions, runtime: resolved };
       });
       turn.baseline = { messages: projectPublicHistory(handle.header, handle.events), metrics: projectSessionMetrics(handle.events) };
+      // The window fields are fixed for the whole turn: a model switch during the
+      // turn is recorded for the next one, so every reading this turn pushes
+      // carries the budget it is actually running under.
+      turn.contextScope = contextWindowScope(runtime);
       markBaselineReady();
       if (response.destroyed) return;
       if (checkCancelled()) return;
@@ -2197,7 +2184,7 @@ async function route(
               turn.closing = true;
               await Promise.all(turn.deliveries);
             }
-            publishTurnEvent(turn, publicAgentEvent(first.value, turn.startedAt));
+            publishAgentEvent(turn, first.value);
           }
           for await (const event of stream) {
             if (event.type === 'turn.start') turn.closing = false;
@@ -2206,7 +2193,7 @@ async function route(
               await Promise.all(turn.deliveries);
             }
             ended = event.type === 'turn.end';
-            publishTurnEvent(turn, publicAgentEvent(event, turn.startedAt));
+            publishAgentEvent(turn, event);
           }
           if (!ended) {
             turn.closing = true;
@@ -2424,6 +2411,36 @@ function cancelTurn(turn: RunningTurn): void {
   turn.session?.interrupt();
 }
 
+/**
+ * Publish one model-facing event, then the reading it implies. The loop
+ * republishes "the request the next step will send" at these boundaries, so a
+ * follower learns the new occupancy in the same breath as the event that caused
+ * it instead of asking the host again.
+ */
+function publishAgentEvent(turn: RunningTurn, event: AgentEvent): void {
+  publishTurnEvent(turn, publicAgentEvent(event, turn.startedAt));
+  if (event.type === 'turn.start' || event.type === 'assistant.message' || event.type === 'tool.result'
+    || event.type === 'turn.end' || event.type === 'context.compacted') {
+    publishTurnContext(turn);
+  }
+}
+
+/**
+ * Push the reading the next request will carry. Unchanged values are dropped:
+ * a follower must see one frame per real change, not one per agent event. A
+ * session whose runtime cannot project one says nothing at all, so the client
+ * keeps the reading it already has.
+ */
+function publishTurnContext(turn: RunningTurn): void {
+  const session = turn.session;
+  if (session?.contextProjection === undefined) return;
+  const context = liveContextReading(session, turn.contextScope ?? {});
+  const serialized = JSON.stringify(context);
+  if (serialized === turn.lastContext) return;
+  turn.lastContext = serialized;
+  publishTurnEvent(turn, { type: 'run.context', context });
+}
+
 function publishTurnEvent(turn: RunningTurn, event: unknown, excluded?: ServerResponse): void {
   const serialized = JSON.stringify(event);
   const bytes = Buffer.byteLength(serialized) + 1;
@@ -2532,6 +2549,108 @@ function publicAgentEvent(event: AgentEvent, startedAt?: number): unknown {
 function publicUserEvent(input: string | readonly ContentPart[]): unknown {
   const content: ContentPart[] = typeof input === 'string' ? [{ type: 'text', text: input }] : [...input];
   return { type: 'run.user.message', message: safePublicMessages([{ role: 'user', content }])[0], timestamp: Date.now() };
+}
+
+/** The window fields a resolved runtime fixes for the whole turn. */
+interface ContextWindowScope {
+  modelWindow?: number;
+  window?: { tokens: number; source: 'config' | 'model' };
+}
+
+function contextWindowScope(runtime: ResolvedSessionRuntime | undefined): ContextWindowScope {
+  return {
+    ...(runtime?.modelDescriptor?.contextWindow === undefined ? {} : { modelWindow: runtime.modelDescriptor.contextWindow }),
+    ...(runtime?.contextWindowTokens === undefined || runtime.contextWindowSource === undefined ? {} : {
+      window: { tokens: runtime.contextWindowTokens, source: runtime.contextWindowSource },
+    }),
+  };
+}
+
+/**
+ * The reading a live session answers with: the request its next step will send,
+ * mid-turn included, because the loop publishes that snapshot at every step
+ * boundary. The shape is the one `GET .../context` returns, so the pull answer
+ * and the `run.context` frame a turn pushes share one client validator.
+ */
+function liveContextReading(live: WebSession, scope: ContextWindowScope): Record<string, unknown> {
+  const estimatedMessageTokens = live.contextMessageEstimate?.();
+  const projection = live.contextProjection?.();
+  return {
+    ...scope,
+    ...(estimatedMessageTokens === undefined ? {} : { estimatedMessageTokens }),
+    ...(projection === undefined ? {} : { projection }),
+  };
+}
+
+/**
+ * The live session this host holds for a session, when it still matches the
+ * current permission preset, model binding and resolver revision. A stale match
+ * would answer with another selection's reading, so a mismatch falls back to the
+ * persisted log instead.
+ */
+async function matchingLiveSession(input: {
+  options: WebHostOptions;
+  handle: SessionHandle;
+  key: string;
+  failedPermissions: Set<string>;
+  runtime: ResolvedSessionRuntime | undefined;
+  cached: CachedSession | undefined;
+  running: boolean;
+}): Promise<{ live: WebSession | undefined; runningNow: boolean }> {
+  const { options, handle, key, failedPermissions, runtime, cached, running } = input;
+  const modelKey = runtime === undefined ? '' : JSON.stringify(runtime.modelBinding);
+  const revision = runtime?.revision;
+  const preset = permissionProjection(handle, key, failedPermissions).preset;
+  const matches = (candidate: { preset: unknown; modelKey: string; runtimeKey?: string }): boolean =>
+    candidate.preset === preset && candidate.modelKey === modelKey && candidate.runtimeKey === revision;
+  const shared = options.liveSessions?.get(key);
+  const sharedSession = shared?.session as WebSession | undefined;
+  let live: WebSession | undefined;
+  if (shared && matches(shared)) live = sharedSession;
+  else if (cached && matches(cached)) live = await cached.pending.catch(() => undefined);
+  return {
+    live,
+    runningNow: running || sharedSession?.activeTurn === true || live?.activeTurn === true,
+  };
+}
+
+/**
+ * One context reading for a session, shared by the pull route and the session
+ * detail response. A live runtime owns the authoritative post-compaction history,
+ * mid-turn included; only a session this host has no live runtime for falls back
+ * to the log — and only when idle, because replay cannot see a turn's interim
+ * history.
+ */
+async function contextReading(input: {
+  options: WebHostOptions;
+  workspace: Workspace;
+  handle: SessionHandle;
+  key: string;
+  failedPermissions: Set<string>;
+  runtime: ResolvedSessionRuntime | undefined;
+  cached: CachedSession | undefined;
+  running: boolean;
+}): Promise<Record<string, unknown>> {
+  const { options, workspace, handle, key, failedPermissions, runtime, running } = input;
+  const scope = contextWindowScope(runtime);
+  const { live, runningNow } = await matchingLiveSession(input);
+  if (live !== undefined) return liveContextReading(live, scope);
+  if (runningNow) return { ...scope };
+  const estimatedMessageTokens = estimateModelHistory(projectMessages(handle.events));
+  let projection: ReturnType<NonNullable<WebSession['contextProjection']>>;
+  if (runtime !== undefined && options.replayContext !== undefined) {
+    const permission = permissionProjection(handle, key, failedPermissions);
+    if (permission.status === 'ready') {
+      try {
+        projection = options.replayContext(workspace, handle, snapshotDshPermissions(permission), runtime);
+      } catch { /* A failed or unavailable runtime is not an estimate. */ }
+    }
+  }
+  return {
+    ...scope,
+    estimatedMessageTokens,
+    ...(projection === undefined ? {} : { projection }),
+  };
 }
 
 function permissionProjection(
@@ -2699,6 +2818,8 @@ async function describeSelection(
   agentSkills: Array<{ name: string; description: string }>;
   agentError: string | null;
   agentWarnings: string[];
+  /** The resolved runtime behind the summary, for callers that need more than it. */
+  runtime?: ResolvedSessionRuntime;
 }> {
   if (!options.runtime) {
     return { agent: null, model: null, resolvedModel: null, agentSkills: [], agentError: null, agentWarnings: [] };
@@ -2746,6 +2867,7 @@ async function describeSelection(
       agentSkills: runtime.skills.map((skill) => ({ name: skill.name, description: skill.description })),
       agentError: null,
       agentWarnings: runtime.warnings,
+      runtime,
     };
   } catch (error) {
     return {

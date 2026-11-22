@@ -325,10 +325,15 @@ describe('configured session API', () => {
       const binding = { version: 2, kind: 'role', role: 'quick' } as const;
       const switched = await fetch(`${sessionUrl}/model`, post(binding));
       expect(switched.status).toBe(200);
-      expect(await switched.json()).toEqual({
+      // The new model's window travels with the answer, so the meter's
+      // denominator follows the switch without a second request.
+      const switchedBody = await switched.json() as { context?: { modelWindow?: number; window?: { tokens: number } } };
+      expect(switchedBody).toEqual({
         model: binding,
         resolvedModel: expect.objectContaining({ model: 'deepseek-v4-pro', reasoningEffort: 'low' }),
+        context: { modelWindow: expect.any(Number), window: { tokens: expect.any(Number), source: 'model' } },
       });
+      expect(switchedBody.context!.window!.tokens).toBe(switchedBody.context!.modelWindow);
       // The running turn keeps the runtime it captured at admission.
       expect(captured).toHaveLength(1);
       expect(captured[0]!.modelId).toBe('deepseek-flash');
@@ -375,10 +380,13 @@ describe('configured session API', () => {
       model: 'deepseek-flash',
     }));
     expect(switchedModel.status).toBe(200);
-    expect(await switchedModel.json()).toEqual({
+    const switchedModelBody = await switchedModel.json() as { context?: { modelWindow?: number; window?: { tokens: number } } };
+    expect(switchedModelBody).toEqual({
       model: { version: 2, kind: 'model', provider: 'deepseek-official', model: 'deepseek-flash' },
       resolvedModel: expect.objectContaining({ model: 'deepseek-flash', reasoningEffort: 'high' }),
+      context: { modelWindow: expect.any(Number), window: { tokens: expect.any(Number), source: 'model' } },
     });
+    expect(switchedModelBody.context!.window!.tokens).toBe(switchedModelBody.context!.modelWindow);
 
     const events = (await store.open(workspace.path, id)).events;
     expect(projectAgentSelection(events)).toEqual({ status: 'selected', agent: 'writer' });

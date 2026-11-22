@@ -9,6 +9,7 @@ import {
   toWireAttachments,
   normalizePlan,
   normalizeTodos,
+  parseContextEstimate,
   permissionPresets,
   sessionApiPath,
   workspaceApiPath,
@@ -36,6 +37,7 @@ import {
   type AgentDefinitionDetail,
   type ArchiveSettings,
   type ArchivedSessionSummary,
+  type ContextEstimate,
   type AgentDefinitionWrite,
   type AgentSkill,
   type AgentSummary,
@@ -81,6 +83,7 @@ import {
   type TurnMeta,
 } from './events.ts';
 import { IDLE_SESSION_STATE, statusReconnectDelay, type SessionLiveState } from './session-status.ts';
+import { carryProjection } from './context-reading.ts';
 
 export type Theme = 'light' | 'dark';
 export type ProcessDisplay = 'collapsed' | 'expanded';
@@ -162,11 +165,11 @@ export interface SessionEntry {
   /** The server reports an active turn even when this tab is not streaming it. */
   running: boolean;
   /**
-   * Counts the step boundaries that change what the next request will carry.
-   * The Context Meter watches this instead of polling during a turn: `turn.start`,
-   * `assistant.message`, `tool.result` and `turn.end` each publish a new layout.
+   * Context reading for this session: the request the next turn would send and
+   * the window that bounds it. It arrives with the session detail and then rides
+   * the turn stream as `run.context` frames — the workbench never asks for it.
    */
-  contextTick: number;
+  contextEstimate?: ContextEstimate;
   queued: QueuedMessage[];
   run?: LiveTurnState;
 }
@@ -387,16 +390,19 @@ function emptyEntry(): SessionEntry {
     request: 0,
     outcome: '',
     running: false,
-    contextTick: 0,
     queued: [],
   };
 }
 
-/** One tick per event that changes the request the loop will send next. */
-function contextTickFor(type: unknown): number {
-  return type === 'turn.start' || type === 'assistant.message' || type === 'tool.result' || type === 'turn.end'
-    ? 1
-    : 0;
+/**
+ * The reading a `run.context` frame carries, if this event is one. The frame is
+ * a host event, not a core `AgentEvent`, so it is folded here rather than in
+ * `applyAgentEvent`; a malformed one reads as "no reading" and is ignored.
+ */
+function runContextFrame(event: unknown): ContextEstimate | undefined {
+  if (typeof event !== 'object' || event === null) return undefined;
+  const frame = event as { type?: unknown; context?: unknown };
+  return frame.type === 'run.context' ? parseContextEstimate(frame.context) : undefined;
 }
 
 function initialTheme(): Theme {
@@ -1863,6 +1869,11 @@ export class AppStore {
       const restoredReview = pendingPlanReview(hydrated.transcript, persistedReview)
         ?? (body.running === true ? pendingPlanReview(hydrated.transcript) : undefined);
       const restoredAskUser = pendingAskUser(body.askUser);
+      // Opening a conversation carries its own reading, so the meter never asks
+      // for one; only a reading that actually moved replaces what is on screen.
+      const incoming = parseContextEstimate(body.context);
+      const contextPatch = incoming === undefined ? undefined
+        : carryProjection(displayed.contextEstimate, incoming);
        const closedApproval = closedApprovalRequest(body.pendingApproval);
       const patch: Partial<SessionEntry> = {
         header: typeof body.header === 'object' && body.header !== null ? body.header as Record<string, unknown> : null,
@@ -1892,6 +1903,9 @@ export class AppStore {
         audit: Array.isArray(body.audit) ? body.audit : [],
         trajectory: body.trajectory ?? null,
         metrics: validateSessionMetrics(body.metrics),
+        // The reading arrives with the reload; a payload without a projection
+        // (another host owns the turn) keeps the breakdown already on screen.
+        ...(contextPatch === undefined ? {} : { contextEstimate: contextPatch }),
         loaded: true,
         loading: false,
         error: '',
@@ -2653,7 +2667,17 @@ export class AppStore {
     this.liveRuns.set(key, run);
     const decoder = new TextDecoder();
     const { createSSEParser } = await import('./events.ts');
-    let ticks = 0;
+    // Readings that arrived in this batch are folded once, at the end, so a step
+    // boundary costs the same single emit it did while the meter polled.
+    let contexts: ContextEstimate[] = [];
+    const foldEvent = (item: unknown): void => {
+      const reading = runContextFrame(item);
+      if (reading !== undefined) {
+        contexts.push(reading);
+        return;
+      }
+      applyAgentEvent(run, item as never);
+    };
     const parser = createSSEParser((event) => {
       const snapshot = event as { type?: unknown; events?: unknown; truncated?: unknown; baseline?: unknown } | null;
       if (snapshot?.type === 'run.snapshot') {
@@ -2670,17 +2694,13 @@ export class AppStore {
         }
         const restoredReview = run.planReview?.requestId.startsWith('restored:') === true ? run.planReview : undefined;
         if (prefixMatches) {
-          for (const item of snapshot.events.slice(previous.length)) applyAgentEvent(run, item as never);
-          ticks += snapshot.events.slice(previous.length)
-            .reduce((count, item) => count + contextTickFor((item as { type?: unknown } | null)?.type), 0);
+          for (const item of snapshot.events.slice(previous.length)) foldEvent(item);
         } else {
           const baseline = snapshot.baseline;
           if (baseline !== undefined && (typeof baseline !== 'object' || baseline === null
             || !Array.isArray((baseline as { messages?: unknown }).messages))) throw new Error('Invalid run baseline');
           resetSnapshot(baseline as { messages: unknown[]; metrics?: unknown } | undefined);
-          for (const item of snapshot.events) applyAgentEvent(run, item as never);
-          ticks += snapshot.events
-            .reduce((count, item) => count + contextTickFor((item as { type?: unknown } | null)?.type), 0);
+          for (const item of snapshot.events) foldEvent(item);
         }
         // A snapshot that already decided or ended the review must not revive the
         // placeholder. One that is still waiting replaces it with the live prompt,
@@ -2701,8 +2721,7 @@ export class AppStore {
         }
         this.followEvents.set(key, snapshot.events.slice());
       } else {
-        applyAgentEvent(run, event as never);
-        ticks += contextTickFor((event as { type?: unknown } | null)?.type);
+        foldEvent(event);
         const events = this.followEvents.get(key);
         if (observed && events !== undefined) events.push(event);
       }
@@ -2755,19 +2774,26 @@ export class AppStore {
         }
       }
       // Immutable snapshot so React sees a new run object for every event batch.
-      // The context tick rides along so a step boundary costs one emit, not two.
+      // The reading rides along with it, so a step boundary costs one emit.
       const entry = this.state.entries[key];
-      const pendingTicks = ticks;
-      ticks = 0;
-      if (entry !== undefined && (entry.run !== undefined || pendingTicks > 0)) {
-        const next: SessionEntry = {
-          ...entry,
-          ...(entry.run === undefined ? {} : { run: { ...run } }),
-          ...(pendingTicks === 0 ? {} : { contextTick: entry.contextTick + pendingTicks }),
-        };
-        this.state = { ...this.state, entries: { ...this.state.entries, [key]: next } };
-        this.emit();
-      }
+      const readings = contexts;
+      contexts = [];
+      if (entry === undefined) return;
+      // In arrival order, the last one wins. A payload without a projection (a
+      // turn this host does not hold) keeps the breakdown already on screen.
+      let reading = entry.contextEstimate;
+      for (const frame of readings) reading = carryProjection(reading, frame);
+      // Identical numbers keep the object identity, so the ring and its panel do
+      // not re-render for a step boundary that changed nothing it shows.
+      const moved = readings.length > 0 && JSON.stringify(reading) !== JSON.stringify(entry.contextEstimate);
+      if (entry.run === undefined && !moved) return;
+      const next: SessionEntry = {
+        ...entry,
+        ...(entry.run === undefined ? {} : { run: { ...run } }),
+        ...(moved ? { contextEstimate: reading } : {}),
+      };
+      this.state = { ...this.state, entries: { ...this.state.entries, [key]: next } };
+      this.emit();
     });
     try {
       const reader = body.getReader();
@@ -3407,15 +3433,19 @@ export class AppStore {
     if (JSON.stringify(entry.binding) === JSON.stringify(binding)) return;
     this.patchEntry(key, { modelSaving: true, modelError: '' });
     try {
-      const body = await this.api<{ model?: unknown; resolvedModel?: unknown }>(
+      const body = await this.api<{ model?: unknown; resolvedModel?: unknown; context?: unknown }>(
         sessionApiPath(workspaceId, sessionId, 'model'),
         jsonOptions('POST', binding),
       );
       const selected = validateBinding(body.model);
       if (JSON.stringify(selected) !== JSON.stringify(binding)) throw new Error('The server returned a different model binding.');
+      // The switch answers with the new window, so the meter's denominator
+      // follows the model instead of waiting for the next turn.
+      const reading = parseContextEstimate(body.context);
       this.patchEntry(key, {
         binding: selected,
         resolvedModel: validateResolvedModel(body.resolvedModel),
+        ...(reading === undefined ? {} : { contextEstimate: carryProjection(entry.contextEstimate, reading) }),
         modelSaving: false,
       });
     } catch (error) {

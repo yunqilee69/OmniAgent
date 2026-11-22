@@ -1,15 +1,14 @@
 /**
  * Reading rules for the composer context meter.
  *
- * The `.../context` endpoint may or may not carry a projection in any single
- * answer. When the host serving the request holds the matching live Session it
- * answers with one even mid-turn, projecting the history snapshot the loop
- * persisted at the last step boundary; when no live Session is held here (the
- * turn belongs to another host, or there is no turn at all and replay cannot
- * see interim history) it still answers without one. The meter must therefore
- * treat a projection-less answer as "no new reading this time" rather than "no
- * reading exists" — `carryProjection` keeps the last settled projection in that
- * case — or the ring blinks out for the length of every turn.
+ * The host publishes the reading, and any single publication may arrive without
+ * a projection: the session detail response carries one only when the runtime
+ * can replay the history, and a running turn pushes `run.context` frames for a
+ * host that holds the matching live Session — a turn owned by another host
+ * pushes ones without a projection. The meter must therefore treat a
+ * projection-less payload as "no new reading this time" rather than "no reading
+ * exists" — `carryProjection` keeps the last settled projection in that case —
+ * or the ring blinks out for the length of every turn.
  */
 import type { ContextEstimate } from './wire.ts';
 

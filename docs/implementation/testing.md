@@ -88,7 +88,7 @@ TypeScript 配置是 strict + `noUncheckedIndexedAccess` + `verbatimModuleSyntax
 | `session-status-stream.test.ts` | 工作区状态流：晚到快照、审批前后推送、取消注册关闭连接 |
 | `session-status-store.test.ts` | 状态流合并、列表基线补齐、未读完成与失败标记 |
 | `header-trajectory.test.ts` | Header 状态与轨迹入口 |
-| `context-meter.test.ts` | `/context` 估算路由 |
+| `context-meter.test.ts` | 上下文仪表：纯展示渲染、占比/空状态、`carryProjection` 合并规则 |
 | `todo-dock.test.ts` | 底部 todo 状态 |
 | `ui-store.test.ts` / `ui-protocol.test.ts` | 前端状态仓库、run snapshot、事件 reducer |
 | `composer-trigger.test.ts` / `matcher.test.ts` | Composer 触发器与 LIKE 匹配 |

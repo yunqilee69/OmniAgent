@@ -429,13 +429,17 @@ describe('workspace web host', () => {
     await started.promise;
     // The loop publishes the request it will send at every step boundary, so a
     // running turn has a reading instead of hiding behind a stale one.
-    expect(await (await fetch(`${url}/context`)).json()).toEqual({
+    const reading = {
       estimatedMessageTokens: 123,
       projection: {
         breakdown: { systemTokens: 1, toolsTokens: 2, messageTokens: 120 },
         projectedTokens: 123, source: 'estimate',
       },
-    });
+    };
+    expect(await (await fetch(`${url}/context`)).json()).toEqual(reading);
+    // The same reading travels with the session detail, which is what the
+    // workbench opens a conversation with.
+    expect((await (await fetch(url)).json() as { context?: unknown }).context).toEqual(reading);
     finish.resolve();
     await (await pending).text();
   });
@@ -464,6 +468,106 @@ describe('workspace web host', () => {
     expect(await (await fetch(`${url}/context`)).json()).toEqual({});
     finish.resolve();
     await (await pending).text();
+  });
+
+  it('pushes a context reading with the turn instead of answering requests', async () => {
+    let projectedTokens = 10;
+    const { base, first, store } = await setup((id) => ({
+      id,
+      async *send() {
+        yield { type: 'turn.start', step: 0 };
+        projectedTokens = 20;
+        yield { type: 'turn.start', step: 1 };
+        // A step that changes nothing the meter shows must not cost a frame.
+        yield { type: 'turn.start', step: 2 };
+        projectedTokens = 30;
+        yield { type: 'turn.end', reason: 'end_turn' };
+      },
+      interrupt() {},
+      contextMessageEstimate() { return projectedTokens; },
+      contextProjection() {
+        return {
+          breakdown: { systemTokens: 1, toolsTokens: 2, messageTokens: projectedTokens },
+          projectedTokens, source: 'estimate' as const,
+        };
+      },
+      activeTurn: true,
+    }));
+    const handle = await store.create({ id: 'streamed-context', workspace: first.path, cwd: first.path });
+    await handle.append(createInitialDshPermissionEvent('workspace-write'));
+    const response = await fetch(`${sessionsUrl(base, first.id)}/streamed-context/messages`, jsonRequest({ text: 'hello' }));
+    expect(response.status).toBe(200);
+    const frames = (await response.text()).split('\n\n').filter(Boolean).map((frame) => JSON.parse(frame.slice(6)));
+    const readings = frames.filter((frame) => frame.type === 'run.context');
+    // One frame per real change, in step order, each carrying the whole reading.
+    expect(readings.map((frame) => frame.context.projection.projectedTokens)).toEqual([10, 20, 30]);
+    expect(readings[0].context).toEqual({
+      estimatedMessageTokens: 10,
+      projection: { breakdown: { systemTokens: 1, toolsTokens: 2, messageTokens: 10 }, projectedTokens: 10, source: 'estimate' },
+    });
+    // Each reading follows the event whose step produced it. The turn's own
+    // response never echoes the user message back, so the stream opens at
+    // `turn.start`.
+    expect(frames.map((frame) => frame.type)).toEqual([
+      'turn.start', 'run.context',
+      'turn.start', 'run.context',
+      'turn.start',
+      'turn.end', 'run.context',
+    ]);
+  });
+
+  it('replays the readings it pushed to a follower that joins late', async () => {
+    const started = signal();
+    const finish = signal();
+    const { base, first, store } = await setup((id) => ({
+      id,
+      async *send() {
+        yield { type: 'turn.start', step: 0 };
+        started.resolve();
+        await finish.promise;
+        yield { type: 'turn.end', reason: 'end_turn' };
+      },
+      interrupt() { finish.resolve(); },
+      contextMessageEstimate() { return 55; },
+      contextProjection() {
+        return {
+          breakdown: { systemTokens: 1, toolsTokens: 2, messageTokens: 52 },
+          projectedTokens: 55, source: 'estimate' as const,
+        };
+      },
+      activeTurn: true,
+    }));
+    const handle = await store.create({ id: 'replayed-context', workspace: first.path, cwd: first.path });
+    await handle.append(createInitialDshPermissionEvent('workspace-write'));
+    const path = `${sessionsUrl(base, first.id)}/replayed-context`;
+    expect((await fetch(`${path}/messages`, asyncRequest({ text: 'hello' }))).status).toBe(202);
+    await started.promise;
+    const follow = await fetch(`${path}/follow`);
+    expect(follow.status).toBe(200);
+    const reader = follow.body!.getReader();
+    const snapshot = JSON.parse(new TextDecoder().decode((await reader.read()).value).slice(6)) as {
+      type: string; events: Array<{ type: string; context?: { estimatedMessageTokens?: number } }>;
+    };
+    expect(snapshot.type).toBe('run.snapshot');
+    // The reading a reconnecting tab missed is part of the replay, not a separate
+    // request it has to remember to make.
+    expect(snapshot.events.filter((event) => event.type === 'run.context')
+      .map((event) => event.context?.estimatedMessageTokens)).toEqual([55]);
+    finish.resolve();
+    await reader.cancel();
+  });
+
+  it('carries the context reading with the session detail', async () => {
+    const { base, first, store } = await setup();
+    const handle = await store.create({ id: 'detail-context', workspace: first.path, cwd: first.path });
+    await handle.append({ type: 'message/user', data: { text: 'hello' } });
+    const url = `${sessionsUrl(base, first.id)}/detail-context`;
+    const detail = await jsonResponse<{ context?: { estimatedMessageTokens?: number } }>(await fetch(url));
+    // Opening a conversation costs one request, and the reading is in it.
+    expect(detail.context?.estimatedMessageTokens).toBeGreaterThan(0);
+    // The detail and the pull route answer from one algorithm.
+    const pull = await jsonResponse<{ estimatedMessageTokens?: number }>(await fetch(`${url}/context`));
+    expect(detail.context).toEqual(pull);
   });
 
   it('initializes only newly created sessions and exposes their preset', async () => {

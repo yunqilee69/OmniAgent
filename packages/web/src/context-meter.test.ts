@@ -9,10 +9,7 @@ import {
 import { translate } from '../ui/src/lib/i18n.ts';
 import type { ContextEstimate } from '../ui/src/lib/wire.ts';
 
-const props = {
-  workspaceId: null, sessionId: null, draft: false, busy: false,
-  modelSaving: false, modelKey: '', locale: 'en' as const, turnTick: 0,
-};
+const props = { workspaceId: null, value: null, locale: 'en' as const };
 
 const settled: ContextEstimate = {
   modelWindow: 200_000,
@@ -23,22 +20,27 @@ const settled: ContextEstimate = {
 };
 
 describe('context meter', () => {
-  it('renders nothing at all without a workspace and sends no request', () => {
+  it('renders nothing at all without a workspace', () => {
     expect(renderToStaticMarkup(createElement(ContextMeter, props))).toBe('');
   });
 
-  it('shows a ring at zero for a live session that has not settled a turn yet', () => {
-    const markup = renderToStaticMarkup(createElement(ContextMeter, { ...props, workspaceId: 'w', sessionId: 's', busy: true }));
+  it('shows a ring at zero until the host publishes a reading', () => {
+    const markup = renderToStaticMarkup(createElement(ContextMeter, { ...props, workspaceId: 'w' }));
     expect(markup).toContain('0%');
     expect(markup).toContain('aria-haspopup="dialog"');
     // An unsettled ring names its own state instead of waiting silently.
     expect(markup).toContain('No reading yet.');
   });
 
-  it('shows the same zero ring for a new-session draft', () => {
-    const markup = renderToStaticMarkup(createElement(ContextMeter, { ...props, workspaceId: 'w', draft: true }));
-    expect(markup).toContain('0%');
-    expect(markup).toContain('No reading yet.');
+  it('renders the reading it is handed, without asking the host for one', () => {
+    // The props are the whole input: a session detail response or a `run.context`
+    // frame put the numbers here, so the ring is a pure function of them.
+    const markup = renderToStaticMarkup(createElement(ContextMeter, { ...props, workspaceId: 'w', value: settled }));
+    expect(markup).toContain('25%');
+    expect(markup).toContain('25% of context used');
+    expect(markup).not.toContain('No reading yet.');
+    expect(renderToStaticMarkup(createElement(ContextMeter, { ...props, workspaceId: 'w', value: { modelWindow: 200_000 } })))
+      .toContain('No reading yet.');
   });
 
   it('prompts for a first reading in the panel until a projection arrives', () => {

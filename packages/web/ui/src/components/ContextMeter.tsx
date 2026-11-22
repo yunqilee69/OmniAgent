@@ -1,9 +1,8 @@
-import { useEffect, useRef, useState, type CSSProperties, type MutableRefObject, type ReactNode } from 'react';
+import { type CSSProperties, type MutableRefObject, type ReactNode } from 'react';
 import { createPortal } from 'react-dom';
 import { Tooltip } from '../../vendor/primitives/index.ts';
-import { authFetch } from '../lib/auth.ts';
-import { sessionApiPath, validateContextEstimate, type ContextEstimate } from '../lib/wire.ts';
-import { carryProjection, contextOccupancy, READING_SLOT, splitReadingSentence } from '../lib/context-reading.ts';
+import type { ContextEstimate } from '../lib/wire.ts';
+import { contextOccupancy, READING_SLOT, splitReadingSentence } from '../lib/context-reading.ts';
 import { formatTokens } from '../lib/session-readings.ts';
 import { translator, type Locale } from '../lib/i18n.ts';
 import { MEASURE_STYLE, useStatDialog } from './stat-dialog.tsx';
@@ -11,32 +10,18 @@ import css from '../styles/dsh/context-meter.module.css';
 
 interface Props {
   workspaceId: string | null;
-  sessionId: string | null;
-  draft: boolean;
-  /** Turns and model edits only re-trigger the poll; they never unmount the ring. */
-  busy: boolean;
-  modelSaving: boolean;
-  modelKey: string;
-  locale: Locale;
   /**
-   * Bumped by the store on every step boundary (`turn.start`,
-   * `assistant.message`, `tool.result`, `turn.end`), which is exactly when the
-   * next request's layout changes — so the reading follows the turn instead of
-   * waiting for it to finish.
+   * The reading the host published for this session: carried by the session
+   * detail response and then by the turn stream (`run.context`). The meter never
+   * asks for it, so nothing here polls or races a turn.
    */
-  turnTick: number;
+  value: ContextEstimate | null;
+  locale: Locale;
 }
 
 /** Ring geometry: 14px viewBox, 2px stroke. */
 const RADIUS = 5.5;
 const CIRCUMFERENCE = 2 * Math.PI * RADIUS;
-
-/**
- * Recalibration cadence for an idle session. A running turn is driven by
- * `turnTick` instead: the occupancy cannot settle between steps, and
- * re-estimating a long history on a timer would cost more than it tells.
- */
-const IDLE_POLL_MS = 15_000;
 
 /**
  * The open panel: headline reading, the `~X / Y` figures, the breakdown, and the
@@ -120,76 +105,22 @@ export function ContextMeterPanel({ value, locale, panelRef, style }: {
  * click-open panel breaking the projection into system prompt, tools and
  * conversation.
  *
- * The reading is bound to one scope (workspace + session + model source) and is
- * only dropped when that scope changes. A step boundary, a recalibration, or a
- * failed request updates the numbers in place; blanking the meter on those
- * transients made the ring disappear and remount between turns. Every state has
- * a visible value: a draft or a session whose first answer has not arrived reads
- * 0% with a "no reading yet" note rather than disappearing, and an answer without
- * a projection (another host owns the turn) keeps the last settled breakdown.
+ * The reading is bound to one session and arrives from the host: the session
+ * detail response carries it on open, and a running turn pushes a `run.context`
+ * frame at every step boundary — the boundary at which the next request's layout
+ * changes. Nothing in this component requests, polls or retries; a turn owned by
+ * another host simply pushes nothing, and the last settled reading stays.
+ *
+ * Every state has a visible value: a draft or a session whose first answer has
+ * not arrived reads 0% with a "no reading yet" note rather than disappearing.
  *
  * The percentage is occupancy of **this session's model window**, not the
  * session's cumulative token spend; the panel says so, because the two numbers
  * sit next to each other in the composer and read alike.
  */
-export function ContextMeter(
-  { workspaceId, sessionId, draft, busy, modelSaving, modelKey, locale, turnTick }: Props,
-): ReactNode {
-  const [snapshot, setSnapshot] = useState<{ scope: string; value: ContextEstimate } | null>(null);
+export function ContextMeter({ workspaceId, value, locale }: Props): ReactNode {
   const seat = useStatDialog();
-  const scope = JSON.stringify([workspaceId, sessionId, modelKey]);
-  const previousScope = useRef(scope);
-
-  // A different session or model source invalidates the reading; everything
-  // else keeps the last numbers on screen until a fresher projection lands.
-  useEffect(() => {
-    if (previousScope.current === scope) return;
-    previousScope.current = scope;
-    setSnapshot(null);
-    seat.setOpen(false);
-  }, [scope, seat.setOpen]);
-
-  const pollable = workspaceId !== null && sessionId !== null && !draft && !modelSaving;
-  useEffect(() => {
-    if (!pollable || workspaceId === null || sessionId === null) return;
-    let current = true;
-    let controller: AbortController | null = null;
-    const load = (): void => {
-      // A superseded answer must never overwrite a newer one: abort it and let
-      // the `scope` + `current` checks reject anything that still lands.
-      controller?.abort();
-      controller = new AbortController();
-      const signal = controller.signal;
-      void authFetch(sessionApiPath(workspaceId, sessionId, 'context'), { signal })
-        .then(async (response) => {
-          if (!response.ok) throw new Error('Context request failed');
-          return validateContextEstimate(await response.json());
-        })
-        .then((value) => {
-          if (!current || signal.aborted) return;
-          // An answer without a projection (a turn owned by another host) says
-          // nothing about the last settled breakdown, so it is carried over; the
-          // window fields are still fresher than ours.
-          setSnapshot((previous) => ({
-            scope,
-            value: carryProjection(previous !== null && previous.scope === scope ? previous.value : undefined, value),
-          }));
-        })
-        // A failed or aborted request leaves the previous reading in place and
-        // is retried by the next step boundary or the idle recalibration.
-        .catch(() => {});
-    };
-    load();
-    const timer = busy ? null : window.setInterval(load, IDLE_POLL_MS);
-    return () => {
-      current = false;
-      controller?.abort();
-      if (timer !== null) window.clearInterval(timer);
-    };
-  }, [pollable, workspaceId, sessionId, scope, busy, modelSaving, turnTick]);
-
   const t = translator(locale);
-  const value = snapshot !== null && snapshot.scope === scope ? snapshot.value : null;
   // A workspace without a selected session (the new-session draft included)
   // still renders the ring at 0%, so nothing appears late and nothing jumps.
   if (workspaceId === null) return null;

@@ -2215,6 +2215,90 @@ describe('refresh strategy and stable rendering', () => {
     vi.useRealTimers();
   });
 
+  it('reads the context meter from the session detail, not from a request of its own', async () => {
+    const reading = {
+      modelWindow: 200_000,
+      projection: {
+        projectedTokens: 50_000, source: 'usage' as const, inputTokens: 42_000,
+        breakdown: { systemTokens: 4_000, toolsTokens: 6_000, messageTokens: 40_000 },
+      },
+    };
+    // Any request the workbench invents for its own reading would land in
+    // `baseFetcher`'s "unexpected request" branch and fail the boot.
+    const harness = await bootStatus({ detailBody: () => ({ ...detail(), context: reading }) });
+    try {
+      expect(harness.store.currentEntry()?.contextEstimate).toEqual(reading);
+    } finally {
+      harness.store.dispose();
+    }
+  });
+
+  it('folds the context readings a running turn pushes, keeping the breakdown', async () => {
+    let running = false;
+    const harness = await bootStatus({ detailBody: () => detail({ running }) });
+    vi.useFakeTimers();
+    try {
+      running = true;
+      harness.push({ type: 'session.status', sessionId: 'shared', running: true, pending: null });
+      await flush();
+      await vi.advanceTimersByTimeAsync(1_500);
+      await flush();
+      expect(harness.followCalls()).toBe(1);
+      const projection = {
+        projectedTokens: 12_000, source: 'estimate' as const,
+        breakdown: { systemTokens: 1_000, toolsTokens: 1_000, messageTokens: 10_000 },
+      };
+      harness.sendFollow([
+        { type: 'run.snapshot', events: [{ type: 'turn.start', step: 0 }, { type: 'run.context', context: { modelWindow: 100_000, projection } }] },
+        { type: 'run.context', context: { modelWindow: 100_000, estimatedMessageTokens: 12_000 } },
+      ]);
+      await flush();
+      // A frame without a projection (the runtime could not answer) updates the
+      // window and keeps the breakdown that is already on screen.
+      expect(harness.store.currentEntry()?.contextEstimate).toEqual({
+        modelWindow: 100_000, estimatedMessageTokens: 12_000, projection,
+      });
+    } finally {
+      harness.store.dispose();
+    }
+  });
+
+  it('adopts the window a model switch answers with', async () => {
+    const store = await boot(sessionFetcher(async (url, init) => {
+      if (url === '/api/workspaces/a/sessions/shared/model' && init?.method === 'POST') {
+        return json({
+          model: JSON.parse(String(init.body)),
+          resolvedModel: { provider: 'provider-a', model: 'model-2', name: 'Model Two', capabilities: { imageInput: false } },
+          context: { modelWindow: 32_000, window: { tokens: 32_000, source: 'config' } },
+        });
+      }
+      if (url === '/api/workspaces/a/sessions/shared') {
+        return json({
+          ...detail(),
+          context: {
+            modelWindow: 200_000,
+            projection: {
+              projectedTokens: 1_000, source: 'usage' as const,
+              breakdown: { systemTokens: 200, toolsTokens: 300, messageTokens: 500 },
+            },
+          },
+        });
+      }
+      return undefined;
+    }));
+    await store.saveSessionModel({ version: 2, kind: 'model', provider: 'provider-a', model: 'model-2' });
+    // The denominator follows the model immediately; the breakdown still
+    // describes the same history until the next turn re-estimates it.
+    expect(store.currentEntry()?.contextEstimate).toEqual({
+      modelWindow: 32_000,
+      window: { tokens: 32_000, source: 'config' },
+      projection: {
+        projectedTokens: 1_000, source: 'usage',
+        breakdown: { systemTokens: 200, toolsTokens: 300, messageTokens: 500 },
+      },
+    });
+  });
+
   it('never re-reads a session on its own while it stays idle', async () => {
     const harness = await bootStatus();
     const before = harness.detailCalls();

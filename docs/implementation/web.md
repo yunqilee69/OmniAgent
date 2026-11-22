@@ -132,7 +132,7 @@ Web 由一个本地 Node HTTP Host（`packages/web/src`）和一个 React 工作
 | `POST` | `.../approvals` | 审批工具调用 |
 | `POST` | `.../compact` | 安排手动压缩 |
 | `POST` | `.../interrupt` | 中断当前回合 |
-| `GET` | `.../context` | Context Meter 估算 |
+| `GET` | `.../context` | Context Meter 估算（push 通道的 pull 对照；工作台不调用） |
 | `GET` | `.../follow` | 以 `run.snapshot` 加入正在运行的回合 |
 | `GET` | `.../events` | trace 投影（会话级；易与工作区状态流混淆） |
 | `GET` | `.../audit` | 审计投影 |
@@ -370,7 +370,11 @@ tool.result
 
 `LiveSessionRegistry` 默认上限 128，用于让计划任务和 Web 标签页共享同一个 Session，避免两个实例写同一日志。运行中的 `RunningTurn` 独立于 Session 缓存：它保存 baseline、事件 replay buffer 和 follower 集合，在 POST 连接断开后仍继续执行，直到回合结束或显式 interrupt。
 
-### 6.1 `/context` 与上下文预算
+### 6.1 上下文读数：`/context`、详情字段与 `run.context` 帧
+
+同一份读数有三个出口，**工作台只用后两个**：`GET .../context`（pull，脚本与测试使用）、会话详情响应里的 `context` 字段（打开会话时一次拿到）、回合流里的 `run.context` 帧（回合中随事件推送）。三者共用 `contextReading()` / `liveContextReading()`，不存在第二套算法。
+
+回合中的推送规则：`RunningTurn` 在准入时把 runtime 固定的窗口字段（`modelWindow` / `window`）捕获到 `contextScope`；`publishAgentEvent()` 在 `turn.start`、`assistant.message`、`tool.result`、`turn.end`、`context.compacted` 各事件发布之后调用 `publishTurnContext()`，把 live Session 当前的 `contextProjection()` + `contextMessageEstimate()` 组成与 `/context` 同构的载荷；序列化结果与上次相同就不发（一个 step 边界最多一帧，值没变则零帧）。这些帧进入 `turn.events` replay buffer，因此断线重连的 `run.snapshot` 会补齐，但它们不写会话日志——它们是宿主帧，不是 core 事件。宿主没有 live Session（回合由别的 host 持有，或运行时不可用）时不推帧，前端沿用上次读数。
 
 `GET .../context` 的**路由与字段集合没变**，变化的是回合中的语义：
 
@@ -513,7 +517,7 @@ AuthGate
    │   │   └─ Composer → PlanReviewComposer（等待计划审阅时替换输入区）
    │   │       └─ composerReadings（输入卡片下的读数行）
    │   │           ├─ SessionStats → ActivityPill / UsagePill（点开统计弹窗）
-   │   │           └─ ContextMeter（环形占比 + 上下文构成弹窗，按 step 边界刷新，空闲 15 秒校准 .../context）
+   │   │           └─ ContextMeter（环形占比 + 上下文构成弹窗，读数由宿主推送，自身不发请求）
    │   └─ TrajectoryView
    ├─ RightPanel（多标签：guide / files / terminal / observe / plan / preview:<ws>:<path>）
    └─ NewSessionDialog
@@ -526,9 +530,10 @@ AuthGate
 - `SessionStats` 渲染两枚药丸：`ActivityPill`（`N 轮 M 步 · X tok/s`）和 `UsagePill`（`整会话累计 N tok · 缓存命中 X%`）。读数先取 `entry.run.metrics`、再取 `entry.metrics`，两者都没有就用 `emptyMetrics()` 兜底，因此新会话、无 metrics、`steps.started === 0`、无 usage 时同样渲染 `0 轮 0 步`、`整会话累计 0 tok`、`缓存命中 —`——零值本身是读数而不是「没有」，输入区下方的高度在会话首次报数前后保持一致。缓存命中率未知时显示 `—`（`'Cache hit —'`），不会把未知命中率显示成 0% 或 100%。药丸默认是静态读数，只有存在可解释的明细时才变成按钮，点开锚定在药丸上方的弹窗；弹窗标题带精确总量，明细按「模型用时 / 工具调用用时 / 首 token 平均（TTFT）/ 输出速度（TPS）」和「缓存命中 / 未缓存输入 / 缓存读取 / 输出」分两栏列出。同一时刻只开一个弹窗，Escape 或外部点击关闭。
 - **两种口径不能混读**：`UsagePill` 的主读数是**整会话累计**（`lib/session-metrics.ts` 对每个 assistant 请求累加 `inputTokens + outputTokens`），文案固定带「整会话累计」，累加算法与 `SessionMetrics` 类型不变；`ContextMeter` 的百分比是**当前上下文占用**（下一次请求的 `projectedTokens` 除以模型窗口）。两者相邻显示、单位都是 tok，长会话里「累计 500k + 占用 40%」是正常组合，不能用累计值判断自动压缩是否失效。
 - `ContextMeter` 渲染环形占比和百分比，点开是「上下文已用 X%」加三色构成条与「系统提示词 / 工具定义 / 对话消息」明细。读数按「工作区 + 会话 + 模型来源」定域：只有换会话或换模型才丢弃旧值，更新数字时环形不卸载。
-- 刷新由**事件**驱动，不由固定轮询驱动：`store` 为每个会话维护 `contextTick`，在 `turn.start`、`assistant.message`、`tool.result`、`turn.end` 上各加一（follow 快照重放同样累加），`Composer` 把它作为 `turnTick` 传给 `ContextMeter`，后者在 effect 依赖里带上它。于是在每个 step 边界（包括工具结果落盘后）都会立刻重取一次 `.../context`，不必等回合结束；回合进行中不设定时器（占用在中途不会稳定，反复估算长历史比它给出的信息更贵），空闲时每 15 秒校准一次（`IDLE_POLL_MS`）。
-- 陈旧响应与失败：每次请求先 abort 上一次（`AbortController`），落地前再校验 `current` 与 `scope` 两重身份，晚到的旧回答不会覆盖新读数；请求失败或中断时保留上次读数，等下一个 step 边界或空闲校准重试，既不弹错也不清空。
-- 空状态共 7 种，每种都有可观察的数值或文案，不留空白：无工作区时不渲染；草稿态（有工作区、还没有会话）渲染 0% 且不发请求；会话已选、首个响应未到渲染 0% 且弹窗写「还没有读数。」；响应没有 `projection`（回合由别的 host 持有）时用 `carryProjection` 保留上次已结算的投影，从未有过则 0%；有投影但没有 `capacity` 时环形 0%、明细照列，弹窗写「This model has no known context window.」；请求失败保留上次；`scope`（会话或模型来源）变化时先清空再按上述各条处理。
+- 读数由**宿主推送**，组件不发请求：`store` 把会话详情响应里的 `context`（`loadDetail()`）与回合流里的 `run.context` 帧（`consumeStream()`，快照重放同上）折进 `SessionEntry.contextEstimate`，`Composer` 原样传给 `ContextMeter`；`ContextMeter` 是纯展示组件，没有 effect、没有定时器、没有 `AbortController`。于是每个 step 边界（含工具结果落盘后）的读数与产生它的事件同一批到达，空闲时没有任何请求。
+- 合并规则：`carryProjection()` 保证「载荷没有 `projection`」（回合由别的 host 持有）时沿用上次投影，窗口字段照常采纳新的；数值与上次完全相同时保持对象身份不变，环形与弹窗不因空转的 step 重渲染。
+- 换模型：`POST .../model` 的响应带着新模型的 `modelWindow` / `window`，`saveSessionModel()` 立刻并进去，分母跟着新模型走；`projection` 留到下一回合的 `run.context` 重新估算（历史没变，明细在没有新投影前仍是上次的）。
+- 空状态共 6 种，每种都有可观察的数值或文案，不留空白：无工作区时不渲染；草稿态（有工作区、还没有会话）渲染 0% 且没有任何请求；会话已选、首个读数未到渲染 0% 且弹窗写「还没有读数。」；载荷没有 `projection` 时保留上次已结算的投影，从未有过则 0%；有投影但没有 `capacity` 时环形 0%、明细照列，弹窗写「This model has no known context window.」；换会话或换模型时条目本身换掉，读数随之重新来过。
 - 分母是**本会话模型窗口**：占比取 `window.tokens`（配置覆盖优先，其次模型窗口，也就是自动压缩真正使用的预算），缺失时回退到 `modelWindow`（`contextCapacity`），避免模型描述符没写窗口时环形整个不渲染。弹窗里的 `~X / Y` 带 `title` 与 `aria-label`，并在「有投影且有窗口」时于底部追加一行可见说明「分母为本会话模型窗口。」（`role="note"`），避免 `Y` 被读成整会话累计。
 - 读数全部来自服务端 `metrics` 和 `.../context` 投影，不做前端二次猜测；数字格式（K/M、分组、时长、缓存命中率）集中在 `lib/session-readings.ts`，缓存命中不会把部分命中四舍五入成 100%。
 - 样式在 `styles/dsh/stats-pills.module.css`、`stat-dialog.module.css`、`context-meter.module.css`；弹窗定位复用 `useAnchoredPosition`（视口夹取、`--dsh-anchored-max-width/height`）。
@@ -590,7 +595,7 @@ AuthGate
 - `reconcileOnce()` / `turnEndStamp()`：回合结束**只对账一次**的共用守卫。stamp 取该会话 `events` 里从后往前第一条 `trace/turn.end` 的持久 `seq`（找不到就跳过对账，不做时间或长度猜测）；`reconciledTurns`（`Map<key, { stamp, status: 'pending' | 'done' }>`）同时拦 `pending` 与 `done`，stamp 在检测到回合结束时取一次，请求本身不再改身份。`observeSessionStatus()` 与 `finishObservedRun()` 共用它，所以「状态帧先到、follow 后结束」和「follow 先结束、状态帧后到」两种顺序都只产生一次详情 GET；请求失败时清掉该条记录，让下一次状态变化重试（不自造定时器）。follow 结束的那条路径会先用重载后的事件重算一次 stamp 再记为 `done`，这样随后到达的状态帧认得同一个回合；本 tab 仍有 follow 观察者时，状态路径不额外对账；`running` 假→真仍走 `scheduleRunningPoll()` → `loadDetail()` → `followRun()`（一次性）。
 - `reconcileSessionStatuses()`：用列表基线补齐每个会话的现状（含 `lastTurn` 失败标记），与推送走同一套迁移规则；
 - `observeSessionStatus()`：处理单条推送；`running` 真→假时若该会话不是当前会话，置 `completionUnread`，并在 400 毫秒后调用 `refreshSessions()` 一次性刷新排序与结果；同一帧里若该会话就是当前会话，且 `run === undefined`、本 tab 没有 follow 观察者，则用 `reconcileFinishedTurn()` 走一次受 `reconcileOnce()` 保护的对账（详情因此只由真实状态变化驱动）；
-- `contextTick`：`SessionEntry` 的新字段，初值 0，在 `turn.start` / `assistant.message` / `tool.result` / `turn.end` 事件落入 `consumeStream()` 时递增（`contextTickFor()`），follow 快照重放时按快照里的事件数累加；`Composer` 把它作为 `turnTick` 传给 `ContextMeter`（见 9.1）；
+- `contextEstimate`：`SessionEntry` 的字段，来源只有两处——`loadDetail()` 的 `context` 与 `consumeStream()` 的 `run.context` 帧（`runContextFrame()`，follow 快照重放同样折入），一律经 `carryProjection()` 合并；没有「取一次」的请求，也没有 `contextTick` 这类触发器（见 9.1）；
 - `refreshSessions()`：静默重读列表（不改 `loading`），后台完成不会让侧栏闪空；
 - `clearCompletionReminder()`：用户打开会话时清掉完成提醒。
 

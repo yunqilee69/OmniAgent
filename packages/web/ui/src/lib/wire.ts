@@ -724,6 +724,21 @@ export function validateContextEstimate(value: unknown): ContextEstimate {
   };
 }
 
+/**
+ * Validate a reading that arrived over a channel the page does not control —
+ * the session detail response, or a `run.context` frame inside a live turn.
+ * A malformed reading is dropped instead of thrown: one bad payload must not
+ * tear down the stream it arrived on, and the last good reading still stands.
+ */
+export function parseContextEstimate(value: unknown): ContextEstimate | undefined {
+  if (typeof value !== 'object' || value === null || Array.isArray(value)) return undefined;
+  try {
+    return validateContextEstimate(value);
+  } catch {
+    return undefined;
+  }
+}
+
 export interface SessionDetail {
   header?: Record<string, unknown>;
   title?: string | null;
@@ -742,6 +757,8 @@ export interface SessionDetail {
   events?: unknown[];
   trajectory?: unknown;
   audit?: unknown[];
+  /** Context reading captured with the rest of the session state. */
+  context?: ContextEstimate;
 }
 
 export interface TraceEvent {

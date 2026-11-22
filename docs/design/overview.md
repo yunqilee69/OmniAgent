@@ -133,7 +133,7 @@ OmniAgent 是一个本机运行的个人智能体。它不是为了再做一个�
 9. **结果回灌**：本 step 的所有工具结果合并成一条 `role: 'tool'` 消息，进入下一个 step。
 10. **回合结束**：`turn.end` 携带 `end_turn` / `max_tokens` / `max_steps` / `interrupted` / `error`。
 11. **续轮**：如果存在 active + armed 的 goal，Session 自动追加一轮 goal 消息，继续循环；否则等待下一条用户消息或后台通知。
-12. **对账**：Web UI 用服务端返回的 `messages`（含 messageId / timestamp）、`events`、`trajectory`、`metrics`、`audit` 重新投影，把流式视图收敛到持久化日志；Context Meter 通过 `.../context` 单独刷新。
+12. **对账**：Web UI 用服务端返回的 `messages`（含 messageId / timestamp）、`events`、`trajectory`、`metrics`、`audit` 重新投影，把流式视图收敛到持久化日志；Context Meter 的读数随会话详情与回合流里的 `run.context` 帧到达，不单独发请求。
 
 ## 7. 配置分层
 
