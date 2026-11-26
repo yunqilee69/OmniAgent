@@ -26,13 +26,23 @@ export function renderTeamGuidance(
     `At most ${maxActive} member(s) may run at once. Start independent members together in one message; `
       + 'the platform returns every result before your next step. Verify each reported result before relying on it. '
       + 'Do not start agents that are not in this list.',
+    'A shared task board records delivery slices. Confirm a development plan before creating tasks. '
+      + 'Each task cites one plan section. Members claim ready work and submit it; a different member accepts or returns it. '
+      + 'You cannot mark a task completed yourself. While the board has unfinished tasks, keep going: read the board, '
+      + 'delegate ready work, and steer a running member with send_message when a plan change affects it. '
+      + 'Pass cwd only for a worktree of this repository.',
   ].join('\n');
 }
 
 const Params = z.object({
   member: z.string().trim().min(1).max(128).describe('Configured team member id.'),
   description: z.string().trim().min(1).max(200),
-  task: z.string().trim().min(1).max(100_000).describe('Complete task for that member.'),
+  task: z.string().trim().min(1).max(100_000).describe(
+    'Task contract: the task id, the plan version, the cited section, acceptance, and allowed paths.',
+  ),
+  cwd: z.string().trim().min(1).max(1_024).optional().describe(
+    'Working directory for this member. Omit to use yours. A path outside this directory is allowed only when it is a worktree of the same repository.',
+  ),
 }).strict();
 
 export function createTeamDelegationTool(
@@ -75,7 +85,7 @@ export function createTeamDelegationTool(
           prompt,
           agent: member.agent,
           binding: member.model,
-
+          ...(parsed.cwd === undefined ? {} : { cwd: parsed.cwd }),
           ...(maxSteps === undefined ? {} : { maxSteps }),
         });
         session.trackStartedChild?.(started.id);

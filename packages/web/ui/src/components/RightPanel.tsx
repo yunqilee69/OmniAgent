@@ -3,6 +3,7 @@ import clsx from 'clsx';
 import {
   GuideArtworkFiles,
   IconChevronLeftOutlineRegular,
+  IconChecklistOutlineRegular,
   IconClockOutlineRegular,
   IconCloseOutlineRegular,
   IconCompareSplitOutlineRegular,
@@ -37,6 +38,7 @@ import { WorkspaceFilePreview } from './WorkspaceFilePreview.tsx';
 import { filenameOf } from './preview/path.ts';
 import { FileTreeMenu, type FileMenuChange, type FileMenuTarget } from './FileTreeMenu.tsx';
 import { PlanPreview } from './PlanReview.tsx';
+import { TeamBoardPanel } from './TeamBoardPanel.tsx';
 import css from '../styles/dsh/right-panel.module.css';
 
 function CompassGlyph({ size = 16, className }: { size?: number; className?: string }): ReactNode {
@@ -66,6 +68,7 @@ function tabTitle(tab: RightTab, t: Translate): string {
   // bare "File preview" would say nothing the user did not click.
   if (tab.kind === 'preview') return `${t('File preview')}｜${filenameOf(tab.resource.path)}`;
   if (tab.kind === 'plan') return t('Plan preview');
+  if (tab.kind === 'board') return t('Team board');
   if (tab.kind === 'files') return t('Workspace files');
   if (tab.kind === 'terminal') return t('Terminal');
   if (tab.kind === 'observe') return t('Observe');
@@ -75,6 +78,7 @@ function tabTitle(tab: RightTab, t: Translate): string {
 function tabIcon(tab: RightTab): ReactNode {
   if (tab.kind === 'guide') return <CompassGlyph size={14} className={css.tabIcon} />;
   if (tab.kind === 'plan') return <IconPlanOutlineRegular size={14} className={css.tabIcon} />;
+  if (tab.kind === 'board') return <IconChecklistOutlineRegular size={14} className={css.tabIcon} />;
   if (tab.kind === 'preview') return <IconPaperclipOutlineRegular size={14} className={css.tabIcon} />;
   return null;
 }
@@ -262,6 +266,7 @@ export function RightPanel({ layout, onAction, hasPlan = false, fullscreen, onCl
     }
     if (tab.kind === 'preview') return <WorkspaceFilePreview file={tab.resource} />;
     if (tab.kind === 'plan') return <PlanPreview plan={tab.plan} />;
+    if (tab.kind === 'board') return <TeamBoardPanel plans={tab.plans} board={tab.board} locale={app.locale} />;
     if (tab.kind === 'observe') return <TrajectoryView />;
     if (tab.kind === 'terminal') {
       return (

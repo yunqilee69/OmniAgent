@@ -4,8 +4,9 @@
  * whatever this reducer produces, so the tab rules stay unit-testable.
  */
 import type { PlanDocument } from '../components/PlanReview.tsx';
+import type { DevelopmentPlan, TeamBoard } from './wire.ts';
 
-export type TabKind = 'guide' | 'files' | 'terminal' | 'observe' | 'plan' | 'preview';
+export type TabKind = 'guide' | 'files' | 'terminal' | 'observe' | 'plan' | 'preview' | 'board';
 
 export interface PreviewResource {
   workspaceId: string;
@@ -20,6 +21,7 @@ export type RightTab =
   | { id: 'terminal'; kind: 'terminal' }
   | { id: 'observe'; kind: 'observe' }
   | { id: 'plan'; kind: 'plan'; plan: PlanDocument }
+  | { id: 'board'; kind: 'board'; plans: DevelopmentPlan[]; board: TeamBoard }
   | { id: `preview:${string}`; kind: 'preview'; resource: PreviewResource };
 
 export interface RightPanelLayout {
@@ -35,6 +37,7 @@ export type RightPanelAction =
   | { type: 'rename-preview'; workspaceId: string; from: string; to: string }
   | { type: 'remove-preview'; workspaceId: string; path: string }
   | { type: 'set-plan'; plan: PlanDocument }
+  | { type: 'set-board'; plans: DevelopmentPlan[]; board: TeamBoard }
   | { type: 'set-workspace-name'; workspaceId: string; workspaceName: string };
 
 /**
@@ -70,6 +73,12 @@ export function seedLayout(): RightPanelLayout {
  */
 export function planPreviewAction(plan: PlanDocument | null): RightPanelAction | null {
   return plan === null ? null : { type: 'open', tab: { id: 'plan', kind: 'plan', plan } };
+}
+
+/** Open the shared team board, or null when this session has neither tasks nor a plan. */
+export function teamBoardAction(plans: readonly DevelopmentPlan[], board: TeamBoard): RightPanelAction | null {
+  if (plans.length === 0 && board.tasks.length === 0) return null;
+  return { type: 'open', tab: { id: 'board', kind: 'board', plans: [...plans], board } };
 }
 
 type PreviewTab = Extract<RightTab, { kind: 'preview' }>;
@@ -197,6 +206,15 @@ export function rightPanelReducer(layout: RightPanelLayout, action: RightPanelAc
       if (current?.kind !== 'plan' || current.plan === action.plan) return layout;
       const tabs = [...layout.tabs];
       tabs[index] = { id: 'plan', kind: 'plan', plan: action.plan };
+      return { tabs, activeId: layout.activeId };
+    }
+    case 'set-board': {
+      const index = layout.tabs.findIndex((tab) => tab.kind === 'board');
+      const current = index === -1 ? undefined : layout.tabs[index];
+      if (current?.kind !== 'board') return layout;
+      if (current.plans === action.plans && current.board === action.board) return layout;
+      const tabs = [...layout.tabs];
+      tabs[index] = { id: 'board', kind: 'board', plans: action.plans, board: action.board };
       return { tabs, activeId: layout.activeId };
     }
     case 'set-workspace-name': {

@@ -739,6 +739,35 @@ export function parseContextEstimate(value: unknown): ContextEstimate | undefine
   }
 }
 
+export interface DevelopmentPlan {
+  id: string;
+  version: number;
+  title: string;
+  body: string;
+  confirmedAt: number;
+}
+
+export interface TeamBoardTask {
+  id: string;
+  revision: number;
+  subject: string;
+  description: string;
+  status: 'pending' | 'in_progress' | 'review' | 'completed' | 'deleted';
+  ready: boolean;
+  ownerSessionId?: string;
+  blockedBy: string[];
+  planId?: string;
+  planVersion?: number;
+  planHeading?: string;
+  acceptance?: string;
+  note?: string;
+}
+
+export interface TeamBoard {
+  tasks: TeamBoardTask[];
+  failure?: string;
+}
+
 export interface SessionDetail {
   header?: Record<string, unknown>;
   title?: string | null;
@@ -754,6 +783,8 @@ export interface SessionDetail {
   resolvedModel?: ResolvedModel | null;
   plan?: { active?: boolean } | null;
   todos?: TodoItem[] | null;
+  plans?: DevelopmentPlan[];
+  teamBoard?: TeamBoard;
   events?: unknown[];
   trajectory?: unknown;
   audit?: unknown[];

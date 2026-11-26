@@ -2,6 +2,7 @@ import { Fragment, useState, useSyncExternalStore, type ReactNode } from 'react'
 import clsx from 'clsx';
 import {
   IconAgentPresetOutlineRegular,
+  IconChecklistOutlineRegular,
   IconCopyOutlineRegular,
   IconDownloadOutlineRegular,
   IconEllipsisOutlineRegular,
@@ -17,11 +18,13 @@ import { sessionLabel, sessionTrail, subagentRows } from '../lib/subagents.ts';
 import { SubagentTeam } from './SubagentTeam.tsx';
 import css from '../styles/app.module.css';
 
-export function Header({ sidebarOpen, onToggleSidebar, rightOpen, onToggleRight }: {
+export function Header({ sidebarOpen, onToggleSidebar, rightOpen, onToggleRight, onOpenBoard }: {
   sidebarOpen: boolean;
   onToggleSidebar: () => void;
   rightOpen: boolean;
   onToggleRight: () => void;
+  /** Open the shared team board in the side panel. Absent when this session has none. */
+  onOpenBoard?: (() => void) | undefined;
 }): ReactNode {
   const app = useApp();
   const authState = useSyncExternalStore(auth.subscribe, auth.getSnapshot);
@@ -131,6 +134,20 @@ export function Header({ sidebarOpen, onToggleSidebar, rightOpen, onToggleRight 
               <IconAgentPresetOutlineRegular size={14} />
               <span>{modeLabel}</span>
             </span>
+          )}
+          {hasSession && onOpenBoard !== undefined && (
+            <>
+              <span className={css.crumbSep} aria-hidden="true">/</span>
+              <button
+                type="button"
+                className={clsx(css.crumb, css.crumbLink, css.crumbCurrent)}
+                title={t('Team board')}
+                onClick={onOpenBoard}
+              >
+                <IconChecklistOutlineRegular size={14} />
+                <span>{t('Team board')}</span>
+              </button>
+            </>
           )}
         </div>
         <div className={css.headerUtilities}>

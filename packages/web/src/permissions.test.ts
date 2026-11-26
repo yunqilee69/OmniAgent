@@ -6,7 +6,8 @@ import { join } from 'node:path';
 import { request as httpRequest } from 'node:http';
 import { promisify } from 'node:util';
 import { afterEach, describe, expect, it } from 'vitest';
-import { SessionStore } from '@omniagent/core';
+import { homedir } from 'node:os';
+import { SessionStore, defaultConfigDir } from '@omniagent/core';
 import type { DshPermissionSnapshot } from '@omniagent/core';
 import { startWebHost } from './server';
 import type { WebHost, WebHostOptions } from './server';
@@ -320,6 +321,27 @@ describe('permission settings API', () => {
     });
     expect(result.stdout).toContain('FIFO_READY');
   }, 10_000);
+
+  it('accepts the app config directory when that directory itself is a symlink', async () => {
+    const root = await mkdtemp(join(tmpdir(), 'omniagent-permissions-app-config-link-'));
+    const realConfig = join(root, 'real-config');
+    const configDir = defaultConfigDir();
+    const configPath = join(configDir, 'config.json');
+    const backup = await readFile(configPath, 'utf8');
+    const marker = join(configDir, `.gui-test-${process.pid}`);
+    await mkdir(realConfig);
+    await writeFile(join(realConfig, 'config.json'), JSON.stringify({ dsh: { permission: { defaultPreset: 'workspace-write' } } }));
+    await symlink(realConfig, marker);
+    try {
+      expect(configDir).toBe(join(homedir(), '.omniagent'));
+      const settings = await PermissionSettings.open(configPath);
+      await expect(settings.read()).resolves.toMatchObject({ requiresSelection: false });
+    } finally {
+      await rename(marker, join(root, 'discarded-link')).catch(() => undefined);
+      const current = await readFile(configPath, 'utf8');
+      if (current !== backup) await writeFile(configPath, backup);
+    }
+  });
 
   it('rejects symlinked config parent directories and does not touch the target', async () => {
     const root = await mkdtemp(join(tmpdir(), 'omniagent-permissions-parent-link-'));

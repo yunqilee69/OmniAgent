@@ -261,6 +261,9 @@
 
 /* Ancestors in a subagent trail: the crumb geometry, but it navigates. */
 .crumbLink {
+  display: inline-flex;
+  align-items: center;
+  gap: 4px;
   flex: 0 1 auto;
   cursor: pointer;
 }

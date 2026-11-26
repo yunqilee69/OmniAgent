@@ -9,11 +9,15 @@ import type { ModelClient } from '../providers/types';
 import type { SessionOptions } from '../session';
 import { Session } from '../session';
 import { createAgentSelectionEvent, projectAgentSelection } from '../session/agent-selection';
+import { projectPlanDocument } from '../session/development-plan';
+import { TEAM_TASK_EVENT } from '../session/team-board';
+import type { TeamTaskSnapshot } from '../session/team-board';
 import { createModelSelectionEvent as createBindingEvent, defaultModelBinding, ModelBindingSchema, projectModelSelection as projectBinding } from '../session/model-binding';
 import type { ModelBinding } from '../session/model-binding';
 
 import type { ResolvedSessionRuntime, RuntimeResolver } from '../session/runtime';
 import { resolveInsidePhysical } from '../tools/paths';
+import { resolveTeamWorktree } from '../tools/worktree';
 import type { SessionHandle, SessionStore } from '../session/store';
 import {
   SUBAGENT_END_EVENT,
@@ -69,6 +73,54 @@ interface ManagedChild {
   resolveStarted?: () => void;
   settled?: Promise<void>;
   resolveSettled?: () => void;
+}
+
+/**
+ * A path inside the parent directory stays on the existing containment check.
+ * Anything else must be a worktree of the same repository; arbitrary paths
+ * are still refused.
+ */
+async function resolveDelegatedCwd(parentCwd: string, requested: string): Promise<string> {
+  try {
+    return await resolveInsidePhysical(parentCwd, requested);
+  } catch (error) {
+    const message = error instanceof Error ? error.message : '';
+    if (!message.startsWith('路径越出工作区')) throw error;
+  }
+  return resolveTeamWorktree(parentCwd, requested);
+}
+
+/**
+ * A member reads and updates the root board. It is not the lead, so it cannot
+ * create tasks or revise the plan. The root handle is the one already held for
+ * settlement; opening it again would race the root's own writer.
+ */
+function childBoardOption(
+  parent: Session | undefined,
+  parentHandle: SessionHandle | undefined,
+  childId: string,
+): { teamBoard: import('../tools/builtin/team-board').TeamBoardToolHost } | Record<string, never> {
+  const handle = parent?.sessionHandle ?? parentHandle;
+  if (handle === undefined) return {};
+  const lead = parent?.teamMemberIds !== undefined || parentHandleHasTeam(handle);
+  if (!lead) return {};
+  return {
+    teamBoard: {
+      sessionId: childId,
+      lead: false,
+      events: () => handle.events,
+      appendTask: async (task: TeamTaskSnapshot) => {
+        await handle.append({ type: TEAM_TASK_EVENT, data: { version: 1, task } });
+      },
+      planDocument: (id, version) => projectPlanDocument(handle.events, id, version),
+    },
+  };
+}
+
+function parentHandleHasTeam(handle: SessionHandle): boolean {
+  return handle.events.some((event) => event.type === 'mode/selected'
+    && typeof event.data === 'object' && event.data !== null
+    && (event.data as { version?: unknown }).version === 2);
 }
 
 function nonEmpty(value: unknown, name: string, max = 2_000): string {
@@ -150,7 +202,7 @@ export class SubagentManager implements SubagentService {
       const description = nonEmpty(request.description, 'description', 200);
       const prompt = nonEmpty(request.prompt, 'prompt', 100_000);
       const cwd = request.cwd
-        ? await resolveInsidePhysical(parent.cwd, request.cwd)
+        ? await resolveDelegatedCwd(parent.cwd, request.cwd)
         : parent.cwd;
       const agentId = request.agent ?? parent.agent?.id ?? 'default';
       const binding = this.selectBinding(request);
@@ -174,7 +226,7 @@ export class SubagentManager implements SubagentService {
       await handle.append(createAgentSelectionEvent(agentId));
       await handle.append(createBindingEvent(binding));
 
-      const child = await this.createSession(handle, permissions, depth, parent, runtime, request.maxSteps);
+      const child = await this.createSession(handle, permissions, depth, parent, runtime, request.maxSteps, parent.sessionHandle);
       const info: SubagentInfo = {
         id: handle.id,
         parentId: parent.id,
@@ -400,6 +452,7 @@ export class SubagentManager implements SubagentService {
     parent: Session | undefined,
     runtime: ResolvedSessionRuntime,
     maxSteps?: number,
+    parentHandle?: SessionHandle,
   ): Promise<Session> {
     const model = runtime.model ?? this.options.createModel();
     let session!: Session;
@@ -427,6 +480,7 @@ export class SubagentManager implements SubagentService {
         : { audit: (entry: AuditEntry) => this.options.audit!(entry, handle.header.workspace) }),
       session: handle,
       depth,
+      ...childBoardOption(parent, parentHandle, handle.id),
       subagents: this,
       ...(this.options.mcpTools === undefined ? {} : { mcpTools: this.options.mcpTools() }),
       ...(this.options.webSearch === undefined ? {} : { webSearch: this.options.webSearch }),
@@ -572,6 +626,8 @@ export class SubagentManager implements SubagentService {
       handle.header.depth ?? summary.depth ?? 1,
       parent,
       runtime,
+      undefined,
+      parentHandle,
     );
     const status = lastTurnState(handle.events);
     const result = clipResult(lastAssistant(handle.events));

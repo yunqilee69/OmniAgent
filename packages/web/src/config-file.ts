@@ -11,8 +11,9 @@
 import { randomUUID } from 'node:crypto';
 import { constants } from 'node:fs';
 import { lstat, mkdir, open, realpath, rename, unlink } from 'node:fs/promises';
+import { homedir } from 'node:os';
 import { dirname, isAbsolute, join, relative, resolve, sep } from 'node:path';
-import { ConfigSchema } from '@omniagent/core';
+import { ConfigSchema, defaultConfigDir } from '@omniagent/core';
 import type { Config } from '@omniagent/core';
 
 export interface TrustedHome {
@@ -30,6 +31,13 @@ export interface ConfigFileSnapshot {
 export class ConfigFileError extends Error {}
 
 const trustedDarwinAliases = new Set(['/tmp', '/var']);
+/**
+ * `~/.omniagent` is the app's own config directory and may be a symlink to
+ * another volume. A link anywhere else in the parent chain is still refused.
+ */
+function isAppConfigDirLink(path: string): boolean {
+  return path === defaultConfigDir() || path === join(homedir(), '.omniagent');
+}
 const locks = new Map<string, Promise<void>>();
 /**
  * Last text this process wrote or observed at open. Every settings service
@@ -61,7 +69,9 @@ async function assertNoSymlinkParents(path: string, allowMissingFinal = false): 
       throw error;
     }
     if (info.isSymbolicLink()) {
-      if (!trustedDarwinAliases.has(current)) throw new ConfigFileError('Configuration parent must be a real directory');
+      if (!trustedDarwinAliases.has(current) && !isAppConfigDirLink(current)) {
+        throw new ConfigFileError('Configuration parent must be a real directory');
+      }
       continue;
     }
     if (!info.isDirectory()) throw new ConfigFileError('Configuration parent must be a real directory');

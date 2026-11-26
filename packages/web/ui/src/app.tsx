@@ -16,6 +16,7 @@ import { RightPanel } from './components/RightPanel.tsx';
 import {
   activeTab,
   planPreviewAction,
+  teamBoardAction,
   previewTabId,
   rightPanelReducer,
   seedLayout,
@@ -227,6 +228,17 @@ export function App(): ReactNode {
     // A refreshed plan flows into an open plan tab; it never opens one by itself.
     if (planDocument !== null) dispatchLayout({ type: 'set-plan', plan: planDocument });
   }, [planDocument, dispatchLayout]);
+  const boardPlans = entry?.plans ?? [];
+  const board = entry?.teamBoard ?? { tasks: [] };
+  useEffect(() => {
+    dispatchLayout({ type: 'set-board', plans: boardPlans, board });
+  }, [board, boardPlans, dispatchLayout]);
+  const openTeamBoard = useCallback((): void => {
+    const action = teamBoardAction(boardPlans, board);
+    if (action === null) return;
+    dispatchLayout(action);
+    setRightOpen(true);
+  }, [board, boardPlans, dispatchLayout]);
   const openPlanPreview = useCallback((): void => {
     // No plan in this session means nothing to preview; opening an empty tab would lie.
     const action = planPreviewAction(planDocument);
@@ -321,6 +333,7 @@ export function App(): ReactNode {
           onToggleSidebar={() => { setSidebarOpen((value) => !value); }}
           rightOpen={rightActive}
           onToggleRight={() => { setRightOpen(true); }}
+          onOpenBoard={boardPlans.length > 0 || board.tasks.length > 0 ? openTeamBoard : undefined}
         />
 
         {app.alert !== '' && (

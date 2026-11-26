@@ -52,6 +52,8 @@ import {
 import type { AskUserAnswerItem, AskUserQuestion, AskUserToolResult } from './tools/builtin/ask-user';
 import { createSubagentTools, SUBAGENT_TOOL_NAME } from './tools/builtin/subagent';
 import { createTeamDelegationTool, renderTeamGuidance } from './tools/builtin/team';
+import { createTeamBoardTools, rootBoardHost } from './tools/builtin/team-board';
+import type { TeamBoardToolHost } from './tools/builtin/team-board';
 import type { TeamMemberSnapshot } from './session/mode-selection';
 import { createGoalTools, CREATE_GOAL_TOOL_NAME, GET_GOAL_TOOL_NAME, UPDATE_GOAL_TOOL_NAME } from './tools/builtin/goal';
 import { createScheduleTools, renderScheduleToolGuidance, SCHEDULE_TOOL_GROUP } from './schedule/tools';
@@ -61,6 +63,15 @@ import type { AgentAuthoringService } from './agents/authoring';
 import { createCreatorTools, CREATOR_TOOL_GROUP, renderCreatorToolGuidance } from './creator/tools';
 import type { CreatorServices } from './creator/types';
 import { TODO_WRITE_EVENT } from './session/todo';
+import {
+  PLAN_DOCUMENT_EVENT,
+  PlanDocumentSchema,
+  assertNextPlanVersion,
+  nextPlanDocumentId,
+  projectPlanDocuments,
+} from './session/development-plan';
+import { TEAM_TASK_EVENT, boardHasOpenWork } from './session/team-board';
+import type { TeamTaskSnapshot } from './session/team-board';
 import {
   createPermissionPendingEvent,
   createPlanReviewDecisionEvent,
@@ -108,6 +119,25 @@ import type { ModelCapabilities } from './config/models';
 import { DEFAULT_SYSTEM_PROMPT } from './prompts';
 import { expandInitCommand } from './session/init-command';
 import { readWorkspaceInstructions } from './session/workspace-instructions';
+
+const TEAM_BOARD_ROUND_LIMIT = 32;
+
+const TEAM_PLAN_GUIDANCE = [
+  'Development plan: while the user is still deciding what to build, ask and restate. Do not create tasks yet.',
+  'When the requirements are settled, write one plan and present it with exit_plan_mode. The plan states the goal,',
+  'what is out of scope, acceptance, the design (modules, types, interfaces, invariants), and delivery slices.',
+  'A slice names its plan heading, acceptance, paths, and which other slices it depends on. It does not name a status.',
+  'After the user confirms the plan, create one board task per slice with team_task_create, citing that plan version.',
+  'A later user correction is itself the confirmation: append the next plan version with team_plan_revise, then',
+  'update tasks that have not started. Do not ask for another plan review.',
+].join(' ');
+
+const TEAM_MEMBER_GUIDANCE = [
+  'You are a team member with a shared task board. Before working, team_task_get the task you were given and',
+  'team_plan_section the cited heading at that plan version. Do only that slice. When it meets the acceptance,',
+  'team_task_update action submit. You cannot accept your own task. If you are reviewing, accept only when the',
+  'acceptance is met; otherwise return with a note that says what is missing. Do not edit the plan.',
+].join(' ');
 
 /**
  * 组合根（composition root）。
@@ -181,6 +211,12 @@ export interface SessionOptions {
   teamMaxSteps?: number;
   /** Maximum members of this team that may work at the same time. */
   teamMaxActive?: number;
+  /**
+   * Shared board on another session's log. Set for a team member so its tools
+   * read and update the root board. The root session leaves this unset and uses
+   * its own log.
+   */
+  teamBoard?: TeamBoardToolHost;
   /** Host-wide scheduled tasks; enables the schedule tools. */
   schedule?: ScheduleService;
   /** Optional persisted title plus background model title generation. */
@@ -255,6 +291,7 @@ export class Session {
   private readonly creatorServices?: CreatorServices;
   private readonly teamMembers?: readonly TeamMemberSnapshot[];
   private readonly teamMaxActive?: number;
+  private readonly teamBoard?: TeamBoardToolHost;
   private readonly reviewPlanHandler?: SessionOptions['reviewPlan'];
   private readonly askUserHandler?: SessionOptions['askUser'];
   private readonly askUserTimeoutSec: number;
@@ -281,6 +318,8 @@ export class Session {
   /** Request id reserved for the question the current turn is asking. */
   private pendingAskUser?: { requestId: string; callId: string };
   private turnSource: 'human' | 'goal' | 'external' | 'notice' | 'system' = 'system';
+  /** Last event seq when the current turn started. Board continuation compares against it. */
+  private boardFloorSeq = -1;
   private currentGoalRound?: GoalRoundContext;
   private goalCreateGrant = false;
 
@@ -298,6 +337,7 @@ export class Session {
     this.creatorServices = options.creator;
     this.teamMembers = options.teamMembers;
     this.teamMaxActive = options.teamMaxActive;
+    this.teamBoard = options.teamBoard;
     this.reviewPlanHandler = options.reviewPlan;
     this.askUserHandler = options.askUser;
     this.askUserTimeoutSec = options.askUserTimeoutSec ?? ASK_USER_DEFAULT_TIMEOUT_SEC;
@@ -403,6 +443,8 @@ export class Session {
         review: (plan, signal) => this.reviewPlanHandler!(plan, signal, this.pendingPlanReview?.requestId),
         onApproved: async () => {
           await this.applyPlanMode(false);
+          const plan = this.latestPlanBody();
+          if (plan !== undefined) await this.confirmDevelopmentPlan(plan);
         },
       });
       this.tools.register(exitPlanTool);
@@ -451,6 +493,15 @@ export class Session {
       );
       this.tools.register(teamTool);
       this.trusted.add(teamTool);
+    }
+
+    const boardHost = this.teamBoardHost();
+    if (boardHost !== undefined) {
+      for (const tool of createTeamBoardTools(boardHost)) {
+        if (!allows(tool.name)) continue;
+        this.tools.register(tool);
+        this.trusted.add(tool);
+      }
     }
 
     if (this.subagents) {
@@ -562,13 +613,23 @@ export class Session {
     return this.session?.header.parentSessionId;
   }
 
+  /** Configured team member ids, present only on a team root. Children use this to join the board. */
+  get teamMemberIds(): readonly string[] | undefined {
+    return this.teamMembers?.map((member) => member.id);
+  }
+
   get agent(): SessionAgent | undefined {
     return this.agentValue;
   }
 
   private allowsTool(name: string): boolean {
     const tools = this.agentValue?.tools;
-    return tools === undefined || tools === '*' || tools.has(name);
+    if (tools === undefined || tools === '*') return true;
+    // The shared board is a session capability, like delegation. A member agent
+    // allowlist must not strip it, or the member cannot claim or submit work.
+    if (this.teamBoard !== undefined && name.startsWith('team_')) return true;
+    if (this.teamMembers !== undefined && (name.startsWith('team_') || name === SUBAGENT_TOOL_NAME)) return true;
+    return tools.has(name);
   }
 
   get planMode(): boolean {
@@ -590,7 +651,9 @@ export class Session {
     if (this.goalCreateGrant && this.allowsTool(CREATE_GOAL_TOOL_NAME)) parts.push(renderGoalGrantGuidance());
     if (this.teamMembers !== undefined && this.teamMembers.length > 0) {
       parts.push(renderTeamGuidance(this.teamMembers, this.teamMaxActive ?? this.teamMembers.length));
+      parts.push(TEAM_PLAN_GUIDANCE);
     }
+    if (this.teamBoard !== undefined) parts.push(TEAM_MEMBER_GUIDANCE);
     if (this.hasScheduleTools()) parts.push(renderScheduleToolGuidance());
     if (this.hasCreatorTools()) parts.push(renderCreatorToolGuidance());
     if (this.depth === 0 && this.subagents !== undefined) {
@@ -832,7 +895,10 @@ export class Session {
       approved: decision.approved,
       ...(feedback === '' ? {} : { feedback }),
     }));
-    if (decision.approved) await this.applyPlanMode(false);
+    if (decision.approved) {
+      await this.applyPlanMode(false);
+      await this.confirmDevelopmentPlan(pending.plan);
+    }
     const content = decision.approved
       ? 'Plan approved — plan mode exited; carry out the plan starting with your next step.'
       : feedback === ''
@@ -1001,6 +1067,7 @@ export class Session {
       while (true) {
         this.turnSource = source;
         this.currentGoalRound = goalRound;
+        this.boardFloorSeq = this.session?.events.at(-1)?.seq ?? -1;
         const reason = yield* this.runTurn(background);
         if (reason === 'error' || reason === 'max_tokens' || reason === 'max_steps') {
           this.goalController.disarm();
@@ -1009,20 +1076,32 @@ export class Session {
         }
         if (reason !== 'end_turn' && reason !== 'tool_use') return;
         const next = await this.nextGoalRound();
-        if (next === undefined) return;
+        if (next !== undefined) {
+          await this.appendMessage('message/user', {
+            text: next.prompt,
+            source: {
+              kind: 'goal',
+              goalId: next.goalId,
+              revision: next.revision,
+              round: next.round,
+            },
+          });
+          this.history.push(userMessage(next.prompt));
+          this.goalController.recordRound(next.round);
+          source = 'goal';
+          goalRound = next;
+          continue;
+        }
+        const board = this.nextBoardRound();
+        if (board === undefined) return;
         await this.appendMessage('message/user', {
-          text: next.prompt,
-          source: {
-            kind: 'goal',
-            goalId: next.goalId,
-            revision: next.revision,
-            round: next.round,
-          },
+          text: board,
+          source: { kind: 'team-board' },
         });
-        this.history.push(userMessage(next.prompt));
-        this.goalController.recordRound(next.round);
-        source = 'goal';
-        goalRound = next;
+        this.history.push(userMessage(board));
+        source = 'external';
+        goalRound = undefined;
+        continue;
       }
     } catch (error) {
       this.goalController.disarm();
@@ -1041,6 +1120,97 @@ export class Session {
     } catch {
       this.goalController.disarm();
     }
+  }
+
+  /**
+   * One more coordinator turn while the shared board still has work.
+   * Only the root of a team, and only when no armed goal already claimed the
+   * next round. The prompt tells the model to read the board; it does not copy it.
+   */
+  private nextBoardRound(): string | undefined {
+    if (this.depth !== 0 || this.teamMembers === undefined || this.session === undefined) return undefined;
+    if (!boardHasOpenWork(this.session.events)) return undefined;
+    const rounds = this.session.events.filter((event) => event.type === 'message/user'
+      && typeof event.data === 'object' && event.data !== null
+      && (event.data as { source?: { kind?: string } }).source?.kind === 'team-board').length;
+    if (rounds >= TEAM_BOARD_ROUND_LIMIT) return undefined;
+    // Continue only when the turn that just finished appended a task. The floor
+    // is the last event before that turn, so approving the plan and creating
+    // the tasks schedules one read, and the read itself does not schedule another.
+    if (!this.boardChangedSince({ seq: this.boardFloorSeq })) return undefined;
+    return '<team_board>\n'
+      + 'The shared task board still has unfinished work. Read it with team_task_list before acting. '
+      + 'Delegate ready pending tasks, submit nothing yourself, and have a different member accept reviews. '
+      + 'If the user changed the plan, update the plan document and the tasks that have not started, then '
+      + 'send_message the members already working. Leave finished tasks as they are.\n'
+      + '</team_board>';
+  }
+
+  private boardChangedSince(since: { seq: number }): boolean {
+    if (this.session === undefined) return false;
+    const floor = since?.seq ?? -1;
+    return this.session.events.some((event) => event.seq > floor && event.type === TEAM_TASK_EVENT);
+  }
+
+  private teamBoardHost(): TeamBoardToolHost | undefined {
+    if (this.teamBoard !== undefined) return this.teamBoard;
+    if (this.depth !== 0 || this.teamMembers === undefined || this.session === undefined) return undefined;
+    const handle = this.session;
+    return rootBoardHost({
+      sessionId: this.id,
+      events: () => handle.events,
+      appendTask: async (task: TeamTaskSnapshot) => {
+        await handle.append({ type: TEAM_TASK_EVENT, data: { version: 1, task } });
+      },
+      revisePlan: (id, body) => this.reviseDevelopmentPlan(id, body),
+    });
+  }
+
+  /**
+   * Record a confirmed development plan on this session.
+   * Called when the user approves a plan review in a team session. Later edits
+   * go through the model, which appends the next version of the same id.
+   */
+  async confirmDevelopmentPlan(body: string): Promise<void> {
+    if (this.depth !== 0 || this.teamMembers === undefined || this.session === undefined) return;
+    const title = planTitle(body);
+    if (title === undefined) return;
+    const events = this.session.events;
+    const existing = projectPlanDocuments(events);
+    const id = existing.length === 1 ? existing[0]!.id : nextPlanDocumentId(events);
+    const version = existing.find((document) => document.id === id)?.version;
+    const next = (version ?? 0) + 1;
+    assertNextPlanVersion(events, id, next);
+    const document = PlanDocumentSchema.parse({
+      id,
+      version: next,
+      title,
+      body: body.trim(),
+      confirmedAt: Date.now(),
+    });
+    await this.session.append({ type: PLAN_DOCUMENT_EVENT, data: document });
+  }
+
+  /** Append the next version of one confirmed plan. The coordinator calls this after the user corrects the plan. */
+  async reviseDevelopmentPlan(id: string, body: string): Promise<void> {
+    if (this.depth !== 0 || this.teamMembers === undefined || this.session === undefined) {
+      throw new Error('only the team coordinator can revise a development plan');
+    }
+    const title = planTitle(body);
+    if (title === undefined) throw new Error('a development plan needs a level-one heading');
+    const events = this.session.events;
+    const current = projectPlanDocuments(events).find((document) => document.id === id);
+    if (current === undefined) throw new Error(`unknown plan ${id}`);
+    const version = current.version + 1;
+    assertNextPlanVersion(events, id, version);
+    const document = PlanDocumentSchema.parse({
+      id,
+      version,
+      title,
+      body: body.trim(),
+      confirmedAt: Date.now(),
+    });
+    await this.session.append({ type: PLAN_DOCUMENT_EVENT, data: document });
   }
 
   private async nextGoalRound(): Promise<GoalRoundContext | undefined> {
@@ -1277,6 +1447,13 @@ export class Session {
   }
 
   /** The call the model just submitted, which the review record has to point at. */
+  private latestPlanBody(): string | undefined {
+    const args = this.latestToolArguments(EXIT_PLAN_MODE_TOOL_NAME);
+    if (typeof args !== 'object' || args === null || !('plan' in args)) return undefined;
+    const plan = (args as { plan?: unknown }).plan;
+    return typeof plan === 'string' ? plan : undefined;
+  }
+
   private latestPlanCallId(): string | undefined {
     return this.latestToolCallId(EXIT_PLAN_MODE_TOOL_NAME);
   }
@@ -1610,6 +1787,15 @@ export class Session {
 }
 
 /** Auxiliary title instruction. It must never look like a tool-using turn. */
+/** First level-one heading, or undefined when the plan has none. */
+function planTitle(body: string): string | undefined {
+  for (const line of body.split(/\r?\n/u)) {
+    const match = /^#\s+(.+?)\s*$/u.exec(line);
+    if (match?.[1] !== undefined && match[1].trim() !== '') return match[1].trim().slice(0, 200);
+  }
+  return undefined;
+}
+
 function renderTitleSystemPrompt(options: Required<SessionTitleLlmOptions>): string {
   return [
     'Create a concise title for an AI coding-assistant session from the supplied human messages.',
