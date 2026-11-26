@@ -24,6 +24,23 @@ function json(body: unknown, status = 200): Response {
   return new Response(JSON.stringify(body), { status, headers: { 'content-type': 'application/json' } });
 }
 
+/** One settings payload, matching the single bootstrap request the page now makes. */
+function bootstrapBody(): Record<string, unknown> {
+  return {
+    permissions: { defaultPreset: 'workspace-write', requiresSelection: false },
+    askUser: { timeoutSec: 300, requiresSelection: false },
+    webSearch: { apiKeyConfigured: false, maxResults: 5, requiresRepair: false },
+    archive: { enabled: false, retentionMs: 7 * 24 * 60 * 60 * 1000, requiresSelection: false },
+    models: [],
+    agents: [],
+    roles: [],
+    roleEntries: { roles: [] },
+    modelSources: { sources: [], providers: [], protocols: [] },
+    mcpServers: { servers: [], transports: [] },
+    modes: { modes: [], defaultMode: 'standard' },
+  };
+}
+
 function encode(frame: SessionStatusEvent): Uint8Array {
   return new TextEncoder().encode(`data: ${JSON.stringify(frame)}\n\n`);
 }
@@ -40,6 +57,8 @@ interface Harness {
   store: AppStore;
   push: (frame: SessionStatusEvent) => void;
   setSessions: (sessions: unknown[]) => void;
+  /** Body returned for one session's detail request. */
+  setDetail: (sessionId: string, body: unknown) => void;
 }
 
 /**
@@ -50,18 +69,15 @@ async function boot(options: { sessions?: unknown[] } = {}): Promise<Harness> {
   let controller!: ReadableStreamDefaultController<Uint8Array>;
   const disconnected = vi.fn();
   let sessions = options.sessions ?? [{ id: 'open', updatedAt: 5 }, { id: 'background', updatedAt: 4 }];
+  const details = new Map<string, unknown>();
   vi.stubGlobal('fetch', async (input: RequestInfo | URL, init?: RequestInit) => {
-    const url = String(input);
+    const raw = String(input);
+    const url = raw.split('?')[0] ?? raw;
     const method = init?.method ?? 'GET';
     if (url === '/api/workspaces' && method === 'GET') {
       return json({ workspaces: [{ id: 'a', name: 'Alpha', path: '/a' }] });
     }
-    if (url === '/api/settings/permissions' && method === 'GET') {
-      return json({ settings: { defaultPreset: 'workspace-write', requiresSelection: false } });
-    }
-    if (url === '/api/models' && method === 'GET') return json({ models: [] });
-    if (url === '/api/agents' && method === 'GET') return json({ agents: [] });
-    if (url === '/api/roles' && method === 'GET') return json({ roles: [] });
+    if (url === '/api/bootstrap' && method === 'GET') return json(bootstrapBody());
     if (url === '/api/workspaces/a/events' && method === 'GET') {
       return new Response(new ReadableStream<Uint8Array>({
         start(stream) { controller = stream; },
@@ -69,7 +85,9 @@ async function boot(options: { sessions?: unknown[] } = {}): Promise<Harness> {
       }), { headers: { 'content-type': 'text/event-stream' } });
     }
     if (url === '/api/workspaces/a/sessions' && method === 'GET') return json({ sessions });
-    if (url.startsWith('/api/workspaces/a/sessions/') && method === 'GET') return json(detail);
+    if (url.startsWith('/api/workspaces/a/sessions/') && method === 'GET') {
+      return json(details.get(url.slice(url.lastIndexOf('/') + 1)) ?? detail);
+    }
     throw new Error(`Unexpected request: ${method} ${url}`);
   });
   const store = new AppStore();
@@ -79,6 +97,7 @@ async function boot(options: { sessions?: unknown[] } = {}): Promise<Harness> {
     store,
     push: (frame) => controller.enqueue(encode(frame)),
     setSessions: (next) => { sessions = next; },
+    setDetail: (sessionId, body) => { details.set(sessionId, body); },
   };
 }
 
@@ -106,12 +125,14 @@ describe('workspace session status in the store', () => {
       sessions: [
         { id: 'open', updatedAt: 5 },
         { id: 'background', updatedAt: 4, running: true, pending: 'plan-review' },
-        { id: 'failed', updatedAt: 3, running: false, lastTurn: { endedAt: 2, reason: 'error' } },
+        { id: 'failed', updatedAt: 3, running: false },
       ],
     });
     expect(live(store, 'open')).toEqual(IDLE_SESSION_STATE);
     expect(live(store, 'background')).toMatchObject({ running: true, pending: 'plan-review' });
-    expect(live(store, 'failed')).toMatchObject({ running: false, lastTurnFailed: true, completionUnread: false });
+    // The list no longer carries the transcript, so a session that was never
+    // opened does not arrive already marked failed.
+    expect(live(store, 'failed')).toMatchObject({ running: false, lastTurnFailed: false, completionUnread: false });
     store.dispose();
   });
 
@@ -144,10 +165,16 @@ describe('workspace session status in the store', () => {
   });
 
   it('drops a stale reminder and the failure mark when the session runs again', async () => {
-    const { store, push } = await boot({
-      sessions: [{ id: 'open', updatedAt: 5 }, { id: 'background', updatedAt: 4, running: false, lastTurn: { endedAt: 2, reason: 'error' } }],
+    const { store, push, setDetail } = await boot({
+      sessions: [{ id: 'open', updatedAt: 5 }, { id: 'background', updatedAt: 4, running: false }],
     });
-    expect(live(store, 'background').lastTurnFailed).toBe(true);
+    // The failure is learned by opening the session, not from the list.
+    setDetail('background', {
+      ...detail,
+      events: [{ type: 'trace/turn.end', seq: 1, ts: 2, data: { reason: 'error' } }],
+    });
+    store.selectSession('background');
+    await waitFor(() => live(store, 'background').lastTurnFailed);
     push({ type: 'session.status', sessionId: 'background', running: true, pending: null });
     await waitFor(() => live(store, 'background').running);
     expect(live(store, 'background')).toMatchObject({ lastTurnFailed: false, completionUnread: false });
@@ -162,11 +189,13 @@ describe('workspace session status in the store', () => {
     // The host settles the row's outcome and ordering only after the run ends.
     harness.setSessions([
       { id: 'open', updatedAt: 5 },
-      { id: 'background', updatedAt: 9, running: false, lastTurn: { endedAt: 8, reason: 'error' } },
+      { id: 'background', updatedAt: 9, running: false },
     ]);
     push({ type: 'session.status', sessionId: 'background', running: false, pending: null });
-    await waitFor(() => live(store, 'background').lastTurnFailed);
-    expect(live(store, 'background').completionUnread).toBe(true);
+    await waitFor(() => live(store, 'background').completionUnread);
+    // The reload is deferred so a burst of endings becomes one list request.
+    await new Promise((resolve) => setTimeout(resolve, 450));
+    expect(live(store, 'background').lastTurnFailed).toBe(false);
     const list = store.getSnapshot().sessionsByWorkspace.a!;
     expect(list.loading).toBe(false);
     expect(list.sessions.find((session) => session.id === 'background')?.updatedAt).toBe(9);
@@ -206,17 +235,13 @@ async function bootStream(serve: (attempt: number) => Response): Promise<Backoff
     return realSetTimeout(handler as () => void, 0, ...args);
   }) as typeof setTimeout);
   vi.stubGlobal('fetch', async (input: RequestInfo | URL, init?: RequestInit) => {
-    const url = String(input);
+    const raw = String(input);
+    const url = raw.split('?')[0] ?? raw;
     const method = init?.method ?? 'GET';
     if (url === '/api/workspaces' && method === 'GET') {
       return json({ workspaces: [{ id: 'a', name: 'Alpha', path: '/a' }] });
     }
-    if (url === '/api/settings/permissions' && method === 'GET') {
-      return json({ settings: { defaultPreset: 'workspace-write', requiresSelection: false } });
-    }
-    if (url === '/api/models' && method === 'GET') return json({ models: [] });
-    if (url === '/api/agents' && method === 'GET') return json({ agents: [] });
-    if (url === '/api/roles' && method === 'GET') return json({ roles: [] });
+    if (url === '/api/bootstrap' && method === 'GET') return json(bootstrapBody());
     if (url === '/api/workspaces/a/events' && method === 'GET') {
       attempts += 1;
       return serve(attempts);

@@ -8,7 +8,7 @@ import type { ArchiveCandidate } from './archive';
 
 const DAY = 24 * 60 * 60 * 1000;
 
-function session(patch: Partial<ArchiveCandidate> & Pick<ArchiveCandidate, 'id' | 'updatedAt'>): ArchiveCandidate {
+function session(patch: Partial<ArchiveCandidate> & Pick<ArchiveCandidate, 'id'> & { updatedAt?: number }): ArchiveCandidate {
   return { workspace: '/workspace', ...patch };
 }
 
@@ -58,6 +58,11 @@ describe('archive candidate selection', () => {
       session({ id: 'child', updatedAt: now - 9 * DAY, parentSessionId: 'stale', depth: 1 }),
     ];
     expect(selectArchiveCandidates(sessions, settings, now).map((item) => item.id)).toEqual(['stale', 'exact']);
+  });
+
+  it('leaves a session alone when its activity time was not read', () => {
+    const sessions = [session({ id: 'unreadable' })];
+    expect(selectArchiveCandidates(sessions, settings, now)).toEqual([]);
   });
 
   it('leaves a session alone while its turn is open', () => {

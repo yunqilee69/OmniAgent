@@ -31,7 +31,8 @@ export interface ArchiveSettings {
 export interface ArchiveCandidate {
   readonly workspace: string;
   readonly id: string;
-  readonly updatedAt: number;
+  /** Absent when the listing could not see the whole log, which is not idle. */
+  readonly updatedAt?: number;
   readonly pinned?: boolean;
   readonly archived?: boolean;
   readonly parentSessionId?: string;
@@ -96,6 +97,7 @@ export function selectArchiveCandidates(
     && session.pinned !== true
     && session.parentSessionId === undefined
     && session.depth === undefined
+    && session.updatedAt !== undefined
     && session.updatedAt <= cutoff
     && !active(session));
 }

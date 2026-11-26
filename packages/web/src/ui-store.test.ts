@@ -67,11 +67,55 @@ function json(body: unknown, status = 200): Response {
   return new Response(JSON.stringify(body), { status, headers: { 'content-type': 'application/json' } });
 }
 
+/**
+ * The page reads its settings from one `/api/bootstrap` response. A stub that
+ * still answers an individual settings route contributes that slice instead.
+ */
+async function bootstrapFrom(overrides: (url: string, init?: RequestInit) => Promise<Response | undefined> | Response | undefined): Promise<Response> {
+  const direct = await overrides('/api/bootstrap');
+  if (direct !== undefined) return direct;
+  const base = await baseFetcher('/api/bootstrap');
+  const body = await base.json() as Record<string, unknown>;
+  const modes = await overrides('/api/modes');
+  if (modes !== undefined) body.modes = await modes.clone().json();
+  const permissions = await overrides('/api/settings/permissions');
+  if (permissions !== undefined) {
+    if (!permissions.ok) return permissions;
+    const payload = await permissions.clone().json() as { settings?: unknown };
+    body.permissions = payload.settings ?? payload;
+  }
+  const models = await overrides('/api/models');
+  if (models !== undefined) body.models = ((await models.clone().json()) as { models?: unknown }).models ?? [];
+  const roles = await overrides('/api/roles');
+  if (roles !== undefined) body.roles = ((await roles.clone().json()) as { roles?: unknown }).roles ?? [];
+  const agents = await overrides('/api/agents');
+  if (agents !== undefined) body.agents = ((await agents.clone().json()) as { agents?: unknown }).agents ?? [];
+  return json(body);
+}
+
 function baseFetcher(input: RequestInfo | URL, init?: RequestInit): Promise<Response> {
   const url = String(input);
   const method = init?.method ?? 'GET';
   if (url === '/api/workspaces' && method === 'GET') {
     return Promise.resolve(json({ workspaces: [{ id: 'a', name: 'Alpha', path: '/a' }] }));
+  }
+  if (url === '/api/bootstrap' && method === 'GET') {
+    return Promise.resolve(json({
+      permissions: { defaultPreset: 'workspace-write', requiresSelection: false },
+      askUser: { timeoutSec: 300, requiresSelection: false },
+      webSearch: { apiKeyConfigured: false, maxResults: 5, requiresRepair: false },
+      archive: { enabled: false, retentionMs: 7 * 24 * 60 * 60 * 1000, requiresSelection: false },
+      models: [
+        { provider: 'provider-a', model: 'model-1', name: 'Model One', capabilities: { imageInput: false }, reasoningEfforts: [] },
+        { provider: 'provider-a', model: 'model-2', name: 'Model Two', capabilities: { imageInput: false }, reasoningEfforts: ['low', 'high'] },
+      ],
+      agents: [defaultAgent, writerAgent, explorerAgent],
+      roles: [{ id: 'default', name: 'Default', provider: 'provider-a', model: 'model-1' }],
+      roleEntries: { roles: [] },
+      modelSources: { sources: [], providers: [], protocols: [] },
+      mcpServers: { servers: [], transports: [] },
+      modes: { modes: [], defaultMode: 'standard' },
+    }));
   }
   if (url === '/api/settings/permissions' && method === 'GET') {
     return Promise.resolve(json({ settings: { defaultPreset: 'workspace-write', requiresSelection: false } }));
@@ -115,8 +159,13 @@ function sessionFetcher(
   overrides: (url: string, init?: RequestInit) => Promise<Response | undefined> | Response | undefined,
 ): typeof fetch {
   return async (input, init) => {
-    const handled = await overrides(String(input), init);
-    return handled ?? baseFetcher(input, init);
+    const raw = String(input);
+    // List reads now carry ?limit=&offset=. Stubs still match the path, except a
+    // stub that itself looks at the query string.
+    const url = raw.split('?')[0] ?? raw;
+    if (url === '/api/bootstrap' && (init?.method ?? 'GET') === 'GET') return bootstrapFrom(overrides);
+    const handled = await overrides(raw, init) ?? await overrides(url, init);
+    return handled ?? baseFetcher(url, init);
   };
 }
 
@@ -148,7 +197,8 @@ async function bootStatus(options: {
   const follows: ReadableStreamDefaultController<Uint8Array>[] = [];
   const detailUrls: string[] = [];
   const fetcher: typeof fetch = async (input, init) => {
-    const url = String(input);
+    const raw = String(input);
+    const url = raw.split('?')[0] ?? raw;
     const method = init?.method ?? 'GET';
     if (url === '/api/workspaces/a/events' && method === 'GET') {
       return new Response(new ReadableStream<Uint8Array>({
@@ -158,6 +208,7 @@ async function bootStatus(options: {
     if (url === '/api/workspaces/a/sessions/shared/messages' && method === 'POST') {
       return json({ accepted: true }, 202);
     }
+    if (url === '/api/bootstrap' && method === 'GET') return bootstrapFrom(async () => undefined);
     if (url === '/api/workspaces/a/sessions/shared/follow' && method === 'GET') {
       if (options.followBody !== undefined) return options.followBody();
       return new Response(new ReadableStream<Uint8Array>({
@@ -168,7 +219,7 @@ async function bootStatus(options: {
       detailUrls.push(url);
       return json(options.detailBody?.() ?? detail());
     }
-    return baseFetcher(input, init);
+    return baseFetcher(url, init);
   };
   const store = await boot(fetcher);
   const newestFollow = (): ReadableStreamDefaultController<Uint8Array> => {
@@ -888,6 +939,7 @@ describe('workbench store', () => {
   it('reports mode failure without creating a session and retries on a later list load', async () => {
     let fail = true;
     vi.stubGlobal('fetch', sessionFetcher((url) => {
+      if (url === '/api/bootstrap' && fail) return json({ error: 'modes unavailable' }, 500);
       if (url === '/api/modes') return fail ? json({ error: 'modes unavailable' }, 500) : json({ modes: [standardMode], defaultMode: 'standard' });
       if (url === '/api/workspaces/a/sessions') return json({ sessions: [] });
       return undefined;
@@ -898,6 +950,7 @@ describe('workbench store', () => {
     expect(store.getSnapshot().modesError).not.toBe('');
     expect(store.getSnapshot().alert).not.toBe('');
     fail = false;
+    await store.loadModes();
     await store.loadSessions('a', true);
     expect(store.currentEntry()?.draft).toBe(true);
   });
@@ -908,6 +961,9 @@ describe('workbench store', () => {
     vi.stubGlobal('fetch', sessionFetcher((url, init) => {
       if (init?.method === 'POST') posts.push(url);
       if (url === '/api/modes') return json({ modes: [standardMode], defaultMode: 'standard' });
+      // The first read arrives inside the page bootstrap; a retry reads the
+      // permissions route on its own.
+      if (url === '/api/bootstrap' && fail) return json({ error: 'permissions unavailable' }, 500);
       if (url === '/api/settings/permissions') return fail
         ? json({ error: 'permissions unavailable' }, 500)
         : json({ settings: { defaultPreset: 'workspace-write', requiresSelection: false } });
@@ -921,6 +977,7 @@ describe('workbench store', () => {
     expect(store.getSnapshot().alert).not.toBe('');
     expect(posts).toEqual([]);
     fail = false;
+    await store.loadPermissions();
     await store.loadSessions('a', true);
     expect(store.currentEntry()).toMatchObject({ draft: true, permission: 'workspace-write' });
     expect(posts).toEqual([]);

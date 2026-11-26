@@ -2559,7 +2559,7 @@ describe('workspace web host', () => {
     expect((await fetch(`${url}/missing/compact`, jsonRequest({}))).status).toBe(404);
   });
 
-  it('reports subagent status and token totals on child session summaries only', async () => {
+  it('lists a workspace from summaries and leaves transcripts to the session detail', async () => {
     const { base, first, store } = await setup();
     const parent = await store.create({ id: 'parent-session', workspace: first.path, cwd: first.path });
     await parent.append({ type: 'message/user', data: { text: 'split the work' } });
@@ -2586,19 +2586,27 @@ describe('workspace web host', () => {
       id: string;
       description?: string;
       parentSessionId?: string;
+      blank?: boolean;
       subagentStatus?: string;
-      usage?: { inputTokens: number | null; outputTokens: number | null; totalTokens: number | null } | null;
+      usage?: unknown;
     };
     const body = await jsonResponse<{ sessions: Summary[] }>(await fetch(sessionsUrl(base, first.id)));
     const byId = (id: string) => body.sessions.find((session) => session.id === id)!;
+    // The list carries who belongs to whom, not the child's transcript. Status
+    // and token totals are read when that session is opened.
     expect(byId('child-finished')).toMatchObject({
       parentSessionId: 'parent-session',
       description: 'Parse the payload',
-      subagentStatus: 'completed',
-      usage: { inputTokens: 1_200, outputTokens: 300, totalTokens: 1_500 },
     });
-    expect(byId('child-working')).toMatchObject({ subagentStatus: 'running', usage: null });
+    expect(byId('child-finished').subagentStatus).toBeUndefined();
+    expect(byId('child-finished').usage).toBeUndefined();
+    expect(byId('parent-session')).toMatchObject({ blank: false });
     expect(byId('parent-session').subagentStatus).toBeUndefined();
-    expect(byId('parent-session').usage).toBeUndefined();
+
+    const detail = await jsonResponse<{ messages: unknown[]; events: unknown[]; metrics: { usage?: { inputTokens?: number | null } } }>(
+      await fetch(`${sessionsUrl(base, first.id)}/child-finished`),
+    );
+    expect(detail.events.length).toBeGreaterThan(0);
+    expect(detail.metrics.usage?.inputTokens).toBe(1_200);
   });
 });

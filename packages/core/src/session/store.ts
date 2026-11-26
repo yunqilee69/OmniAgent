@@ -9,6 +9,7 @@ import { cloneJson, SESSION_FORMAT_VERSION, SessionEventSchema, SessionHeaderSch
 import type { SessionEvent, SessionEventInput, SessionHeader } from './types';
 import { foldSessionTitle, hasHumanMessage, lastActivityTime } from './title';
 import type { SessionTitleSource } from './title';
+import { projectAgentSelection } from './agent-selection';
 import { projectModeSelection } from './mode-selection';
 import { foldSessionPinned } from './pin';
 import { foldSessionArchived } from './archive';
@@ -132,7 +133,6 @@ function cachedSession(key: string): ActiveSession | undefined {
 
 export interface SessionSummary {
   id: string;
-  agent?: string;
   /** Immutable mode preset selected when this root session was created. */
   mode?: string;
   agentId?: string;
@@ -146,13 +146,25 @@ export interface SessionSummary {
   pinned?: boolean;
   /** Present when the latest archive event hides this session from listings. */
   archived?: boolean;
-  /** A freshly created session with no human-visible message yet. */
-  blank: boolean;
+  /** Selected agent, folded from the latest `agent/selected` event. */
+  agent?: string;
+  /**
+   * A freshly created session with no human-visible message yet. Absent when the
+   * listing read only the tail of a long log and could not see every message.
+   */
+  blank?: boolean;
   workspace: string;
   cwd: string;
   createdAt: number;
-  updatedAt: number;
-  eventCount: number;
+  /** Last conversation activity. Absent on the same bounded reads as `blank`. */
+  updatedAt?: number;
+  /** Persisted event count. Absent on the same bounded reads as `blank`. */
+  eventCount?: number;
+  /**
+   * The newest persisted event asks the user for a plan review or an answer.
+   * The list opens only these sessions, because that request outlives its turn.
+   */
+  restingRequest?: boolean;
 }
 
 function deepFreeze<T>(value: T, seen = new WeakSet<object>()): T {
@@ -362,32 +374,36 @@ export class SessionStore {
     });
   }
 
-  async list(): Promise<SessionSummary[]> {
+  async list(workspace?: string): Promise<SessionSummary[]> {
     const summaries = new Map<string, { summary: SessionSummary; modern: boolean; path: string }>();
-    const workspaces = await readDirOptional(this.root);
-    for (const workspaceDir of workspaces) {
+    const workspaceDirs = workspace === undefined
+      ? await readDirOptional(this.root)
+      : [workspaceKey(workspace), legacyWorkspaceKey(workspace)];
+    for (const workspaceDir of workspaceDirs) {
       const workspacePath = join(this.root, workspaceDir);
       const agents = await readDirOptional(workspacePath);
       for (const agentDir of agents) {
         const path = join(workspacePath, agentDir, 'session.jsonl');
-        const text = await this.readOptional(path);
-        if (text === undefined) continue;
+        const file = await this.readSummaryFile(path);
+        if (file === undefined) continue;
         let header: SessionHeader;
-        let log: SessionLog;
+        let summary: SessionSummary | undefined;
         let modern: boolean;
         try {
-          header = parseHeader(text);
+          header = parseHeader(file.head);
           modern = path === sessionPath(this.root, header.workspace, header.id);
           if (!modern && path !== legacySessionPath(this.root, header.workspace, header.id)) continue;
-          ({ log } = parseLog(text, header.workspace, header.id));
+          if (workspace !== undefined && header.workspace !== workspace) continue;
+          summary = summarizeLogText(header, file);
         } catch {
           continue;
         }
+        if (summary === undefined) continue;
         if (!modern && await pathExists(sessionPath(this.root, header.workspace, header.id))) continue;
         const key = this.key(header.workspace, header.id);
         const existing = summaries.get(key);
         if (existing === undefined || (modern && !existing.modern)) {
-          summaries.set(key, { summary: toSummary(log), modern, path });
+          summaries.set(key, { summary, modern, path });
         }
       }
     }
@@ -513,6 +529,37 @@ export class SessionStore {
     }
   }
 
+  /**
+   * Read the head and tail a sidebar summary needs, not the whole transcript.
+   *
+   * Title, pin, archive, agent and mode are the latest event of their type, and
+   * the log only appends, so a bounded tail holds them once a session is long.
+   * A file that still fits in that tail is returned whole, which is exactly what
+   * `blank` and `updatedAt` need.
+   */
+  private async readSummaryFile(path: string): Promise<SummaryFile | undefined> {
+    let file;
+    try {
+      file = await open(path, 'r');
+    } catch (error) {
+      if (isNotFound(error)) return undefined;
+      throw error;
+    }
+    try {
+      const info = await file.stat();
+      if (!info.isFile()) return undefined;
+      const headBytes = Buffer.alloc(Math.min(SUMMARY_HEAD_BYTES, info.size));
+      await file.read(headBytes, 0, headBytes.length, 0);
+      const head = headBytes.toString('utf8');
+      if (info.size <= SUMMARY_TAIL_BYTES) return { head, tail: head, complete: true };
+      const tailBytes = Buffer.alloc(SUMMARY_TAIL_BYTES);
+      await file.read(tailBytes, 0, tailBytes.length, info.size - SUMMARY_TAIL_BYTES);
+      return { head, tail: tailBytes.toString('utf8'), complete: false };
+    } finally {
+      await file.close();
+    }
+  }
+
   private key(workspace: string, id: string): string { return JSON.stringify([workspace, id]); }
 }
 
@@ -544,26 +591,137 @@ function sameSummaryHeader(summary: SessionSummary, header: SessionHeader): bool
 }
 
 function toSummary(log: SessionLog): SessionSummary {
-  const events = log.events;
-  const title = foldSessionTitle(events);
-  const mode = projectModeSelection(events);
+  return summaryFromEvents(log.header, [...log.events]);
+}
+
+/** Bytes of the header line a summary read keeps. Headers are far smaller than this. */
+const SUMMARY_HEAD_BYTES = 64 * 1024;
+
+/**
+ * Bytes of the tail a summary read keeps. Title, pin, archive, agent and mode
+ * are each the latest event of their type, so this window holds them for any
+ * session whose recent events are ordinary records.
+ */
+const SUMMARY_TAIL_BYTES = 256 * 1024;
+
+interface SummaryFile {
+  /** The start of the file, always including the header line. */
+  head: string;
+  /** The whole file when it fits, otherwise its last {@link SUMMARY_TAIL_BYTES}. */
+  tail: string;
+  /** Whether `tail` is the entire file, so activity fields can be folded exactly. */
+  complete: boolean;
+}
+
+/**
+ * Sidebar fields from a bounded read. A file larger than the tail window still
+ * yields title, pin, archive, agent and mode; `blank`, `updatedAt` and
+ * `eventCount` stay absent because they need every event.
+ */
+function summarizeLogText(header: SessionHeader, file: SummaryFile): SessionSummary | undefined {
+  if (file.complete) {
+    const events = parseSummaryEvents(file.tail, true);
+    return events === undefined ? undefined : summaryFromEvents(header, events);
+  }
+  const tail = parseSummaryEvents(file.tail.slice(file.tail.indexOf('\n') + 1));
+  if (tail === undefined) return undefined;
+  const agent = projectAgentSelection(tail);
+  const mode = projectModeSelection(tail);
+  const title = foldSessionTitle(tail);
   return {
-    id: log.header.id,
+    id: header.id,
+    ...(agent.status === 'selected' ? { agent: agent.agent } : {}),
     ...(mode.status === 'selected' ? { mode: mode.selection.mode } : {}),
-    ...(log.header.agentId === undefined ? {} : { agentId: log.header.agentId }),
-    ...(log.header.parentSessionId === undefined ? {} : { parentSessionId: log.header.parentSessionId }),
-    ...(log.header.depth === undefined ? {} : { depth: log.header.depth }),
-    ...(log.header.description === undefined ? {} : { description: log.header.description }),
+    ...(header.agentId === undefined ? {} : { agentId: header.agentId }),
+    ...(header.parentSessionId === undefined ? {} : { parentSessionId: header.parentSessionId }),
+    ...(header.depth === undefined ? {} : { depth: header.depth }),
+    ...(header.description === undefined ? {} : { description: header.description }),
+    ...(title === undefined ? {} : { title: title.title, titleSource: title.source }),
+    ...(foldSessionPinned(tail) ? { pinned: true } : {}),
+    ...(foldSessionArchived(tail) ? { archived: true } : {}),
+    // Activity time needs every event. Leaving it absent keeps an automatic
+    // archive scan from treating an unread middle of the log as idle.
+    updatedAt: undefined,
+    workspace: header.workspace,
+    cwd: header.cwd,
+    createdAt: header.createdAt,
+  };
+}
+
+const RESTING_REQUEST_EVENTS = new Set(['plan/review.pending', 'ask-user/pending']);
+
+/** A request the user can still answer after its turn ended, inside that last turn. */
+function restingRequest(events: readonly SessionEvent[]): boolean {
+  let index = events.length - 1;
+  while (index >= 0 && events[index]?.type !== 'trace/turn.end') index -= 1;
+  const start = index < 0 ? 0 : events.findLastIndex((event, at) => at < index && event.type === 'trace/turn.start');
+  for (let at = index < 0 ? events.length - 1 : index - 1; at > start; at -= 1) {
+    const type = events[at]?.type;
+    if (type === 'plan/review.decision' || type === 'ask-user/decision' || type === 'ask-user/continued') return false;
+    if (type !== undefined && RESTING_REQUEST_EVENTS.has(type)) return true;
+  }
+  return false;
+}
+
+function summaryFromEvents(header: SessionHeader, events: SessionEvent[]): SessionSummary {
+  const agent = projectAgentSelection(events);
+  const mode = projectModeSelection(events);
+  const title = foldSessionTitle(events);
+  return {
+    id: header.id,
+    ...(agent.status === 'selected' ? { agent: agent.agent } : {}),
+    ...(mode.status === 'selected' ? { mode: mode.selection.mode } : {}),
+    ...(header.agentId === undefined ? {} : { agentId: header.agentId }),
+    ...(header.parentSessionId === undefined ? {} : { parentSessionId: header.parentSessionId }),
+    ...(header.depth === undefined ? {} : { depth: header.depth }),
+    ...(header.description === undefined ? {} : { description: header.description }),
     ...(title === undefined ? {} : { title: title.title, titleSource: title.source }),
     ...(foldSessionPinned(events) ? { pinned: true } : {}),
     ...(foldSessionArchived(events) ? { archived: true } : {}),
     blank: !hasHumanMessage(events),
-    workspace: log.header.workspace,
-    cwd: log.header.cwd,
-    createdAt: log.header.createdAt,
-    updatedAt: lastActivityTime(events, log.header.createdAt),
+    ...(restingRequest(events) ? { restingRequest: true } : {}),
+    workspace: header.workspace,
+    cwd: header.cwd,
+    createdAt: header.createdAt,
+    updatedAt: lastActivityTime(events, header.createdAt),
     eventCount: events.length,
   };
+}
+
+/**
+ * Parse the complete JSON lines of a summary window.
+ *
+ * A bounded tail may begin or end on a cut line, and those are skipped. A
+ * complete file has no such excuse: one broken record means the log cannot be
+ * trusted, so the session is left out of the list the same way a failed full
+ * parse used to leave it out.
+ */
+function parseSummaryEvents(text: string, strict = false): SessionEvent[] | undefined {
+  const lines = text.split('\n');
+  if (lines.at(-1) === '') lines.pop();
+  const events: SessionEvent[] = [];
+  for (const [index, line] of lines.entries()) {
+    if (line.length === 0) {
+      if (strict) return undefined;
+      continue;
+    }
+    const torn = !strict && (index === 0 || index === lines.length - 1) && !line.endsWith('}');
+    if (torn || line[0] !== '{') {
+      if (strict && index > 0) return undefined;
+      continue;
+    }
+    try {
+      const parsed = SessionEventSchema.safeParse(JSON.parse(line));
+      if (!parsed.success || parsed.data.type === 'session') {
+        if (strict && index > 0) return undefined;
+        continue;
+      }
+      events.push(parsed.data);
+    } catch {
+      if (strict) return undefined;
+    }
+  }
+  return events;
 }
 
 async function pathExists(path: string): Promise<boolean> {

@@ -43,7 +43,9 @@ import {
   type AgentSummary,
   type ModeOptions,
   type ModeSelection,
+  type DevelopmentPlan,
   type ModeSummary,
+  type TeamBoard,
   type DiscoveredModel,
   type McpProbeResult,
   type McpServerSummary,
@@ -90,6 +92,54 @@ export type Theme = 'light' | 'dark';
 export type ProcessDisplay = 'collapsed' | 'expanded';
 export type BusySendMode = 'queue' | 'steer';
 export type Tab = 'conversation' | 'automation' | 'settings';
+
+function normalizePlans(value: unknown): DevelopmentPlan[] {
+  if (!Array.isArray(value)) return [];
+  return value.flatMap((item) => {
+    if (typeof item !== 'object' || item === null) return [];
+    const plan = item as Record<string, unknown>;
+    if (typeof plan.id !== 'string' || typeof plan.version !== 'number' || typeof plan.title !== 'string' || typeof plan.body !== 'string') return [];
+    return [{
+      id: plan.id,
+      version: plan.version,
+      title: plan.title,
+      body: plan.body,
+      confirmedAt: typeof plan.confirmedAt === 'number' ? plan.confirmedAt : 0,
+    }];
+  });
+}
+
+function normalizeTeamBoard(value: unknown): TeamBoard {
+  if (typeof value !== 'object' || value === null) return { tasks: [] };
+  const board = value as { tasks?: unknown; failure?: unknown };
+  const tasks = Array.isArray(board.tasks) ? board.tasks.flatMap((item) => {
+    if (typeof item !== 'object' || item === null) return [];
+    const task = item as Record<string, unknown>;
+    const status = task.status;
+    if (typeof task.id !== 'string' || typeof task.subject !== 'string' || typeof task.revision !== 'number') return [];
+    if (status !== 'pending' && status !== 'in_progress' && status !== 'review' && status !== 'completed') return [];
+    const normalized: TeamBoard['tasks'][number] = {
+      id: task.id,
+      revision: task.revision,
+      subject: task.subject,
+      description: typeof task.description === 'string' ? task.description : '',
+      status,
+      ready: task.ready === true,
+      ...(typeof task.ownerSessionId === 'string' ? { ownerSessionId: task.ownerSessionId } : {}),
+      blockedBy: Array.isArray(task.blockedBy) ? task.blockedBy.filter((id): id is string => typeof id === 'string') : [],
+      ...(typeof task.planId === 'string' ? { planId: task.planId } : {}),
+      ...(typeof task.planVersion === 'number' ? { planVersion: task.planVersion } : {}),
+      ...(typeof task.planHeading === 'string' ? { planHeading: task.planHeading } : {}),
+      ...(typeof task.acceptance === 'string' ? { acceptance: task.acceptance } : {}),
+      ...(typeof task.note === 'string' ? { note: task.note } : {}),
+    };
+    return [normalized];
+  }) : [];
+  return {
+    tasks,
+    ...(typeof board.failure === 'string' && board.failure !== '' ? { failure: board.failure } : {}),
+  };
+}
 
 function normalizeGoal(value: unknown): SessionGoal | null {
   if (typeof value !== 'object' || value === null) return null;
@@ -152,6 +202,10 @@ export interface SessionEntry {
   goal: SessionGoal | null;
   goalError: string;
   todos: TodoItem[] | null;
+  /** Confirmed development plans for this team. Empty outside team mode. */
+  plans: DevelopmentPlan[];
+  /** Shared task board. Empty tasks outside team mode. */
+  teamBoard: TeamBoard;
   transcript: TranscriptItem[];
   turns: TurnMeta[];
   events: unknown[];
@@ -183,7 +237,14 @@ export interface AppState {
   sessions: SessionSummary[];
   sessionsLoading: boolean;
   sessionError: string;
-  sessionsByWorkspace: Record<string, { sessions: SessionSummary[]; loading: boolean; error: string; loaded: boolean }>;
+  sessionsByWorkspace: Record<string, {
+    sessions: SessionSummary[];
+    loading: boolean;
+    error: string;
+    loaded: boolean;
+    /** Sessions the workspace has beyond the pages loaded so far. */
+    total: number;
+  }>;
   sessionId: string | null;
   selectedByWorkspace: Record<string, string>;
   entries: Record<string, SessionEntry>;
@@ -371,6 +432,20 @@ function writeModelNotices(workspaceId: string, sessionId: string, notices: read
 }
 
 /** Pinned sessions lead the sidebar; within each group the newest activity wins. */
+function catalogList(body: unknown, key: 'models' | 'agents' | 'roles'): unknown[] | undefined {
+  if (typeof body !== 'object' || body === null || !Array.isArray((body as Record<string, unknown>)[key])) return undefined;
+  return (body as Record<string, unknown[]>)[key];
+}
+
+/** Sessions one sidebar page asks the host for. Matches the rows one group shows. */
+const SESSION_PAGE_SIZE = 5;
+
+/** Append a page, dropping ids the previous page already carried. */
+function mergeSessionPage(previous: readonly SessionSummary[], page: readonly SessionSummary[]): SessionSummary[] {
+  const seen = new Set(previous.map((session) => session.id));
+  return [...previous, ...page.filter((session) => !seen.has(session.id))];
+}
+
 function sortSessions(sessions: readonly SessionSummary[]): SessionSummary[] {
   return sessions.slice().sort((left, right) =>
     Number(right.pinned === true) - Number(left.pinned === true)
@@ -403,6 +478,8 @@ function emptyEntry(): SessionEntry {
     goal: null,
     goalError: '',
     todos: null,
+    plans: [],
+    teamBoard: { tasks: [] },
     transcript: [],
     turns: [],
     events: [],
@@ -593,6 +670,8 @@ export class AppStore {
   private listeners = new Set<() => void>();
   private notifyScheduled = false;
   private workspaceRequest = 0;
+  /** The page's one configuration read, so a draft waits for it instead of racing it. */
+  private bootstrapTask: Promise<void> = Promise.resolve();
   private readonly sessionRequests = new Map<string, number>();
   private permissionRequest = 0;
   private subagentsRefreshedAt = 0;
@@ -731,7 +810,7 @@ export class AppStore {
   }
 
   private setWorkspaceSessions(workspaceId: string, patch: Partial<AppState['sessionsByWorkspace'][string]>): void {
-    const previous = this.state.sessionsByWorkspace[workspaceId] ?? { sessions: [], loading: false, error: '', loaded: false };
+    const previous = this.state.sessionsByWorkspace[workspaceId] ?? { sessions: [], loading: false, error: '', loaded: false, total: 0 };
     const next = { ...previous, ...patch };
     this.patch({
       sessionsByWorkspace: { ...this.state.sessionsByWorkspace, [workspaceId]: next },
@@ -999,17 +1078,21 @@ export class AppStore {
   async loadModes(): Promise<void> {
     this.patch({ modesLoading: true, modesError: '' });
     try {
-      const body = await this.api<{ modes?: unknown[]; defaultMode?: unknown }>('/api/modes');
-      const modes = (body.modes ?? []).map(validateModeSummary);
-      this.patch({
-        modes,
-        modesLoading: false,
-        modesError: '',
-        defaultMode: typeof body.defaultMode === 'string' && body.defaultMode !== '' ? body.defaultMode : 'standard',
-      });
+      this.applyModes(await this.api<{ modes?: unknown[]; defaultMode?: unknown }>('/api/modes'));
     } catch (error) {
       this.patch({ modesLoading: false, modesError: (error as Error).message });
     }
+  }
+
+  private applyModes(body: unknown): void {
+    const value = typeof body === 'object' && body !== null ? body as { modes?: unknown; defaultMode?: unknown } : {};
+    const modes = (Array.isArray(value.modes) ? value.modes : []).map(validateModeSummary);
+    this.patch({
+      modes,
+      modesLoading: false,
+      modesError: '',
+      defaultMode: typeof value.defaultMode === 'string' && value.defaultMode !== '' ? value.defaultMode : 'standard',
+    });
   }
 
   async loadModeOptions(): Promise<void> {
@@ -1062,14 +1145,7 @@ export class AppStore {
   async loadModelSources(): Promise<void> {
     this.patch({ modelSourcesLoading: true, modelSourcesError: '' });
     try {
-      const body = await this.api<unknown>('/api/settings/model-sources');
-      const list = validateModelSourceList(body);
-      this.patch({
-        modelSources: list.sources,
-        modelSourceList: list,
-        modelSourcesLoading: false,
-        modelSourcesError: '',
-      });
+      this.applyModelSources(await this.api<unknown>('/api/settings/model-sources'));
     } catch (error) {
       this.patch({
         modelSources: [],
@@ -1122,14 +1198,7 @@ export class AppStore {
   async loadMcpServers(): Promise<void> {
     this.patch({ mcpServersLoading: true, mcpServersError: '' });
     try {
-      const body = await this.api<unknown>('/api/settings/mcp-servers');
-      const list = validateMcpServerList(body);
-      this.patch({
-        mcpServers: list.servers,
-        mcpTransports: list.transports,
-        mcpServersLoading: false,
-        mcpServersError: '',
-      });
+      this.applyMcpServers(await this.api<unknown>('/api/settings/mcp-servers'));
     } catch (error) {
       this.patch({
         mcpServers: [],
@@ -1175,8 +1244,7 @@ export class AppStore {
 
   async loadRoleEntries(): Promise<void> {
     try {
-      const body = await this.api<{ roles?: unknown[] }>('/api/settings/roles');
-      this.patch({ roleEntries: (body.roles ?? []).map(validateRoleEntry), rolesError: '' });
+      this.applyRoleEntries(await this.api<{ roles?: unknown[] }>('/api/settings/roles'));
     } catch (error) {
       this.patch({ roleEntries: [], rolesError: (error as Error).message });
     }
@@ -1268,15 +1336,54 @@ export class AppStore {
   }
 
   async bootstrap(): Promise<void> {
-    void this.loadPermissions();
-    void this.loadAskUserTimeout();
-    void this.loadWebSearch();
-    void this.loadArchiveSettings();
-    void this.loadCatalogs();
-    void this.loadModelSources();
-    void this.loadMcpServers();
-    void this.loadModes();
+    // Permissions, catalogs, modes and the settings cards all arrive together.
+    // A section still reloads itself after the user edits it. The session list
+    // waits on this read before it opens a draft, so a failed read is not hidden
+    // behind an empty conversation.
+    this.bootstrapTask = this.loadBootstrap();
     await this.loadWorkspaces();
+  }
+
+  /** Read the page's configuration in one request and fan it into the existing state. */
+  private async loadBootstrap(): Promise<void> {
+    this.patch({
+      permissionsLoading: true, permissionsError: '',
+      modelsLoading: true, agentsLoading: true, rolesLoading: true,
+      modelsError: '', agentsError: '', rolesError: '',
+      modelSourcesLoading: true, modelSourcesError: '',
+      mcpServersLoading: true, mcpServersError: '',
+      modesLoading: true, modesError: '',
+    });
+    try {
+      const body = await this.api<Record<string, unknown>>('/api/bootstrap');
+      this.applyPermissionSettings(body.permissions);
+      this.applyAskUser(body.askUser);
+      this.applyWebSearch(body.webSearch);
+      if (body.archive !== null && body.archive !== undefined) {
+        try {
+          this.patch({ archiveSettings: validateArchiveSettings(body.archive) });
+        } catch { /* The card keeps its off-by-default fallback. */ }
+      }
+      this.applyCatalogs(
+        { models: Array.isArray(body.models) ? body.models : undefined },
+        { agents: Array.isArray(body.agents) ? body.agents : undefined },
+        { roles: Array.isArray(body.roles) ? body.roles : undefined },
+      );
+      this.applyRoleEntries(body.roleEntries);
+      this.applyModelSources(body.modelSources);
+      this.applyMcpServers(body.mcpServers);
+      this.applyModes(body.modes);
+    } catch (error) {
+      const message = (error as Error).message;
+      this.patch({
+        permissionsLoading: false, permissionsError: message,
+        modelsLoading: false, agentsLoading: false, rolesLoading: false,
+        modelsError: message, agentsError: message, rolesError: message,
+        modelSourcesLoading: false, modelSourcesError: message,
+        mcpServersLoading: false, mcpServersError: message,
+        modesLoading: false, modesError: message,
+      });
+    }
   }
 
   async loadWorkspaces(preferredId?: string): Promise<void> {
@@ -1288,7 +1395,9 @@ export class AppStore {
       const workspaces = Array.isArray(body.workspaces) ? body.workspaces : [];
       const saved = storageGet('omniagent.activeWorkspace');
       const preferred = preferredId ?? this.state.workspaceId ?? (saved !== '' ? saved : null);
-      const next = workspaces.find((workspace) => workspace.id === preferred) ?? workspaces[0];
+      const next = workspaces.find((workspace) => workspace.id === preferred)
+        ?? workspaces.find((workspace) => workspace.isDefault === true)
+        ?? workspaces[0];
       this.state = { ...this.state, workspaces, workspacesLoading: false };
       this.emit();
       if (next !== undefined && (this.state.workspaceId !== next.id || this.state.sessions.length === 0)) {
@@ -1331,19 +1440,43 @@ export class AppStore {
     this.persistSelection();
     this.ensureStatusStream(id);
     await this.loadSessions(id, true);
+    // The remembered workspace and the default workspace are the two groups the
+    // sidebar shows on arrival. Every other group waits until it is expanded.
+    const fallback = this.state.workspaces.find((workspace) => workspace.isDefault === true);
+    if (fallback !== undefined && fallback.id !== id) {
+      const cached = this.state.sessionsByWorkspace[fallback.id];
+      if (cached === undefined || (!cached.loaded && !cached.loading)) void this.loadSessions(fallback.id, false);
+    }
   }
 
   async loadSessions(workspaceId: string, restore: boolean): Promise<void> {
+    await this.loadSessionPage(workspaceId, restore, false);
+  }
+
+  /** Fetch the next page of a workspace whose first page is already on screen. */
+  async loadMoreSessions(workspaceId: string): Promise<void> {
+    const cached = this.state.sessionsByWorkspace[workspaceId];
+    if (cached === undefined || !cached.loaded || cached.loading || cached.sessions.length >= cached.total) return;
+    await this.loadSessionPage(workspaceId, false, true);
+  }
+
+  private async loadSessionPage(workspaceId: string, restore: boolean, more: boolean): Promise<void> {
     const request = (this.sessionRequests.get(workspaceId) ?? 0) + 1;
     this.sessionRequests.set(workspaceId, request);
     const draftRequest = this.draftRequest;
+    const offset = more ? this.state.sessionsByWorkspace[workspaceId]?.sessions.length ?? 0 : 0;
     this.setWorkspaceSessions(workspaceId, { loading: true, error: '' });
     try {
-      const body = await this.api<{ sessions?: SessionSummary[] }>(sessionApiPath(workspaceId));
+      const body = await this.api<{ sessions?: SessionSummary[]; total?: number }>(
+        `${sessionApiPath(workspaceId)}?limit=${SESSION_PAGE_SIZE}&offset=${offset}`,
+      );
       if (this.disposed || request !== this.sessionRequests.get(workspaceId)) return;
       if (!Array.isArray(body.sessions)) throw new Error('The server did not return a session list.');
-      const sessions = sortSessions(body.sessions);
-      this.setWorkspaceSessions(workspaceId, { sessions, loading: false, loaded: true });
+      const page = sortSessions(body.sessions);
+      const previous = more ? this.state.sessionsByWorkspace[workspaceId]?.sessions ?? [] : [];
+      const sessions = more ? mergeSessionPage(previous, page) : page;
+      const total = typeof body.total === 'number' ? body.total : sessions.length;
+      this.setWorkspaceSessions(workspaceId, { sessions, total, loading: false, loaded: true });
       this.reconcileSessionStatuses(workspaceId, sessions);
       this.ensureStatusStream(workspaceId);
       if (restore && this.state.workspaceId === workspaceId) {
@@ -1358,6 +1491,8 @@ export class AppStore {
           this.state = { ...this.state, sessionId: null, selectedByWorkspace: selected };
           this.persistSelection();
           this.emit();
+          await this.bootstrapTask;
+          if (this.disposed || request !== this.sessionRequests.get(workspaceId)) return;
           await this.createDraftSession({ workspaceId }, () =>
             !this.disposed && request === this.sessionRequests.get(workspaceId) && this.state.workspaceId === workspaceId
             && this.state.sessionId === null && this.state.sessions.length === 0);
@@ -1393,7 +1528,15 @@ export class AppStore {
         running && (session.pending === 'approval' || session.pending === 'plan-review') ? session.pending : null);
       // The baseline is the only source that knows how the last turn ended, so it
       // owns that field; the push stream only ever reports liveness.
-      const settled = { ...value, lastTurnFailed: running ? false : session.lastTurn?.reason === 'error' };
+      const settled = {
+        ...value,
+        // The list no longer carries the transcript, so a row that is not open
+        // keeps the failure it already learned. Opening the session replaces it
+        // from the reloaded turn end.
+        lastTurnFailed: running ? false : this.state.entries[key]?.loaded === true
+          ? this.latestTurnFailed(key)
+          : previous.lastTurnFailed,
+      };
       if (!sameLiveState(previous, settled)) {
         next[key] = settled;
         changed = true;
@@ -1465,6 +1608,25 @@ export class AppStore {
    * @param key - `sessionKey` of the session.
    * @returns that `seq`, or `undefined` when no finished turn was persisted yet.
    */
+  /** Record a failure the opened transcript proved, without waiting for another list. */
+  private noteListedFailure(key: string, failed: boolean): void {
+    const previous = this.state.statusBySession[key] ?? IDLE_SESSION_STATE;
+    if (previous.running || previous.lastTurnFailed === failed) return;
+    this.patch({ statusBySession: { ...this.state.statusBySession, [key]: { ...previous, lastTurnFailed: failed } } });
+  }
+
+  /** Whether the newest persisted turn of an opened session ended in an error. */
+  private latestTurnFailed(key: string): boolean {
+    const events = this.state.entries[key]?.events ?? [];
+    for (let index = events.length - 1; index >= 0; index -= 1) {
+      const event = events[index];
+      if (typeof event !== 'object' || event === null) continue;
+      if ((event as { type?: unknown }).type !== 'trace/turn.end') continue;
+      return (event as { data?: { reason?: unknown } }).data?.reason === 'error';
+    }
+    return false;
+  }
+
   private turnEndStamp(key: string): number | undefined {
     const events = this.state.entries[key]?.events ?? [];
     for (let index = events.length - 1; index >= 0; index -= 1) {
@@ -1557,11 +1719,17 @@ export class AppStore {
     const cached = this.state.sessionsByWorkspace[workspaceId];
     if (cached === undefined || !cached.loaded || cached.loading) return;
     try {
-      const body = await this.api<{ sessions?: SessionSummary[] }>(sessionApiPath(workspaceId));
+      // Cover every page already on screen, so a finished run can move within
+      // them, without pulling pages the user has not asked to see.
+      const limit = Math.max(SESSION_PAGE_SIZE, cached.sessions.length);
+      const body = await this.api<{ sessions?: SessionSummary[]; total?: number }>(
+        `${sessionApiPath(workspaceId)}?limit=${limit}&offset=0`,
+      );
       if (this.disposed || !Array.isArray(body.sessions)) return;
       if (this.state.sessionsByWorkspace[workspaceId]?.loading === true) return;
-      const sessions = sortSessions(body.sessions);
-      this.setWorkspaceSessions(workspaceId, { sessions });
+      const sessions = body.sessions;
+      const total = typeof body.total === 'number' ? body.total : sessions.length;
+      this.setWorkspaceSessions(workspaceId, { sessions, total });
       this.reconcileSessionStatuses(workspaceId, sessions);
     } catch {
       // The row state already moved; a quiet refresh failing changes nothing.
@@ -1925,6 +2093,8 @@ export class AppStore {
         goal: normalizeGoal(body.goal),
         goalError: '',
         todos: normalizeTodos(body.todos),
+        plans: normalizePlans(body.plans),
+        teamBoard: normalizeTeamBoard(body.teamBoard),
         transcript: hydratedWithNotices.transcript,
         turns: hydratedWithNotices.turns,
         events,
@@ -1959,6 +2129,7 @@ export class AppStore {
       } else {
         this.patchEntry(key, patch);
       }
+      if (body.running !== true) this.noteListedFailure(key, this.latestTurnFailed(key));
       if (body.running === true) {
         if (this.state.entries[key]?.run === undefined || restoredReview !== undefined || restoredAskUser !== undefined) this.followRun(workspaceId, sessionId);
       } else {
@@ -2667,6 +2838,7 @@ export class AppStore {
       && (event as { type?: unknown }).type === 'trace/turn.end');
     const lastEnd = lastInput >= 0 && lastEndIndex > lastInput ? current.events[lastEndIndex] as { data?: { reason?: unknown } } : undefined;
     const reason = run.outcome ?? lastEnd?.data?.reason;
+    this.noteListedFailure(key, reason === 'error' || run.error !== undefined);
     this.patchEntry(key, {
       run: undefined,
       outcome: reason === 'interrupted' ? 'interrupted' : reason === 'error' || run.error !== undefined ? 'error' : '',
@@ -2766,7 +2938,8 @@ export class AppStore {
         const result = (event as { result?: { name?: unknown } }).result;
         if (typeof result?.name === 'string') {
           if (result.name === 'todo_write' || result.name === 'exit_plan_mode'
-            || result.name === 'create_goal' || result.name === 'update_goal') {
+            || result.name === 'create_goal' || result.name === 'update_goal'
+            || result.name.startsWith('team_')) {
             void this.refreshSessionBrief(workspaceId, sessionId);
           }
           if (['subagent', 'send_message', 'interrupt_agent'].includes(result.name)) {
@@ -3042,7 +3215,7 @@ export class AppStore {
 
   async refreshSessionBrief(workspaceId: string, sessionId: string): Promise<void> {
     try {
-      const body = await this.api<{ plan?: unknown; todos?: unknown; goal?: unknown; goalGrant?: unknown }>(
+      const body = await this.api<{ plan?: unknown; todos?: unknown; goal?: unknown; goalGrant?: unknown; plans?: unknown; teamBoard?: unknown }>(
         sessionApiPath(workspaceId, sessionId),
       );
       const key = sessionKey(workspaceId, sessionId);
@@ -3051,6 +3224,8 @@ export class AppStore {
       this.patchEntry(key, {
         plan: normalizePlan(body.plan),
         todos: normalizeTodos(body.todos),
+        plans: normalizePlans(body.plans),
+        teamBoard: normalizeTeamBoard(body.teamBoard),
         goal: normalizeGoal(body.goal),
         goalGrant: body.goalGrant === true,
       });
@@ -3171,17 +3346,7 @@ export class AppStore {
   async loadWebSearch(): Promise<void> {
     try {
       const body = await this.api<{ settings?: unknown }>('/api/settings/web-search');
-      const settings = body.settings;
-      if (typeof settings !== 'object' || settings === null || Array.isArray(settings)) return;
-      const value = settings as { apiKeyConfigured?: unknown; apiKeyEnv?: unknown; maxResults?: unknown; requiresRepair?: unknown };
-      this.patch({
-        webSearch: {
-          apiKeyConfigured: value.apiKeyConfigured === true,
-          ...(typeof value.apiKeyEnv === 'string' ? { apiKeyEnv: value.apiKeyEnv } : {}),
-          maxResults: typeof value.maxResults === 'number' ? value.maxResults : 5,
-          requiresRepair: value.requiresRepair === true,
-        },
-      });
+      this.applyWebSearch(body.settings);
     } catch {
       // The card stays empty until settings load.
     }
@@ -3215,15 +3380,8 @@ export class AppStore {
 
   async loadAskUserTimeout(): Promise<void> {
     try {
-      const body = await this.api<{ settings?: { timeoutSec?: unknown; requiresSelection?: unknown } }>('/api/settings/ask-user');
-      const timeoutSec = body.settings?.timeoutSec;
-      if (typeof timeoutSec !== 'number') return;
-      this.patch({
-        askUserTimeout: {
-          timeoutSec,
-          requiresSelection: body.settings?.requiresSelection === true,
-        },
-      });
+      const body = await this.api<{ settings?: unknown }>('/api/settings/ask-user');
+      this.applyAskUser(body.settings);
     } catch {
       // The card falls back to the five-minute default until settings load.
     }
@@ -3258,7 +3416,7 @@ export class AppStore {
     try {
       const body = await this.api<{ settings?: unknown }>('/api/settings/permissions');
       if (request !== this.permissionRequest) return;
-      this.patch({ permissions: validatePermissionSettings(body.settings), permissionsLoading: false });
+      this.applyPermissionSettings(body.settings);
     } catch (error) {
       if (request !== this.permissionRequest) return;
       const message = (error as Error).message;
@@ -3313,22 +3471,80 @@ export class AppStore {
       this.api<{ agents?: unknown[] }>('/api/agents'),
       this.api<{ roles?: unknown[] }>('/api/roles'),
     ]);
+    this.applyCatalogs(
+      modelsResult.status === 'fulfilled' ? modelsResult.value : modelsResult.reason,
+      agentsResult.status === 'fulfilled' ? agentsResult.value : agentsResult.reason,
+      rolesResult.status === 'fulfilled' ? rolesResult.value : rolesResult.reason,
+      { modelsFailed: modelsResult.status === 'rejected', agentsFailed: agentsResult.status === 'rejected', rolesFailed: rolesResult.status === 'rejected' },
+    );
+  }
+
+  private applyPermissionSettings(settings: unknown): void {
+    this.patch({ permissions: validatePermissionSettings(settings), permissionsLoading: false, permissionsError: '' });
+  }
+
+  private applyAskUser(settings: unknown): void {
+    const value = typeof settings === 'object' && settings !== null ? settings as { timeoutSec?: unknown; requiresSelection?: unknown } : {};
+    if (typeof value.timeoutSec !== 'number') return;
+    this.patch({ askUserTimeout: { timeoutSec: value.timeoutSec, requiresSelection: value.requiresSelection === true } });
+  }
+
+  private applyWebSearch(settings: unknown): void {
+    if (typeof settings !== 'object' || settings === null || Array.isArray(settings)) return;
+    const value = settings as { apiKeyConfigured?: unknown; apiKeyEnv?: unknown; maxResults?: unknown; requiresRepair?: unknown };
+    this.patch({
+      webSearch: {
+        apiKeyConfigured: value.apiKeyConfigured === true,
+        ...(typeof value.apiKeyEnv === 'string' ? { apiKeyEnv: value.apiKeyEnv } : {}),
+        maxResults: typeof value.maxResults === 'number' ? value.maxResults : 5,
+        requiresRepair: value.requiresRepair === true,
+      },
+    });
+  }
+
+  private applyRoleEntries(body: unknown): void {
+    const roles = typeof body === 'object' && body !== null && Array.isArray((body as { roles?: unknown }).roles)
+      ? (body as { roles: unknown[] }).roles
+      : [];
+    this.patch({ roleEntries: roles.map(validateRoleEntry), rolesError: '' });
+  }
+
+  private applyModelSources(body: unknown): void {
+    const list = validateModelSourceList(body);
+    this.patch({ modelSources: list.sources, modelSourceList: list, modelSourcesLoading: false, modelSourcesError: '' });
+  }
+
+  private applyMcpServers(body: unknown): void {
+    const list = validateMcpServerList(body);
+    this.patch({ mcpServers: list.servers, mcpTransports: list.transports, mcpServersLoading: false, mcpServersError: '' });
+  }
+
+  /** Fold one catalog response, or the rejection from fetching it, into state. */
+  private applyCatalogs(
+    modelsBody: unknown,
+    agentsBody: unknown,
+    rolesBody: unknown,
+    failed: { modelsFailed: boolean; agentsFailed: boolean; rolesFailed: boolean } = { modelsFailed: false, agentsFailed: false, rolesFailed: false },
+  ): void {
+    const modelsValue = catalogList(modelsBody, 'models');
+    const agentsValue = catalogList(agentsBody, 'agents');
+    const rolesValue = catalogList(rolesBody, 'roles');
     let models: ModelSummary[] = [];
     let modelsError = '';
-    if (modelsResult.status === 'fulfilled' && Array.isArray(modelsResult.value.models)) {
+    if (!failed.modelsFailed && modelsValue !== undefined) {
       try {
-        models = modelsResult.value.models.map(validateModelSummary);
+        models = modelsValue.map(validateModelSummary);
       } catch (error) {
         modelsError = (error as Error).message;
       }
     } else {
-      modelsError = modelsResult.status === 'rejected' ? (modelsResult.reason as Error).message : 'The server did not return a model catalog.';
+      modelsError = failed.modelsFailed && modelsBody instanceof Error ? modelsBody.message : 'The server did not return a model catalog.';
     }
     let agents: AgentSummary[] = [];
     let agentsError = '';
-    if (agentsResult.status === 'fulfilled' && Array.isArray(agentsResult.value.agents)) {
+    if (!failed.agentsFailed && agentsValue !== undefined) {
       try {
-        agents = agentsResult.value.agents.map((agent) => {
+        agents = agentsValue.map((agent) => {
           const parsed = validateAgent(agent);
           if (parsed === null) throw new Error('Invalid agent catalog response.');
           return parsed;
@@ -3337,18 +3553,18 @@ export class AppStore {
         agentsError = (error as Error).message;
       }
     } else {
-      agentsError = agentsResult.status === 'rejected' ? (agentsResult.reason as Error).message : 'The server did not return an agent catalog.';
+      agentsError = failed.agentsFailed && agentsBody instanceof Error ? agentsBody.message : 'The server did not return an agent catalog.';
     }
     let roles: RoleSummary[] = [];
     let rolesError = '';
-    if (rolesResult.status === 'fulfilled' && Array.isArray(rolesResult.value.roles)) {
+    if (!failed.rolesFailed && rolesValue !== undefined) {
       try {
-        roles = rolesResult.value.roles.map(validateRole);
+        roles = rolesValue.map(validateRole);
       } catch (error) {
         rolesError = (error as Error).message;
       }
     } else {
-      rolesError = rolesResult.status === 'rejected' ? (rolesResult.reason as Error).message : 'The server did not return a role catalog.';
+      rolesError = failed.rolesFailed && rolesBody instanceof Error ? rolesBody.message : 'The server did not return a role catalog.';
     }
     const selectable = agents.filter((agent) => agent.valid && agent.usage !== 'subagent');
     const defaultAgent = selectable.some((agent) => agent.id === this.state.defaultAgent)

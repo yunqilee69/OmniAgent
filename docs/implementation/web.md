@@ -118,7 +118,8 @@ Web 由一个本地 Node HTTP Host（`packages/web/src`）和一个 React 工作
 | `POST` | `/api/workspaces/:id/files/rename` | 重命名（`{ path, name }`） |
 | `POST` | `/api/workspaces/:id/files/move` | 移动到文件夹（`{ path, directory }`） |
 | `DELETE` | `/api/workspaces/:id/files?path=` | 删除文件或文件夹 |
-| `GET/POST` | `/api/workspaces/:id/sessions` | 列出 / 创建会话 |
+| `GET` | `/api/bootstrap` | 页面启动的一次配置：权限、提问超时、网页搜索、归档、模型、智能体、角色、模型来源、MCP、模式 |
+| `GET/POST` | `/api/workspaces/:id/sessions` | 列出 / 创建会话。列表只读每个日志的头和尾；`?limit=&offset=` 按根会话分页，子会话随每一页返回。消息、trace、指标在 `GET .../sessions/:sid` |
 | `GET/PATCH/DELETE` | `/api/workspaces/:id/sessions/:sid` | 详情 / 改名 / 删除 |
 | `POST` | `.../pin` | pin / unpin |
 | `POST` | `.../fork` | fork |
@@ -404,7 +405,7 @@ retainTokens  = min(retainContextTokens ?? floor(messageBudget * 0.25), floor(me
 `config-file.ts` 是所有配置写入的公共层：
 
 - `ConfigFile.open({ trustedHome })` 要求配置在 home 内；
-- `assertNoSymlinkParents()` 禁止父目录 symlink（例外 `/tmp`、`/var`）；
+- `assertNoSymlinkParents()` 禁止父目录 symlink（例外 `/tmp`、`/var`，以及应用自己的 `~/.omniagent` 配置目录）；
 - 读取 `O_NOFOLLOW | O_NONBLOCK`，必须是普通文件；
 - 写入同目录临时文件 + `O_EXCL | O_NOFOLLOW` + fsync + rename；
 - `withFileLock()` 按路径串行化读-改-写；

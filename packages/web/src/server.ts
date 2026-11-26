@@ -88,6 +88,8 @@ import {
 import { projectPendingAskUser } from '../../core/src/session/ask-user';
 import { countUserMessages, createGoalGrantEvent, projectGoalGrant } from '../../core/src/session/goal-grant';
 import { projectGoal } from '../../core/src/session/goal';
+import { projectPlanDocuments } from '../../core/src/session/development-plan';
+import { projectTeamBoard } from '../../core/src/session/team-board';
 import { GoalController } from '../../core/src/session/goal-controller';
 import { validateAskUserAnswers } from '../../core/src/tools/builtin/ask-user';
 import type { AskUserAnswerItem } from '../../core/src/tools/builtin/ask-user';
@@ -111,9 +113,8 @@ import { AttachmentError, parseSendAttachments, storeAttachments } from './attac
 import { browseDirectories, DirectoryBrowseError } from './fs-browse';
 import { exportSession } from './session-export';
 import { projectSessionMetrics } from './session-metrics';
-import { projectLastTurn, sessionPendingKind } from './session-status';
+import { sessionPendingKind } from './session-status';
 import type { SessionPendingKind } from './session-status';
-import { projectSubagentActivities } from './subagent-summaries';
 import { projectTraceEvents } from './trace-projection';
 import { projectTrajectory } from './trajectory';
 import {
@@ -814,7 +815,7 @@ async function route(
           title: session.title ?? null,
           workspaceId: workspace.id,
           workspaceName: workspace.name,
-          updatedAt: session.updatedAt,
+          updatedAt: session.updatedAt ?? session.createdAt,
           blank: session.blank,
           ...(session.agent === undefined ? {} : { agent: session.agent }),
           ...(session.mode === undefined ? {} : { mode: session.mode }),
@@ -849,7 +850,7 @@ async function route(
           title: session.title ?? null,
           workspaceId: workspace.id,
           workspaceName: workspace.name,
-          updatedAt: session.updatedAt,
+          updatedAt: session.updatedAt ?? session.createdAt,
           createdAt: session.createdAt,
           blank: session.blank,
           ...(session.description === undefined ? {} : { description: session.description }),
@@ -861,6 +862,30 @@ async function route(
         || (left.title ?? '').localeCompare(right.title ?? '')
         || left.id.localeCompare(right.id));
     return json(response, 200, { sessions });
+  }
+  if (request.method === 'GET' && url.pathname === '/api/bootstrap') {
+    // One round trip for everything the page reads on arrival. Each section is
+    // the same payload its own route returns, so a later refresh of one section
+    // stays on that route.
+    const [permissions, askUser, webSearch, archive, models, agents, roles, roleEntries, modelSources, mcpServers, modes] = await Promise.all([
+      options.permissionSettings?.read() ?? null,
+      options.askUserSettings?.read() ?? null,
+      options.webSearchSettings?.read() ?? null,
+      options.archiveSettings?.read() ?? null,
+      options.modelCatalog?.() ?? [],
+      options.listAgents?.() ?? [],
+      options.listRoles?.() ?? [],
+      options.roleSettings?.list() ?? { roles: [] },
+      options.modelSettings?.list() ?? { sources: [] },
+      options.mcpSettings?.list() ?? { servers: [], transports: [] },
+      options.modeStore === undefined
+        ? { modes: [], defaultMode: 'standard' }
+        : Promise.all([options.modeStore.list(), options.modeStore.defaultId()]).then(([listed, defaultMode]) => ({ modes: listed, defaultMode })),
+    ]);
+    return json(response, 200, {
+      permissions, askUser, webSearch, archive,
+      models, agents, roles, roleEntries, modelSources, mcpServers, modes,
+    });
   }
   if (request.method === 'GET' && url.pathname === '/api/agents') {
     return json(response, 200, { agents: await options.listAgents?.() ?? [] });
@@ -1276,46 +1301,54 @@ async function route(
     // Archived sessions keep their transcripts but leave the default listing.
     // `?archived=1` is the workspace-local lookup; the dialog itself reads
     // `GET /api/sessions/archived`, which spans every registered workspace.
+    // The transcript itself is not read here: a row only needs the summary the
+    // store folds from the head and tail of each log. Opening a session is what
+    // loads its messages.
     const archivedOnly = url.searchParams.get('archived') === '1';
-    const listed = (await options.store.list())
-      .filter((item) => item.workspace === workspace.path)
+    const requestedLimit = Number(url.searchParams.get('limit') ?? '');
+    const requestedOffset = Number(url.searchParams.get('offset') ?? '0');
+    const paged = Number.isFinite(requestedLimit) && requestedLimit > 0;
+    const pageLimit = paged ? Math.min(100, Math.max(1, Math.trunc(requestedLimit))) : undefined;
+    const pageOffset = Number.isFinite(requestedOffset) ? Math.max(0, Math.trunc(requestedOffset)) : 0;
+    const listed = (await options.store.list(workspace.path))
       .filter((item) => (item.archived === true) === archivedOnly);
-    const opened = await Promise.all(listed.map(async (item) => {
+    // A plan review or question can outlive its turn, and the row has to keep
+    // saying so. Only a session whose last persisted event is that request is
+    // opened; every other transcript stays unread until the session is opened.
+    const ordered = listed.slice().sort((left, right) =>
+      Number(right.pinned === true) - Number(left.pinned === true)
+      || (right.updatedAt ?? right.createdAt) - (left.updatedAt ?? left.createdAt));
+    // Children never take a sidebar row, but a parent row counts the ones that
+    // are still running. They ride along with whichever page is asked for.
+    const children = ordered.filter((item) => item.parentSessionId !== undefined || item.depth !== undefined);
+    const roots = ordered.filter((item) => item.parentSessionId === undefined && item.depth === undefined);
+    const rootPage = pageLimit === undefined ? roots : roots.slice(pageOffset, pageOffset + pageLimit);
+    const page = [...rootPage, ...children];
+    const resting = await Promise.all(page.map(async (item) => {
+      if (item.restingRequest !== true || running.has(`${workspace.path}\0${item.id}`)) return null;
       try {
-        return { item, events: (await options.store.open(item.workspace, item.id)).events };
+        return { id: item.id, events: (await options.store.open(item.workspace, item.id)).events };
       } catch {
-        return { item, events: undefined };
+        return null;
       }
     }));
-    const eventsById = new Map(opened.map((entry) => [entry.item.id, entry.events]));
-    // A child's status and token total are read from its parent's start/end
-    // events and its own transcript, so one pass over the workspace answers
-    // both without a second listing per child.
-    const activities = projectSubagentActivities({
-      summaries: listed,
-      events: (sessionId) => eventsById.get(sessionId),
-    });
-    const summaries = opened.map(({ item, events }) => {
-      const agent = events === undefined ? undefined : projectAgentSelection(events);
-      const activity = activities.get(item.id);
+    const restingEvents = new Map(resting.flatMap((item) => item === null ? [] : [[item.id, item.events]]));
+    const summaries = page.map((item) => {
       const turn = running.get(`${workspace.path}\0${item.id}`);
-      const pending = sessionPendingKind(turn?.approval?.pendingPrompts() ?? [], events);
-      const lastTurn = events === undefined ? null : projectLastTurn(events);
+      const pending = sessionPendingKind(turn?.approval?.pendingPrompts() ?? [], restingEvents.get(item.id));
       return {
         ...item,
-        ...(agent?.status === 'selected' ? { agent: agent.agent } : {}),
-        ...(activity === undefined ? {} : activity),
-        // Run state, waiting interaction and the last outcome are host facts, so
-        // a row never has to depend on the tab that happens to follow the turn.
+        // Run state and the interaction it waits on are host facts, so a row
+        // never has to depend on the tab that happens to follow the turn. How
+        // the last turn ended is part of the transcript and arrives with it.
         running: turn !== undefined,
         ...(pending === null ? {} : { pending }),
-        ...(lastTurn === null ? {} : { lastTurn }),
       };
     });
     return json(response, 200, {
-      sessions: summaries.sort((left, right) =>
-        Number(right.pinned === true) - Number(left.pinned === true)
-        || right.updatedAt - left.updatedAt),
+      sessions: summaries,
+      total: roots.length,
+      ...(pageLimit === undefined ? {} : { offset: pageOffset, limit: pageLimit }),
     });
   }
   if (request.method === 'POST' && parts.length === 4) {
@@ -1473,6 +1506,7 @@ async function route(
       askUser: projectPendingAskUser(handle.events),
       pendingApproval: projectPendingPermission(handle.events),
       todos: projectTodos(handle.events),
+      ...await teamBoardProjection(options.store, handle),
       events: projectTraceEvents(handle.events),
       trajectory: projectTrajectory(handle.events),
       metrics: projectSessionMetrics(handle.events),
@@ -2780,6 +2814,31 @@ function resolvedModelSummary(runtime: ResolvedSessionRuntime): Record<string, u
     ...(model.maxTokens === undefined ? {} : { maxTokens: model.maxTokens }),
     capabilities: model.capabilities,
   };
+}
+
+/**
+ * Plan and board for this session, or for its root when this session is a member.
+ * A child page shows the same board the coordinator is working from.
+ */
+async function teamBoardProjection(
+  store: WebHostOptions['store'],
+  handle: SessionHandle,
+): Promise<{ plans: ReturnType<typeof projectPlanDocuments>; teamBoard: ReturnType<typeof projectTeamBoard> }> {
+  const root = await teamRootHandle(store, handle);
+  return {
+    plans: projectPlanDocuments(root.events),
+    teamBoard: projectTeamBoard(root.events),
+  };
+}
+
+async function teamRootHandle(store: WebHostOptions['store'], handle: SessionHandle): Promise<SessionHandle> {
+  const parentId = handle.header.parentSessionId;
+  if (parentId === undefined) return handle;
+  try {
+    return await store.open(handle.header.workspace, parentId);
+  } catch {
+    return handle;
+  }
 }
 
 function teamSnapshot(handle: SessionHandle): {

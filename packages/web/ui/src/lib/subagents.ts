@@ -90,7 +90,10 @@ export function subagentRows(sessions: readonly SessionSummary[], rootId: string
 function toRow(session: SessionSummary): SubagentRow {
   const description = text(session.description);
   const title = text(session.title);
-  const status: SubagentStatus = session.subagentStatus ?? 'idle';
+  // A child's own turn is not separately subscribed. The host reports it as
+  // running while its turn is open; anything else waits for the transcript,
+  // which only the opened session loads.
+  const status: SubagentStatus = session.running === true ? 'running' : session.subagentStatus ?? 'idle';
   const createdAt = typeof session.createdAt === 'number' ? session.createdAt : 0;
   const updatedAt = typeof session.updatedAt === 'number' ? session.updatedAt : 0;
   return {

@@ -53,6 +53,8 @@ describe('SessionStore', () => {
 
     expect(sessionPath(root, '/Users/example/project', 'agent/one')).toContain('agent~002Fone');
     expect((await store.list())[0]?.id).toBe('agent/one');
+    expect((await store.list('/Users/example/project')).map((item) => item.id)).toEqual(['agent/one']);
+    expect(await store.list('/other')).toEqual([]);
     expect((await store.open('/Users/example/project', 'agent/one')).events).toHaveLength(1);
   });
 
@@ -64,6 +66,24 @@ describe('SessionStore', () => {
 
     const reopened = await new SessionStore(root).open('/workspace', 'agent');
     expect(reopened.events).toHaveLength(1);
+  });
+
+  it('summarizes a long log from its tail without reading the middle', async () => {
+    const root = await mkdtemp(join(tmpdir(), 'omniagent-session-'));
+    const store = new SessionStore(root);
+    const handle = await store.create({ id: 'long', workspace: '/workspace', cwd: '/workspace' });
+    await handle.append({ type: 'message/user', data: { text: 'x'.repeat(300_000) } });
+    await handle.append({ type: 'agent/selected', data: { version: 1, agent: 'builder' } });
+    await handle.append({ type: 'session/pinned', data: { pinned: true } });
+    await handle.append({ type: 'session/title', data: { title: 'Long one', messageSeqs: [], source: { kind: 'user' } } });
+
+    const [summary] = await new SessionStore(root).list('/workspace');
+    expect(summary).toMatchObject({ id: 'long', agent: 'builder', pinned: true, title: 'Long one' });
+    // Activity needs the whole log, and the middle was never read.
+    expect(summary?.blank).toBeUndefined();
+    expect(summary?.updatedAt).toBeUndefined();
+    expect(summary?.eventCount).toBeUndefined();
+    expect((await new SessionStore(root).open('/workspace', 'long')).events).toHaveLength(4);
   });
 
   it.each(['open', 'flush'] as const)(

@@ -88,8 +88,8 @@ describe('workspace sidebar', () => {
         workspacesLoading: false, sessionsLoading: false, sessionId: 'shared',
         sessions: [{ id: 'shared', title: 'Alpha session' }],
         sessionsByWorkspace: {
-          a: { sessions: [{ id: 'shared', title: 'Alpha session' }], loading: false, error: '', loaded: true },
-          b: { sessions: [{ id: 'shared', title: 'Beta session' }], loading: false, error: '', loaded: false },
+          a: { sessions: [{ id: 'shared', title: 'Alpha session' }], loading: false, error: '', loaded: true, total: 1 },
+          b: { sessions: [{ id: 'shared', title: 'Beta session' }], loading: false, error: '', loaded: false, total: 1 },
         },
       };
       vi.spyOn(testStore, 'getSnapshot').mockImplementation(() => state);
@@ -134,10 +134,10 @@ describe('workspace sidebar', () => {
       workspaceRow(tree, '/b').props?.onClick?.();
       tree = render();
       expect(workspaceRow(tree, '/b').props?.['aria-expanded']).toBe(true);
+      // Collapsing and expanding a group that already loaded reuses the list.
+      // A group that was never loaded is fetched only when the user expands it.
       expect(load).toHaveBeenCalledTimes(1);
-      state = { ...state, sessionsByWorkspace: { ...state.sessionsByWorkspace, a: { ...state.sessionsByWorkspace.a, loaded: false } } };
-      render();
-      expect(load).toHaveBeenCalledWith('a', false);
+      expect(load).toHaveBeenCalledWith('b', false);
     } finally {
       vi.doUnmock('react');
       vi.resetModules();
@@ -150,7 +150,7 @@ describe('workspace sidebar', () => {
       workspaceId: 'b',
       sessions: [{ id: 'beta-session', title: 'Beta session' }],
       sessionsByWorkspace: {
-        a: { sessions: [{ id: 'alpha-session', title: 'Alpha session' }], loading: false, error: '', loaded: true },
+        a: { sessions: [{ id: 'alpha-session', title: 'Alpha session' }], loading: false, error: '', loaded: true, total: 1 },
       },
     });
     expect(html.indexOf('>任务<')).toBeGreaterThan(html.indexOf('Beta session'));
@@ -214,21 +214,31 @@ describe('workspace sidebar', () => {
     const html = renderSidebar({
       sessions: [
         { id: 'root', description: 'Parent work', updatedAt: 2 },
-        { id: 'child', parentSessionId: 'root', description: 'Child work', subagentStatus: 'running' },
+        { id: 'child', parentSessionId: 'root', description: 'Child work', running: true },
       ],
+      statusBySession: {
+        [JSON.stringify(['a', 'child'])]: {
+          running: true, pending: null, lastTurnFailed: false, completionUnread: false,
+        },
+      },
     });
     expect(html).not.toContain('Child work');
     expect(html).toContain('data-state="ongoing"');
     expect(html).toContain('1 subagents running');
   });
 
-  it('renders five sessions per group and offers the next five on demand', () => {
-    const sessions = Array.from({ length: 12 }, (_, index) => ({
+  it('offers the next page while the workspace has sessions beyond the ones loaded', () => {
+    const sessions = Array.from({ length: 5 }, (_, index) => ({
       id: `session-${index}`,
       title: `Session ${index}`,
       updatedAt: 100 - index,
     }));
-    const html = renderSidebar({ sessions });
+    const html = renderSidebar({
+      sessions,
+      sessionsByWorkspace: {
+        a: { sessions, loading: false, error: '', loaded: true, total: 12 },
+      },
+    });
     expect(html).toContain('Session 4');
     expect(html).not.toContain('Session 5');
     expect(html).toContain('Show more (5)');

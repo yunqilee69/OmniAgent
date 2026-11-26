@@ -40,8 +40,6 @@ import sidebarCss from '../styles/dsh/sidebar.module.css';
 import browserCss from '../styles/dsh/sidebar-browser.module.css';
 import appCss from '../styles/app.module.css';
 
-/** Session rows a workspace group renders before the "Show more" button does. */
-const SESSIONS_PER_PAGE = 5;
 
 function baseName(path: string): string {
   const parts = path.split(/[\\/]/).filter((part) => part !== '');
@@ -345,9 +343,6 @@ export function Sidebar({ drawer, onClose, onBrowseWorkspace }: { drawer: boolea
   const [deleteTarget, setDeleteTarget] = useState<{ workspaceId: string; id: string; name: string } | null>(null);
   const [copied, setCopied] = useState<number | null>(null);
   const [expandedOverrides, setExpandedOverrides] = useState<Record<string, boolean>>({});
-  // One window per workspace group: the sidebar renders the newest few sessions
-  // and grows by a page per "Show more" click instead of dumping the whole list.
-  const [visibleCounts, setVisibleCounts] = useState<Record<string, number>>({});
   const [archiveOpen, setArchiveOpen] = useState(false);
   useEffect(() => {
     if (app.workspaceId === null) return;
@@ -355,13 +350,6 @@ export function Sidebar({ drawer, onClose, onBrowseWorkspace }: { drawer: boolea
     setExpandedOverrides((value) => value[workspaceId] === undefined ? { ...value, [workspaceId]: true } : value);
   }, [app.workspaceId]);
   const workspace = app.workspaces.find((item) => item.id === app.workspaceId);
-  const defaultWorkspace = app.workspaces.find((item) => item.isDefault === true);
-  const defaultList = defaultWorkspace === undefined ? undefined : app.sessionsByWorkspace[defaultWorkspace.id];
-  useEffect(() => {
-    if (defaultWorkspace === undefined || app.workspaceId === null || app.workspaceId === defaultWorkspace.id) return;
-    if (defaultList?.loaded || defaultList?.loading || defaultList?.error) return;
-    void store.loadSessions(defaultWorkspace.id, false);
-  }, [defaultWorkspace?.id, app.workspaceId, defaultList?.loaded, defaultList?.loading, defaultList?.error]);
   const select = (workspaceId: string, id: string): void => {
     store.selectSession(id, workspaceId);
     if (drawer) onClose();
@@ -541,8 +529,8 @@ export function Sidebar({ drawer, onClose, onBrowseWorkspace }: { drawer: boolea
                   const active = item.id === app.workspaceId;
                   const expanded = item.isDefault === true || (expandedOverrides[item.id] ?? active);
                   const list = app.sessionsByWorkspace[item.id] ?? (active
-                    ? { sessions: app.sessions, loading: app.sessionsLoading, error: app.sessionError, loaded: true }
-                    : { sessions: [], loading: false, error: '', loaded: false });
+                    ? { sessions: app.sessions, loading: app.sessionsLoading, error: app.sessionError, loaded: true, total: app.sessions.length }
+                    : { sessions: [], loading: false, error: '', loaded: false, total: 0 });
                   const needle = query.trim().toLowerCase();
                   // Child sessions are reached from the header team card, not
                   // from the task list: one row per conversation the user started.
@@ -553,20 +541,14 @@ export function Sidebar({ drawer, onClose, onBrowseWorkspace }: { drawer: boolea
                   // A subagent turn never reaches this tab's turn registry, so the
                   // parent row carries the work its running children still owe.
                   const subagentCounts = runningSubagentCounts(list.sessions, (child) =>
-                    app.statusBySession[sessionKey(item.id, child.id)]?.running === true
-                    || child.subagentStatus === 'running');
+                    app.statusBySession[sessionKey(item.id, child.id)]?.running === true);
                   const sessions = needle === '' ? roots : roots.filter((session) =>
                     [session.id, session.title, session.agent, session.agentId, session.cwd, session.description]
                       .some((value) => String(value ?? '').toLowerCase().includes(needle)));
-                  // A search result set is shown whole: a hit the user cannot see
-                  // would read as "not found". The selected row always stays
-                  // visible even when it sits below the current window.
-                  const selectedIndex = needle === '' && active
-                    ? sessions.findIndex((session) => session.id === app.sessionId)
-                    : -1;
-                  const visibleCount = Math.max(visibleCounts[item.id] ?? SESSIONS_PER_PAGE, selectedIndex + 1);
-                  const visible = needle === '' ? sessions.slice(0, visibleCount) : sessions;
-                  const hidden = sessions.length - visible.length;
+                  const visible = sessions;
+                  // Rows still on the host, past the pages this group has loaded.
+                  // A search only knows the pages already fetched, so it shows those.
+                  const hidden = needle === '' ? Math.max(0, (list.total ?? sessions.length) - sessions.length) : 0;
                   const menuOpen = workspaceMenuOpen === item.id;
                   const workspaceLabel = item.name || item.path || item.id;
                   const rowMenuItems: MenuEntry[] = [
@@ -789,14 +771,9 @@ export function Sidebar({ drawer, onClose, onBrowseWorkspace }: { drawer: boolea
                       <button
                         type="button"
                         className={browserCss.showMore}
-                        onClick={() => {
-                          setVisibleCounts((value) => ({
-                            ...value,
-                            [item.id]: (value[item.id] ?? SESSIONS_PER_PAGE) + SESSIONS_PER_PAGE,
-                          }));
-                        }}
+                        onClick={() => { void store.loadMoreSessions(item.id); }}
                       >
-                        {t('Show more ({count})', { count: Math.min(SESSIONS_PER_PAGE, hidden) })}
+                        {t('Show more ({count})', { count: Math.min(5, hidden) })}
                       </button>
                     )}
                   </div>
