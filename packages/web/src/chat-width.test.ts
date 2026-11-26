@@ -37,6 +37,22 @@ describe('conversation width', () => {
     expect(table).toMatch(/max-width:\s*var\(--dsh-chat-table-cell-max, 320px\)/);
   });
 
+  it('keeps conversation handles above the transcript and below the composer', () => {
+    const css = readFileSync(new URL('../ui/src/styles/app.module.css', import.meta.url), 'utf8');
+    const handle = css.match(/\.widthHandle\s*\{[\s\S]*?\n\}/)?.[0] ?? '';
+    const handleZIndex = Number(handle.match(/z-index:\s*(\d+)/)?.[1]);
+    expect(handleZIndex).toBeGreaterThan(0);
+    expect(handleZIndex).toBeLessThan(9);
+
+    const composer = css.match(/\.composerArea\s*\{[\s\S]*?\n\}/)?.[0] ?? '';
+    expect(composer).toMatch(/z-index:\s*9/);
+
+    const chatCss = readFileSync(new URL('../ui/src/styles/dsh/chat-view.module.css', import.meta.url), 'utf8');
+    const root = chatCss.match(/\.root\s*\{[\s\S]*?\n\}/)?.[0] ?? '';
+    expect(root).toMatch(/position:\s*relative/);
+    expect(root).not.toMatch(/z-index:/);
+  });
+
   it('mounts a handle on each side of the transcript', () => {
     const originalConsoleError = console.error;
     const consoleError = vi.spyOn(console, 'error').mockImplementation((message, ...args) => {

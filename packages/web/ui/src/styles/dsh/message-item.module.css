@@ -53,6 +53,22 @@
 .action:focus-visible { outline: 1.5px solid var(--dsw-focus-ring-color, var(--dsw-alias-state-business-primary)); }
 .action svg { width: 16px; height: 16px; }
 
+.modelSwitch {
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  gap: 8px;
+  min-height: 36px;
+  margin: 12px 0;
+  border-top: 1px solid var(--dsw-alias-border-l3);
+  color: var(--dsw-alias-label-tertiary);
+  font-size: 13px;
+}
+
+.modelSwitch > span:first-child {
+  color: var(--dsw-alias-label-secondary);
+}
+
 .userRow {
   display: flex;
   flex-direction: column;

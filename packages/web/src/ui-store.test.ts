@@ -34,6 +34,7 @@ interface DetailOptions {
   text?: string;
   agent?: AgentSummary;
   binding?: unknown;
+  resolvedModel?: unknown;
   permission?: string | null;
   plan?: boolean;
   todos?: unknown;
@@ -48,7 +49,7 @@ function detail(options: DetailOptions = {}) {
     permission: { preset: options.permission === undefined ? 'workspace-write' : options.permission },
     agent: options.agent ?? defaultAgent,
     model: options.binding ?? { version: 2, kind: 'agent' },
-    resolvedModel: null,
+    resolvedModel: options.resolvedModel ?? null,
     agentError: null,
     agentWarnings: [],
     agentSkills: options.agentSkills,
@@ -943,9 +944,12 @@ describe('workbench store', () => {
       if (url === '/api/workspaces/a/sessions/shared/model' && init?.method === 'POST') {
         const body = JSON.parse(String(init.body));
         switches.push(body);
-        return json({ model: body, resolvedModel: { provider: 'provider-a', model: 'model-2', name: 'Model Two', capabilities: { imageInput: false } } });
+        const model = body.model === 'model-1' ? 'Model One' : 'Model Two';
+        return json({ model: body, resolvedModel: { provider: 'provider-a', model: body.model, name: model, capabilities: { imageInput: false } } });
       }
-      if (url === '/api/workspaces/a/sessions/shared') return json(detail());
+      if (url === '/api/workspaces/a/sessions/shared') {
+        return json(detail({ resolvedModel: { provider: 'provider-a', model: 'model-1', name: 'Model One', capabilities: { imageInput: false } } }));
+      }
       return undefined;
     }));
     expect(store.getSnapshot().models.map((model) => model.name)).toEqual(['Model One', 'Model Two']);
@@ -963,6 +967,10 @@ describe('workbench store', () => {
       { version: 2, kind: 'model', provider: 'provider-a', model: 'model-2' },
     ]);
     expect(store.currentEntry()?.binding).toEqual(binding);
+    expect(store.currentEntry()?.transcript.some((item) => item.kind === 'notice' && item.text.includes('Model One') && item.text.includes('Model Two'))).toBe(true);
+    expect(JSON.parse(localStorage.getItem('omniagent.model-notices:a:shared') ?? '[]')).toHaveLength(1);
+    await store.loadDetail('a', 'shared', true);
+    expect(store.currentEntry()?.transcript.some((item) => item.kind === 'notice' && item.text.includes('Model One') && item.text.includes('Model Two'))).toBe(true);
     expect(store.currentEntry()?.modelSaving).toBe(false);
     expect(store.currentEntry()?.modelError).toBe('');
   });

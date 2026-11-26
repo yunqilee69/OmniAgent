@@ -19,6 +19,45 @@
   overflow-y: clip;
 }
 
+.questionRail {
+  position: absolute;
+  z-index: 4;
+  inset: 24px auto 24px 8px;
+  display: flex;
+  flex-direction: column;
+  gap: 8px;
+  align-items: center;
+  width: 24px;
+  overflow: auto;
+  scrollbar-width: none;
+  pointer-events: none;
+}
+
+.questionRail::-webkit-scrollbar { display: none; }
+
+.questionAnchor {
+  pointer-events: auto;
+  display: grid;
+  place-items: center;
+  flex: none;
+  width: 20px;
+  height: 20px;
+  padding: 0;
+  border: 0;
+  border-radius: 50%;
+  color: var(--dsw-alias-label-tertiary);
+  background: var(--dsw-alias-bg-base);
+  font: inherit;
+  font-size: 10px;
+  cursor: pointer;
+}
+
+.questionAnchor:hover,
+.questionAnchor:focus-visible {
+  color: var(--dsw-alias-label-primary);
+  background: var(--dsw-alias-interactive-bg-hover-solid);
+}
+
 .scroll {
   flex: 1 1 auto;
   min-height: 0;

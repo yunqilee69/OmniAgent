@@ -446,7 +446,9 @@
   position: absolute;
   top: 0;
   bottom: 0;
-  z-index: 0;
+  /* Keep the handle above the transcript's positioned root while leaving it
+     below the composer seat and its upward-opening menus. */
+  z-index: 3;
   width: min(10px, calc((100% - var(--dsh-chat-content-width)) / 2 - 48px));
   cursor: col-resize;
 }

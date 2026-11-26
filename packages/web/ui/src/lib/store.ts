@@ -79,6 +79,7 @@ import {
   pendingPlanReview,
   type ApprovalRequest,
   type LiveTurnState,
+  type NoticeItem,
   type TranscriptItem,
   type TurnMeta,
 } from './events.ts';
@@ -343,6 +344,30 @@ function writeQueued(workspaceId: string, sessionId: string, items: readonly Que
   } catch {
     return false;
   }
+}
+
+function modelNoticeStorageKey(workspaceId: string, sessionId: string): string {
+  return `omniagent.model-notices:${workspaceId}:${sessionId}`;
+}
+
+function readModelNotices(workspaceId: string, sessionId: string): NoticeItem[] {
+  try {
+    const parsed: unknown = JSON.parse(localStorage.getItem(modelNoticeStorageKey(workspaceId, sessionId)) ?? '[]');
+    if (!Array.isArray(parsed)) return [];
+    return parsed.flatMap((value): NoticeItem[] => {
+      if (typeof value !== 'object' || value === null) return [];
+      const item = value as Partial<NoticeItem>;
+      if (item.kind !== 'notice' || typeof item.id !== 'string' || !Number.isInteger(item.turn)
+        || typeof item.text !== 'string' || item.tone !== 'info') return [];
+      return [{ kind: 'notice', id: item.id, turn: item.turn!, tone: 'info', text: item.text }];
+    });
+  } catch {
+    return [];
+  }
+}
+
+function writeModelNotices(workspaceId: string, sessionId: string, notices: readonly NoticeItem[]): void {
+  storageSet(modelNoticeStorageKey(workspaceId, sessionId), JSON.stringify(notices));
 }
 
 /** Pinned sessions lead the sidebar; within each group the newest activity wins. */
@@ -1860,6 +1885,9 @@ export class AppStore {
       // Reuse the ids of whatever is on screen so unchanged replies keep their
       // component state, then compare against it below.
       const hydrated = hydrateTranscript(messages as never, events, displayed.run?.transcript ?? displayed.transcript);
+      const storedNotices = readModelNotices(workspaceId, sessionId);
+      const noticeItems = storedNotices.filter((notice) => !hydrated.transcript.some((item) => item.id === notice.id));
+      const hydratedWithNotices = { ...hydrated, transcript: [...hydrated.transcript, ...noticeItems] };
       // A reload drops the live review prompt. A review persisted with the session
       // comes back either way; a still-running turn can also be restored from the
       // unanswered exit_plan_mode call until its own prompt arrives.
@@ -1897,8 +1925,8 @@ export class AppStore {
         goal: normalizeGoal(body.goal),
         goalError: '',
         todos: normalizeTodos(body.todos),
-        transcript: hydrated.transcript,
-        turns: hydrated.turns,
+        transcript: hydratedWithNotices.transcript,
+        turns: hydratedWithNotices.turns,
         events,
         audit: Array.isArray(body.audit) ? body.audit : [],
         trajectory: body.trajectory ?? null,
@@ -1912,11 +1940,11 @@ export class AppStore {
         outcome: '',
         running: body.running === true,
         ...(restoredReview !== undefined
-          ? { run: { ...createLiveState(), ...hydrated, planReview: restoredReview } }
+          ? { run: { ...createLiveState(), ...hydratedWithNotices, planReview: restoredReview } }
           : restoredAskUser !== undefined
-             ? { run: { ...createLiveState(), ...hydrated, askUser: restoredAskUser } }
+             ? { run: { ...createLiveState(), ...hydratedWithNotices, askUser: restoredAskUser } }
              : closedApproval !== undefined
-            ? { run: { ...createLiveState(), ...hydrated, approval: closedApproval } }
+            ? { run: { ...createLiveState(), ...hydratedWithNotices, approval: closedApproval } }
             : reconcile && body.running !== true
               ? { run: undefined }
               : {}),
@@ -2397,7 +2425,9 @@ export class AppStore {
       return false;
     }
     let baseTurn = -1;
-    for (const item of entry.transcript) baseTurn = Math.max(baseTurn, item.turn);
+    for (const item of entry.transcript) {
+      if (item.kind !== 'notice' || !item.id.startsWith('model-switch:')) baseTurn = Math.max(baseTurn, item.turn);
+    }
     for (const turn of entry.turns) baseTurn = Math.max(baseTurn, turn.index);
     baseTurn += 1;
     const run = createLiveState();
@@ -3442,9 +3472,45 @@ export class AppStore {
       // The switch answers with the new window, so the meter's denominator
       // follows the model instead of waiting for the next turn.
       const reading = parseContextEstimate(body.context);
+      const resolvedModel = validateResolvedModel(body.resolvedModel)
+        ?? resolveBindingModel(binding, entry.mode?.agent, this.state.agents, this.state.roles, this.state.models);
+      const previousModel = entry.resolvedModel
+        ?? (entry.binding === null ? null : resolveBindingModel(entry.binding, entry.mode?.agent, this.state.agents, this.state.roles, this.state.models));
+      const modelLabel = (model: ResolvedModel | null): string => model?.name ?? (model === null ? '' : `${model.provider}/${model.model}`);
+      const previousLabel = modelLabel(previousModel);
+      const nextLabel = modelLabel(resolvedModel);
+      const notices = readModelNotices(workspaceId, sessionId);
+      let switchNotice: NoticeItem | undefined;
+      let run = this.liveRuns.get(key) ?? entry.run;
+      if (previousModel !== null && resolvedModel !== null
+        && (previousModel.provider !== resolvedModel.provider || previousModel.model !== resolvedModel.model)) {
+        const activeTranscript = run?.transcript ?? entry.transcript;
+        const maxTurn = Math.max(-1,
+          ...activeTranscript.filter((item) => !item.id.startsWith('model-switch:')).map((item) => item.turn),
+          ...entry.turns.map((turn) => turn.index),
+          ...(run?.turns.map((turn) => turn.index) ?? []),
+        );
+        const notice: NoticeItem = {
+          kind: 'notice',
+          id: `model-switch:${Date.now()}:${notices.length}:${resolvedModel.provider}/${resolvedModel.model}`,
+          turn: maxTurn + 1,
+          tone: 'info',
+          text: translator(this.state.locale)('Model switched: {from} → {to}', { from: previousLabel, to: nextLabel }),
+        };
+        switchNotice = notice;
+        notices.push(notice);
+        writeModelNotices(workspaceId, sessionId, notices);
+        if (run !== undefined) {
+          run.transcript.push(notice);
+          this.liveRuns.set(key, run);
+        }
+      }
       this.patchEntry(key, {
         binding: selected,
-        resolvedModel: validateResolvedModel(body.resolvedModel),
+        resolvedModel,
+        ...(run === undefined && switchNotice === undefined ? {} : {
+          ...(run === undefined ? { transcript: [...entry.transcript, switchNotice!] } : { run }),
+        }),
         ...(reading === undefined ? {} : { contextEstimate: carryProjection(entry.contextEstimate, reading) }),
         modelSaving: false,
       });

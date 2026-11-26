@@ -296,6 +296,14 @@ function AssistantFailureView({ item, t }: {
 }
 
 function NoticeView({ item, t }: { item: Extract<TranscriptItem, { kind: 'notice' }>; t: Translate }): ReactNode {
+  if (item.id.startsWith('model-switch:')) {
+    return (
+      <div className={messageCss.modelSwitch} role="status">
+        <span aria-hidden>↔</span>
+        <span>{item.text}</span>
+      </div>
+    );
+  }
   return (
     <div className={messageCss.turnErrorRow} role="status">
       <StateDot state={item.tone === 'error' ? 'error' : 'warning'} className={messageCss.turnErrorDot} />
@@ -304,6 +312,37 @@ function NoticeView({ item, t }: { item: Extract<TranscriptItem, { kind: 'notice
         <span className={messageCss.turnErrorMessage}>{item.text}</span>
       </div>
     </div>
+  );
+}
+
+function questionPreview(text: string): string {
+  return text.trim();
+}
+
+function QuestionRail({ turns, t }: { turns: readonly DisplayTurn[]; t: Translate }): ReactNode {
+  const questions = turns.filter((turn) => turn.user !== undefined && turn.goalRound === undefined);
+  if (questions.length === 0) return null;
+  return (
+    <nav className={chatCss.questionRail} aria-label={t('Conversation questions')}>
+      {questions.map((turn, index) => {
+        const text = turn.user?.text ?? '';
+        const label = text === '' ? t('Question {number}', { number: index + 1 }) : questionPreview(text);
+        return (
+          <Tooltip key={turn.index} label={label} side="right" delayMs={250} portal>
+            <button
+              type="button"
+              className={chatCss.questionAnchor}
+              aria-label={label}
+              onClick={() => {
+                document.getElementById(`conversation-turn-${turn.index}`)?.scrollIntoView({ block: 'center', behavior: 'smooth' });
+              }}
+            >
+              <span aria-hidden>{index + 1}</span>
+            </button>
+          </Tooltip>
+        );
+      })}
+    </nav>
   );
 }
 
@@ -402,8 +441,14 @@ function TurnView({ turn, processDisplay, reviewing, locale, t }: {
   const toolLabel = turn.toolCount === 1 ? t('1 tool') : t('{count} tools', { count: turn.toolCount });
   const label = turn.live ? t('Working') : durationText(t, turn);
   const duration = !turn.live && turn.final !== undefined ? recordedSeconds(turn.startedAt, turn.endedAt) : undefined;
+  const turnNotices = turn.user === undefined
+    ? []
+    : turn.extras.filter((item): item is Extract<TranscriptItem, { kind: 'notice' }> => item.kind === 'notice' && item.id.startsWith('model-switch:'));
+  const otherExtras = turn.extras.filter((item) => !(item.kind === 'notice' && item.id.startsWith('model-switch:')));
   return (
-    <div className={css.turn} data-live={turn.live || undefined}>
+    <>
+    {turnNotices.map((item) => <NoticeView key={item.id} item={item} t={t} />)}
+    <div id={`conversation-turn-${turn.index}`} className={css.turn} data-live={turn.live || undefined}>
       {turn.goalRound !== undefined && (
         <div className={css.goalDivider} data-state={turn.goalState} role="separator">
           <span>
@@ -474,8 +519,9 @@ function TurnView({ turn, processDisplay, reviewing, locale, t }: {
           />
         </div>
       )}
-      {turn.extras.map((item) => item.kind === 'notice' ? <NoticeView key={item.id} item={item} t={t} /> : null)}
+      {otherExtras.map((item) => item.kind === 'notice' ? <NoticeView key={item.id} item={item} t={t} /> : null)}
     </div>
+    </>
   );
 }
 
@@ -558,6 +604,7 @@ export function ConversationView({ entry, processDisplay, onOpenFile }: {
   return (
     <MarkdownDelegateProvider openFile={onOpenFile}>
     <div className={chatCss.root} data-chat-following-tail={awayFromBottom ? undefined : ''}>
+      <QuestionRail turns={turns} t={t} />
       <div className={chatCss.scroll} ref={scroll} data-conversation-scroll="">
         <div className={chatCss.column} ref={column}>
           {turns.length === 0 && (
