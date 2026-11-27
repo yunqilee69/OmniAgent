@@ -1,4 +1,4 @@
-import { useEffect, useLayoutEffect, useRef, useState, type ReactNode } from 'react';
+import { useEffect, useLayoutEffect, useMemo, useRef, useState, type ReactNode } from 'react';
 import clsx from 'clsx';
 import {
   DisclosureRow,
@@ -16,6 +16,7 @@ import {
   Tooltip,
   UserMessageBubble,
   useClipboardCopy,
+  type MarkdownLabels,
 } from '../../vendor/primitives/index.ts';
 import {
   groupTurns,
@@ -159,7 +160,7 @@ export function UserContent({ user }: { user: UserItem }): ReactNode {
   );
 }
 
-function ReasoningView({ text, running, t }: { text: string; running: boolean; t: Translate }): ReactNode {
+function ReasoningView({ text, running, t, labels }: { text: string; running: boolean; t: Translate; labels: MarkdownLabels }): ReactNode {
   const [expanded, setExpanded] = useState(false);
   const summary = firstLine(text);
   return (
@@ -187,7 +188,7 @@ function ReasoningView({ text, running, t }: { text: string; running: boolean; t
         <div className={reasoningCss.thinkBody}>
           <div className={assistantCss.root}>
             <div className={assistantCss.body}>
-              <MarkdownText text={text} labels={markdownLabels(t)} variant="compact" />
+              <MarkdownText text={text} streaming={running} labels={labels} variant="compact" />
             </div>
           </div>
         </div>
@@ -218,22 +219,23 @@ function CompactionView({ item, t }: { item: Extract<TranscriptItem, { kind: 'co
   );
 }
 
-function ProcessItem({ item, live, reviewing, t }: {
+function ProcessItem({ item, live, reviewing, t, labels }: {
   item: TranscriptItem;
   live: boolean;
   reviewing: boolean;
   t: Translate;
+  labels: MarkdownLabels;
 }): ReactNode {
   switch (item.kind) {
     case 'tool':
       return <ToolView item={item} live={live} reviewing={reviewing && item.call.name === 'exit_plan_mode' && item.result === undefined} />;
     case 'reasoning':
-      return <ReasoningView text={item.text} running={live && item.streaming} t={t} />;
+      return <ReasoningView text={item.text} running={live && item.streaming} t={t} labels={labels} />;
     case 'assistant':
       return (
         <div className={clsx(assistantCss.root, messageCss.message)}>
           <div className={assistantCss.body}>
-            <MarkdownText text={item.text} labels={markdownLabels(t)} />
+            <MarkdownText text={item.text} streaming={live && item.streaming} labels={labels} />
           </div>
         </div>
       );
@@ -427,12 +429,13 @@ function branchFromReply(
   return () => { void store.forkSession(sessionId, workspaceId, messageId); };
 }
 
-function TurnView({ turn, processDisplay, reviewing, locale, t }: {
+function TurnView({ turn, processDisplay, reviewing, locale, t, labels }: {
   turn: DisplayTurn;
   processDisplay: 'collapsed' | 'expanded';
   reviewing: boolean;
   locale: Locale;
   t: Translate;
+  labels: MarkdownLabels;
 }): ReactNode {
   const app = useApp();
   const [override, setOverride] = useState<boolean | null>(null);
@@ -490,7 +493,7 @@ function TurnView({ turn, processDisplay, reviewing, locale, t }: {
       {hasProcess && open && (
         <div className={groupCss.content}>
           {turn.process.map((item) => (
-            <ProcessItem key={item.id} item={item} live={turn.live === true} reviewing={reviewing} t={t} />
+            <ProcessItem key={item.id} item={item} live={turn.live === true} reviewing={reviewing} t={t} labels={labels} />
           ))}
         </div>
       )}
@@ -501,7 +504,7 @@ function TurnView({ turn, processDisplay, reviewing, locale, t }: {
               <MarkdownText
                 text={turn.final.text}
                 streaming={turn.final.streaming}
-                labels={markdownLabels(t)}
+                labels={labels}
                 textInteractionSource
               />
             )}
@@ -532,10 +535,12 @@ export function ConversationView({ entry, processDisplay, onOpenFile }: {
   onOpenFile?: ((path: string, options?: { line?: number }) => void) | undefined;
 }): ReactNode {
   const app = useApp();
-  const t = translator(app.locale);
+  const t = useMemo(() => translator(app.locale), [app.locale]);
+  const labels = useMemo(() => markdownLabels(t), [t]);
   const sessionId = app.sessionId;
   const scroll = useRef<HTMLDivElement | null>(null);
   const column = useRef<HTMLDivElement | null>(null);
+  const scrollFrame = useRef<number | null>(null);
   /**
    * The reader is following the tail, so new content scrolls into view.
    * Starts true: opening a conversation lands on its newest message instead of
@@ -562,16 +567,24 @@ export function ConversationView({ entry, processDisplay, onOpenFile }: {
     element.scrollTop = element.scrollHeight;
   };
 
+  const scheduleStickToBottom = (): void => {
+    if (scrollFrame.current !== null) return;
+    scrollFrame.current = requestAnimationFrame(() => {
+      scrollFrame.current = null;
+      if (following.current) stickToBottom();
+    });
+  };
+
   // A conversation opens on its newest message; switching sessions re-pins even
   // when the previous one was left scrolled up.
   useLayoutEffect(() => {
     following.current = true;
     setAwayFromBottom(false);
-    stickToBottom();
+    scheduleStickToBottom();
   }, [sessionId]);
 
   useLayoutEffect(() => {
-    if (following.current) stickToBottom();
+    if (following.current) scheduleStickToBottom();
   }, [turns.length, tail, live?.approval, live?.planReview]);
 
   // Content can also grow without a render here: decoded images, loaded fonts,
@@ -582,7 +595,7 @@ export function ConversationView({ entry, processDisplay, onOpenFile }: {
     const inner = column.current;
     if (element === null || inner === null || typeof ResizeObserver === 'undefined') return;
     const observer = new ResizeObserver(() => {
-      if (following.current) stickToBottom();
+      if (following.current) scheduleStickToBottom();
     });
     observer.observe(inner);
     observer.observe(element);
@@ -599,6 +612,11 @@ export function ConversationView({ entry, processDisplay, onOpenFile }: {
     };
     element.addEventListener('scroll', onScroll, { passive: true });
     return () => { element.removeEventListener('scroll', onScroll); };
+  }, []);
+
+  useEffect(() => () => {
+    if (scrollFrame.current !== null) cancelAnimationFrame(scrollFrame.current);
+    scrollFrame.current = null;
   }, []);
 
   return (
@@ -626,6 +644,7 @@ export function ConversationView({ entry, processDisplay, onOpenFile }: {
               reviewing={live?.planReview !== undefined && turn.live === true}
               locale={app.locale}
               t={t}
+              labels={labels}
             />
           ))}
           {entry.run !== undefined && entry.run.planReview === undefined && (
@@ -642,7 +661,7 @@ export function ConversationView({ entry, processDisplay, onOpenFile }: {
             onClick={() => {
               following.current = true;
               setAwayFromBottom(false);
-              stickToBottom();
+              scheduleStickToBottom();
             }}
           >
             <IconChevronDownOutlineRegular />

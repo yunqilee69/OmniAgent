@@ -39,14 +39,32 @@ export function createExitPlanModeTool(options: ExitPlanModeToolOptions): Tool {
       ctx.signal.throwIfAborted();
       // The review itself stays on disk when this turn is interrupted. The wait
       // still has to settle as a tool result, or the presenting turn never ends.
+      const interrupted = { ok: false, content: 'Plan review was interrupted before the user answered.' };
       let response: PlanReviewResponse;
+      let onAbort: (() => void) | undefined;
       try {
-        response = await options.review(plan, ctx.signal);
+        const aborted = new Promise<{ kind: 'aborted' }>((resolve) => {
+          onAbort = () => resolve({ kind: 'aborted' });
+          ctx.signal.addEventListener('abort', onAbort, { once: true });
+          if (ctx.signal.aborted) onAbort();
+        });
+        const reviewed = Promise.resolve()
+          .then(() => options.review(plan, ctx.signal))
+          .then(
+            (value) => ({ kind: 'reviewed' as const, value }),
+            (error: unknown) => ({ kind: 'error' as const, error }),
+          );
+        const result = await Promise.race([reviewed, aborted]);
+        if (ctx.signal.aborted || result.kind === 'aborted') return interrupted;
+        if (result.kind === 'error') throw result.error;
+        response = result.value;
       } catch (error) {
-        if (ctx.signal.aborted) return { ok: false, content: 'Plan review was interrupted before the user answered.' };
+        if (ctx.signal.aborted) return interrupted;
         throw error;
+      } finally {
+        if (onAbort) ctx.signal.removeEventListener('abort', onAbort);
       }
-      if (ctx.signal.aborted) return { ok: false, content: 'Plan review was interrupted before the user answered.' };
+      if (ctx.signal.aborted) return interrupted;
       if (response.approved) {
         await options.onApproved();
         return {

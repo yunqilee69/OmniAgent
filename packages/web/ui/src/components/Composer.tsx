@@ -1051,7 +1051,16 @@ export function Composer({ hero = false, onOpenPlanPreview }: { hero?: boolean; 
         <div className={appCss.queueDock} aria-label={t('Queued messages')}>
           <div className={appCss.queueHeader}>
             <IconQueueOutlineRegular />
+            <span>{t('Messages waiting to send')}</span>
             <span>{t('{count} queued', { count: entry.queued.length })}</span>
+            {entry.queuePaused && <span role="status">{t('Queue paused')}</span>}
+            {entry.queuePaused && (
+              <button type="button" className={appCss.queueResume} aria-label={t('Continue queued messages')}
+                onClick={() => { void store.resumeQueue(); }}>
+                <IconPlayOutlineRegular size={12} />
+                <span>{t('Continue')}</span>
+              </button>
+            )}
           </div>
           <ul className={appCss.queueList}>
             {entry.queued.map((item) => (

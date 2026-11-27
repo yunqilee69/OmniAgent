@@ -12,7 +12,7 @@ import type { SessionOptions } from './session';
 import { contextBreakdown } from './context/projection';
 import { estimateMessages } from './context/compaction';
 import { SessionStore } from './session/store';
-import { projectMessages } from './session/projection';
+import { projectMessages, projectPublicHistory } from './session/projection';
 import { ToolRegistry } from './tools/registry';
 import { z } from 'zod';
 import type { Tool } from './domain/tool';
@@ -636,6 +636,237 @@ describe('Session', () => {
     expect(session.messages).toEqual(projectMessages(reopened.events));
   });
 
+  it('persists one interrupted partial and drops a late full response', async () => {
+    const root = await temporaryWorkspace('omniagent-session-partial-interrupt-');
+    const store = new SessionStore(root);
+    const handle = await store.create({ id: 'agent', workspace: root, cwd: root });
+    const started = deferred<void>();
+    const release = deferred<void>();
+    const model: ModelClient = {
+      name: 'partial',
+      async complete() { throw new Error('complete is not used'); },
+      async *stream(request) {
+        yield { type: 'reasoning' as const, text: 'private' };
+        yield { type: 'text' as const, text: 'kept ' };
+        yield { type: 'text' as const, text: 'visible' };
+        started.resolve();
+        await release.promise;
+        if (request.signal?.aborted) return { message: textResponse('late complete').message, usage: { inputTokens: 0, outputTokens: 0 }, stopReason: 'end_turn' as const };
+        return { message: textResponse('kept visible').message, usage: { inputTokens: 0, outputTokens: 0 }, stopReason: 'end_turn' as const };
+      },
+    };
+    const session = new Session({ cwd: root, model, session: handle, dshPermissions: snapshot('read-only') });
+    const turn = collect(session.send('first'));
+    await started.promise;
+    session.interrupt();
+    release.resolve();
+    expect((await turn).at(-1)).toEqual({ type: 'turn.end', reason: 'interrupted' });
+    const reopened = await store.open(root, 'agent');
+    const messages = projectMessages(reopened.events);
+    expect(projectPublicHistory(reopened.header, reopened.events)).toMatchObject([
+      { role: 'user' },
+      { role: 'assistant', content: [{ type: 'text', text: 'kept visible' }], toolCalls: [] },
+    ]);
+    expect(messages).toMatchObject([{ role: 'user' }]);
+    expect(JSON.stringify(reopened.events)).not.toContain('private');
+    expect(reopened.events.filter((event) => event.type === 'trace/turn.end')).toHaveLength(1);
+    expect(reopened.events.filter((event) => event.type === 'message/assistant')).toHaveLength(1);
+  });
+
+  it('omits an interrupted partial from the next in-process model request', async () => {
+    const root = await temporaryWorkspace('omniagent-session-partial-next-request-');
+    const store = new SessionStore(root);
+    const handle = await store.create({ id: 'agent', workspace: root, cwd: root });
+    const requests: ModelRequest[] = [];
+    const started = deferred<void>();
+    const release = deferred<void>();
+    const model: ModelClient = {
+      name: 'partial-next',
+      async complete(request): Promise<ModelResponse> {
+        requests.push(request);
+        if (requests.length === 1) {
+          started.resolve();
+          await release.promise;
+        }
+        return { message: textResponse('complete').message, usage: { inputTokens: 0, outputTokens: 0 }, stopReason: 'end_turn' };
+      },
+      async *stream(request) {
+        requests.push(request);
+        yield { type: 'text' as const, text: 'partial only' };
+        started.resolve();
+        await release.promise;
+        if (request.signal?.aborted) return { message: textResponse('late complete').message, usage: { inputTokens: 0, outputTokens: 0 }, stopReason: 'end_turn' as const };
+        return { message: textResponse('second complete').message, usage: { inputTokens: 0, outputTokens: 0 }, stopReason: 'end_turn' as const };
+      },
+    };
+    const session = new Session({ cwd: root, model, session: handle, dshPermissions: snapshot('read-only') });
+    const turn = collect(session.send('first'));
+    await started.promise;
+    session.interrupt();
+    release.resolve();
+    expect((await turn).at(-1)).toEqual({ type: 'turn.end', reason: 'interrupted' });
+
+    expect((await collect(session.send('second'))).at(-1)).toEqual({ type: 'turn.end', reason: 'end_turn' });
+    const second = JSON.stringify(requests[1]?.messages);
+    expect(second).not.toContain('partial only');
+    expect(second).toContain('second');
+    expect(session.messages.some((message) => message.role === 'assistant' && 'context' in message && message.context === 'omit')).toBe(false);
+
+    const reopened = await store.open(root, 'agent');
+    expect(projectPublicHistory(reopened.header, reopened.events)).toEqual(expect.arrayContaining([
+      expect.objectContaining({ role: 'assistant', content: [{ type: 'text', text: 'partial only' }] }),
+    ]));
+    expect(projectMessages(reopened.events).some((message) => message.role === 'assistant' && message.content.some((part) => part.type === 'text' && part.text.includes('partial only')))).toBe(false);
+  });
+
+  it('keeps a started tool result and audit without another model call', async () => {
+    const audits: AuditEntry[] = [];
+    let requests = 0;
+    const model: ModelClient = {
+      name: 'late-tool',
+      async complete(): Promise<ModelResponse> {
+        requests += 1;
+        if (requests > 1) throw new Error('interrupted tool completion must not request the model');
+        return { message: toolCallResponse([{ id: 'c1', name: 'noop', args: {} }]).message,
+          usage: { inputTokens: 0, outputTokens: 0 }, stopReason: 'tool_use' };
+      },
+    };
+    const started = deferred<void>();
+    const release = deferred<void>();
+    const tool: Tool = { ...noopTool, async execute() {
+      started.resolve();
+      await release.promise;
+      return { content: 'late result' };
+    } };
+    const session = new Session({
+      cwd: process.cwd(), model, tools: new ToolRegistry().register(tool),
+      dshPermissions: snapshot('danger-full-access'), approve: async () => 'allow',
+      audit: (entry) => { audits.push(entry); },
+    });
+    const turn = session.send('first');
+    const eventsPromise = collect(turn);
+    await started.promise;
+    session.interrupt();
+    release.resolve();
+    const events = await eventsPromise;
+    expect(events.some((event) => event.type === 'tool.result')).toBe(true);
+    expect(events.at(-1)).toEqual({ type: 'turn.end', reason: 'interrupted' });
+    expect(audits).toMatchObject([{ callId: 'c1', tool: 'noop', ok: true }]);
+    expect(requests).toBe(1);
+  });
+
+  it('keeps a tool result when interruption lands after execute starts and before the result is yielded', async () => {
+    const audits: AuditEntry[] = [];
+    const requests: ModelRequest[] = [];
+    const entered = deferred<void>();
+    const release = deferred<void>();
+    const model: ModelClient = {
+      name: 'entered-tool',
+      async complete(request): Promise<ModelResponse> {
+        requests.push(request);
+        return { message: toolCallResponse([{ id: 'c1', name: 'noop', args: {} }]).message,
+          usage: { inputTokens: 0, outputTokens: 0 }, stopReason: 'tool_use' };
+      },
+    };
+    const tool: Tool = { ...noopTool, async execute() {
+      entered.resolve();
+      await release.promise;
+      return { content: 'entered result' };
+    } };
+    const session = new Session({
+      cwd: process.cwd(), model, tools: new ToolRegistry().register(tool),
+      dshPermissions: snapshot('danger-full-access'), approve: async () => 'allow',
+      audit: (entry) => { audits.push(entry); },
+    });
+    const running = session.send('first');
+    const eventsPromise = collect(running);
+    await entered.promise;
+    session.interrupt();
+    release.resolve();
+    const events = await eventsPromise;
+    expect(events.filter((event) => event.type === 'tool.result').map((event) => event.type === 'tool.result' ? event.result : undefined))
+      .toMatchObject([{ callId: 'c1', content: 'entered result' }]);
+    expect(events.filter((event) => event.type === 'turn.end')).toEqual([{ type: 'turn.end', reason: 'interrupted' }]);
+    expect(audits).toMatchObject([{ callId: 'c1', tool: 'noop', ok: true }]);
+    expect(requests).toHaveLength(1);
+  });
+
+  it('does not repeat a naturally consumed steer on the next manual turn', async () => {
+    const root = await temporaryWorkspace('omniagent-session-natural-steer-');
+    const store = new SessionStore(root);
+    const handle = await store.create({ id: 'agent', workspace: root, cwd: root });
+    const firstStarted = deferred<void>();
+    let requests = 0;
+    const model: ModelClient = {
+      name: 'natural-steer',
+      async complete(request): Promise<ModelResponse> {
+        requests += 1;
+        if (requests === 1) {
+          firstStarted.resolve();
+          return { message: textResponse('first').message, usage: { inputTokens: 0, outputTokens: 0 }, stopReason: 'end_turn' };
+        }
+        const seen = request.messages.filter((message) => message.role === 'user' && message.content.some((part) => part.type === 'text' && part.text === 'steer once')).length;
+        if (requests === 2) expect(seen).toBe(1);
+        if (requests === 3) expect(seen).toBe(1);
+        return { message: textResponse(`reply ${requests}`).message, usage: { inputTokens: 0, outputTokens: 0 }, stopReason: 'end_turn' };
+      },
+    };
+    const session = new Session({ cwd: root, model, session: handle, dshPermissions: snapshot('read-only') });
+    const turn = collect(session.send('first'));
+    await firstStarted.promise;
+    await expect(session.deliverUserMessage('steer once')).resolves.toBe('queued');
+    expect((await turn).at(-1)).toEqual({ type: 'turn.end', reason: 'end_turn' });
+    expect((await collect(session.send('next'))).at(-1)).toEqual({ type: 'turn.end', reason: 'end_turn' });
+    const reopened = await store.open(root, 'agent');
+    const occurrences = projectMessages(reopened.events).filter((message) => message.role === 'user' && message.content.some((part) => part.type === 'text' && part.text === 'steer once'));
+    expect(occurrences).toHaveLength(1);
+    expect(requests).toBe(3);
+  });
+
+  it('drains a confirmed steer once before the interrupted turn ends', async () => {
+    const root = await temporaryWorkspace('omniagent-session-steer-drain-');
+    const store = new SessionStore(root);
+    const handle = await store.create({ id: 'agent', workspace: root, cwd: root });
+    const started = deferred<void>();
+    const release = deferred<void>();
+    let requests = 0;
+    const model: ModelClient = {
+      name: 'steered',
+      async complete(request) {
+        requests += 1;
+        if (requests === 1) {
+          started.resolve();
+          await new Promise<void>((resolve, reject) => {
+            const finish = () => resolve();
+            if (request.signal?.aborted) finish();
+            else request.signal?.addEventListener('abort', finish, { once: true });
+            release.promise.then(finish, reject);
+          });
+          return { message: textResponse('ignored').message, usage: { inputTokens: 0, outputTokens: 0 }, stopReason: 'end_turn' };
+        }
+        return { message: textResponse('continued').message, usage: { inputTokens: 0, outputTokens: 0 }, stopReason: 'end_turn' };
+      },
+    };
+    const session = new Session({ cwd: root, model, session: handle, dshPermissions: snapshot('read-only') });
+    const turn = collect(session.send('first'));
+    await started.promise;
+    await expect(session.deliverUserMessage('steer once')).resolves.toBe('queued');
+    session.interrupt();
+    release.resolve();
+    expect((await turn).at(-1)).toEqual({ type: 'turn.end', reason: 'interrupted' });
+    expect(session.messages.filter((message) => message.role === 'user')).toHaveLength(2);
+    expect(session.messages.filter((message) => message.role === 'user' && message.content.some((part) => part.type === 'text' && part.text === 'steer once'))).toHaveLength(1);
+    const reopenedBeforeContinue = await store.open(root, 'agent');
+    expect(projectMessages(reopenedBeforeContinue.events).filter((message) => message.role === 'user' && message.content.some((part) => part.type === 'text' && part.text === 'steer once'))).toHaveLength(1);
+    const next = await collect(session.send('continue explicitly'));
+    expect(next.at(-1)).toEqual({ type: 'turn.end', reason: 'end_turn' });
+    const reopened = await store.open(root, 'agent');
+    expect(projectMessages(reopened.events).filter((message) => message.role === 'user')).toHaveLength(3);
+    expect(session.messages.filter((message) => message.role === 'user')).toHaveLength(3);
+    expect(requests).toBe(2);
+    expect(reopened.events.filter((event) => event.type === 'trace/turn.end')).toHaveLength(2);
+  });
+
   it('completes missing tool results before an in-memory continuation after approval interruption', async () => {
     const root = await temporaryWorkspace('omniagent-session-approval-replay-');
     const store = new SessionStore(root);
@@ -1013,6 +1244,85 @@ describe('Session', () => {
     } finally {
       session.interrupt();
     }
+  });
+
+  it('does not execute a tool when interrupted after its allow decision is consumed', async () => {
+    const root = await temporaryWorkspace('omniagent-session-allowed-not-started-');
+    const handle = await new SessionStore(root).create({ id: 'agent', workspace: root, cwd: root });
+    const executions: string[] = [];
+    const audits: AuditEntry[] = [];
+    const model = new FakeModel([toolCallResponse([
+      { id: 'c1', name: 'noop', args: {} }, { id: 'c2', name: 'noop', args: {} },
+    ])]);
+    const tool: Tool = { ...noopTool, async execute() { executions.push('executed'); return { content: 'ok' }; } };
+    const session = new Session({
+      cwd: root, model, tools: new ToolRegistry().register(tool),
+      dshPermissions: snapshot('danger-full-access'), approve: async () => 'allow',
+      audit: (entry) => { audits.push(entry); }, session: handle,
+    });
+    const turn = session.send('first');
+    let event = await turn.next();
+    while (!event.done && !(event.value.type === 'permission.decided' && event.value.decision === 'allow')) {
+      event = await turn.next();
+    }
+    expect(event.value).toMatchObject({ type: 'permission.decided', callId: 'c1', decision: 'allow' });
+    session.interrupt();
+    const rest = await collect(turn);
+    expect(rest).toEqual([{ type: 'turn.end', reason: 'interrupted' }]);
+    expect(executions).toEqual([]);
+    expect(audits).toEqual([]);
+    expect(model.requests).toHaveLength(1);
+    const reopened = await new SessionStore(root).open(root, 'agent');
+    expect(reopened.events.some((entry) => entry.type === 'trace/tool.result')).toBe(false);
+    expect(reopened.events.filter((entry) => entry.type === 'trace/turn.end')).toEqual([
+      expect.objectContaining({ data: { reason: 'interrupted' } }),
+    ]);
+  });
+
+  it('keeps the started tool result and skips the next tool after interruption', async () => {
+    const root = await temporaryWorkspace('omniagent-session-started-tool-boundary-');
+    const handle = await new SessionStore(root).create({ id: 'agent', workspace: root, cwd: root });
+    const entered = deferred<void>();
+    const release = deferred<void>();
+    const executions: string[] = [];
+    const audits: AuditEntry[] = [];
+    const model = new FakeModel([toolCallResponse([
+      { id: 'c1', name: 'noop', args: {} }, { id: 'c2', name: 'noop', args: {} },
+    ])]);
+    const tool: Tool = { ...noopTool, async execute() {
+      executions.push('executed');
+      if (executions.length === 1) {
+        entered.resolve();
+        await release.promise;
+      }
+      return { content: 'entered result' };
+    } };
+    const session = new Session({
+      cwd: root, model, tools: new ToolRegistry().register(tool),
+      dshPermissions: snapshot('danger-full-access'), approve: async () => 'allow',
+      audit: (entry) => { audits.push(entry); }, session: handle,
+    });
+    const eventsPromise = collect(session.send('first'));
+    await entered.promise;
+    session.interrupt();
+    release.resolve();
+    const events = await eventsPromise;
+    expect(events.filter((event) => event.type === 'tool.result')).toMatchObject([
+      { result: { callId: 'c1', ok: true, content: 'entered result' } },
+    ]);
+    expect(events.filter((event) => event.type === 'turn.end')).toEqual([
+      { type: 'turn.end', reason: 'interrupted' },
+    ]);
+    expect(executions).toEqual(['executed']);
+    expect(audits).toMatchObject([{ callId: 'c1', tool: 'noop', decision: 'allow', ok: true }]);
+    expect(model.requests).toHaveLength(1);
+    const reopened = await new SessionStore(root).open(root, 'agent');
+    expect(reopened.events.filter((entry) => entry.type === 'trace/tool.result')).toMatchObject([
+      { data: { callId: 'c1', name: 'noop', ok: true } },
+    ]);
+    expect(reopened.events.filter((entry) => entry.type === 'trace/turn.end')).toEqual([
+      expect.objectContaining({ data: { reason: 'interrupted' } }),
+    ]);
   });
 
   it('stops before executing a tool when interrupted at an event boundary', async () => {

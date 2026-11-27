@@ -9,6 +9,7 @@ import {
   createSSEParser,
   groupTurns,
   hydrateTranscript,
+  mergeFrozenReplay,
   pendingPlanReview,
   pendingPlanText,
   userMessageCopyText,
@@ -534,6 +535,26 @@ describe('web client protocol', () => {
     ]);
     expect(transcript.map((item) => [item.kind, item.kind === 'user' || item.kind === 'assistant' ? item.text : '']))
       .toEqual([['user', 'Hello'], ['assistant', 'Hi']]);
+  });
+
+  it('freezes the current reply and narrowly merges its authoritative replay', () => {
+    const turn = createLiveState();
+    applyAgentEvent(turn, { type: 'assistant.message', message: { role: 'assistant', content: [{ type: 'text', text: 'old answer' }], toolCalls: [] } });
+    applyAgentEvent(turn, { type: 'turn.end', reason: 'end_turn' });
+    applyAgentEvent(turn, { type: 'run.user.message', message: { role: 'user', content: [{ type: 'text', text: 'new question' }] } });
+    applyAgentEvent(turn, { type: 'assistant.delta', text: 'partial' });
+    turn.frozen = true;
+    applyAgentEvent(turn, { type: 'assistant.delta', text: ' late' });
+    mergeFrozenReplay(turn, [
+      { type: 'run.user.message', message: { role: 'user', content: [{ type: 'text', text: 'accepted steer' }] } },
+      { type: 'assistant.message', message: { role: 'assistant', content: [{ type: 'text', text: 'persisted partial' }], toolCalls: [] } },
+      { type: 'tool.result', result: { callId: 'tool-1', name: 'read_file', ok: true, content: 'saved', truncated: false } },
+    ]);
+    expect(turn.transcript.map((item) => item.kind === 'assistant' || item.kind === 'user' ? item.text : item.kind)).toEqual([
+      'old answer', 'new question', 'partial', 'accepted steer', 'persisted partial', 'tool',
+    ]);
+    expect(turn.transcript[0]).toMatchObject({ turn: 0 });
+    expect(turn.transcript.at(-1)).toMatchObject({ turn: 1, kind: 'tool' });
   });
 
   it('replaces streamed deltas with the authoritative assistant message and merges tools', () => {

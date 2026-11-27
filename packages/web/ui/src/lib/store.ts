@@ -77,6 +77,7 @@ import {
   applyAgentEvent,
   createLiveState,
   hydrateTranscript,
+  mergeFrozenReplay,
   pendingAskUser,
   pendingPlanReview,
   type ApprovalRequest,
@@ -226,6 +227,8 @@ export interface SessionEntry {
    */
   contextEstimate?: ContextEstimate;
   queued: QueuedMessage[];
+  /** Queue delivery is held after an explicit stop until the user continues. */
+  queuePaused: boolean;
   run?: LiveTurnState;
 }
 
@@ -370,6 +373,22 @@ function queueStorageKey(workspaceId: string, sessionId: string): string {
   return `omniagent.queue:${workspaceId}:${sessionId}`;
 }
 
+function queuePauseStorageKey(workspaceId: string, sessionId: string): string {
+  return `omniagent.queue-paused:${workspaceId}:${sessionId}`;
+}
+
+function readQueuePaused(workspaceId: string, sessionId: string): boolean {
+  const raw = storageGet(queuePauseStorageKey(workspaceId, sessionId));
+  if (raw === 'true') return true;
+  if (raw === 'false' || raw === null) return false;
+  try {
+    const value: unknown = JSON.parse(raw);
+    return typeof value === 'object' && value !== null && (value as { paused?: unknown }).paused === true;
+  } catch {
+    return false;
+  }
+}
+
 function readQueued(workspaceId: string, sessionId: string, strict = false): QueuedMessage[] {
   try {
     const parsed: unknown = JSON.parse(localStorage.getItem(queueStorageKey(workspaceId, sessionId)) ?? '[]');
@@ -493,6 +512,7 @@ function emptyEntry(): SessionEntry {
     outcome: '',
     running: false,
     queued: [],
+    queuePaused: false,
   };
 }
 
@@ -681,6 +701,8 @@ export class AppStore {
   private readonly observers = new Map<string, AbortController>();
   private readonly followBases = new Map<string, { transcript: TranscriptItem[]; turns: TurnMeta[]; metrics?: SessionMetrics }>();
   private readonly followEvents = new Map<string, unknown[]>();
+  /** The turn index frozen by Stop, so a later turn is never calibrated by its 409. */
+  private readonly frozenTurns = new Map<string, number>();
   private readonly flushingQueues = new Set<string>();
   private readonly forkingSessions = new Set<string>();
   private readonly liveRuns = new Map<string, LiveTurnState>();
@@ -703,14 +725,17 @@ export class AppStore {
   }
 
   private readonly onQueueStorage = (event: StorageEvent): void => {
-    if (event.key !== null && !event.key.startsWith('omniagent.queue:')) return;
+    if (event.key !== null && !event.key.startsWith('omniagent.queue:')
+      && !event.key.startsWith('omniagent.queue-paused:')) return;
     for (const key of Object.keys(this.state.entries)) {
       const [workspaceId, sessionId] = JSON.parse(key) as [string, string];
-      if (event.key !== null && event.key !== queueStorageKey(workspaceId, sessionId)) continue;
+      if (event.key !== null && event.key !== queueStorageKey(workspaceId, sessionId)
+        && event.key !== queuePauseStorageKey(workspaceId, sessionId)) continue;
       try {
         const queued = readQueued(workspaceId, sessionId, true);
-        this.patchEntry(key, { queued });
-        if (queued.length > 0) void this.flushQueue(workspaceId, sessionId);
+        const queuePaused = readQueuePaused(workspaceId, sessionId);
+        this.patchEntry(key, { queued, queuePaused });
+        if (queued.length > 0 && !queuePaused) void this.flushQueue(workspaceId, sessionId);
       } catch {
         // Never replace a usable snapshot with an unreadable storage value.
       }
@@ -855,7 +880,11 @@ export class AppStore {
     const key = sessionKey(workspaceId, sessionId);
     let entry = this.state.entries[key];
     if (entry === undefined) {
-      entry = { ...emptyEntry(), queued: this.restoreQueued ? readQueued(workspaceId, sessionId) : [] };
+      entry = {
+        ...emptyEntry(),
+        queued: this.restoreQueued ? readQueued(workspaceId, sessionId) : [],
+        queuePaused: readQueuePaused(workspaceId, sessionId),
+      };
       this.state = { ...this.state, entries: { ...this.state.entries, [key]: entry } };
     }
     return entry;
@@ -2400,7 +2429,7 @@ export class AppStore {
     return this.steerForSession(workspaceId, sessionId, text, attachments);
   }
 
-  private async steerForSession(workspaceId: string, sessionId: string, text: string, attachments: readonly SendAttachment[], onUncertain?: () => void): Promise<boolean> {
+  private async steerForSession(workspaceId: string, sessionId: string, text: string, attachments: readonly SendAttachment[], onUncertain?: () => void, onNotAccepted?: () => void): Promise<boolean> {
     if (text.trim() === '' && attachments.length === 0) return false;
     if (!messageBodyFits(text, attachments, true)) {
       this.showAlert(translator(this.state.locale)('Message and attachments exceed the 32 MiB request limit.'));
@@ -2421,21 +2450,14 @@ export class AppStore {
       }));
       responseReceived = true;
       if (!response.ok) {
-        if (response.status >= 500) onUncertain?.();
-        if (response.status === 409) {
-          await this.loadDetail(workspaceId, sessionId, true);
-          const current = this.state.entries[key];
-          if (current?.running !== true) {
-            this.observers.get(key)?.abort();
-            this.observers.delete(key);
-            this.clearRunningPoll(key);
-            this.followBases.delete(key);
-            this.liveRuns.delete(key);
-            if (current?.run !== undefined) this.patchEntry(key, { run: undefined });
-            this.followEvents.delete(key);
-            return this.startTurn(workspaceId, sessionId, text, attachments, undefined, onUncertain);
-          }
+        const code = response.status === 409 ? await this.responseCode(response) : '';
+        if (response.status >= 500 || code !== 'steer_not_accepted') onUncertain?.();
+        if (code === 'steer_not_accepted') {
+          onNotAccepted?.();
+          throw new Error(await responseError(response));
         }
+        // A steer is never upgraded to a normal turn. Unknown 409s and empty
+        // codes remain failed/uncertain and require explicit user action.
         throw new Error(await responseError(response));
       }
       let broadcast = false;
@@ -2472,6 +2494,11 @@ export class AppStore {
   async queueMessage(text: string, attachments: readonly SendAttachment[] = []): Promise<boolean> {
     const { workspaceId, sessionId } = this.state;
     if (workspaceId === null || sessionId === null) return false;
+    return this.queueMessageForSession(workspaceId, sessionId, text, attachments);
+  }
+
+  /** Queue against the session captured by the caller, never the currently selected tab. */
+  private async queueMessageForSession(workspaceId: string, sessionId: string, text: string, attachments: readonly SendAttachment[] = []): Promise<boolean> {
     if (text.trim() === '' && attachments.length === 0) return false;
     if (!messageBodyFits(text, attachments, true)) {
       this.showAlert(translator(this.state.locale)('Message and attachments exceed the 32 MiB request limit.'));
@@ -2522,13 +2549,19 @@ export class AppStore {
         });
         if (item === undefined) return false;
         let uncertain = false;
+        let notAccepted = false;
         const markUncertain = (): void => { uncertain = true; };
+        const markNotAccepted = (): void => { notAccepted = true; };
         const accepted = steer
-          ? await this.steerForSession(workspaceId, sessionId, item.text, item.attachments, markUncertain)
+          ? await this.steerForSession(workspaceId, sessionId, item.text, item.attachments, markUncertain, markNotAccepted)
           : await this.startTurn(workspaceId, sessionId, item.text, item.attachments, undefined, markUncertain);
+        if (accepted && steer) {
+          // An accepted steer is now ordinary history. Removing it is safe only
+          // after the response explicitly says accepted.
+        }
         await this.updateQueue(workspaceId, sessionId, (items) => ({
           items: accepted ? items.filter((candidate) => candidate.id !== item.id)
-            : uncertain ? items : items.map((candidate) => {
+            : uncertain && !notAccepted ? items : items.map((candidate) => {
               if (candidate.id !== item.id) return candidate;
               const { delivery: _delivery, ...rest } = candidate;
               return rest;
@@ -2561,6 +2594,40 @@ export class AppStore {
     }
     for (const id of ids) {
       if (this.state.workspaceId !== workspaceId || this.state.sessionId !== sessionId || !await this.steerQueuedMessage(id)) break;
+    }
+  }
+
+  /**
+   * Hold the next queued turn immediately. Reading storage first keeps another
+   * tab's explicit pause from being overwritten by a stale snapshot.
+   */
+  async pauseQueue(): Promise<void> {
+    const { workspaceId, sessionId } = this.state;
+    if (workspaceId === null || sessionId === null) return;
+    const key = sessionKey(workspaceId, sessionId);
+    try {
+      await this.queueLock(workspaceId, sessionId, 'data', () => {
+        storageSet(queuePauseStorageKey(workspaceId, sessionId), 'true');
+        this.patchEntry(key, { queuePaused: true });
+      });
+    } catch (error) {
+      this.queueError(error);
+    }
+  }
+
+  /** Resume FIFO delivery only after the user explicitly continues. */
+  async resumeQueue(): Promise<void> {
+    const { workspaceId, sessionId } = this.state;
+    if (workspaceId === null || sessionId === null) return;
+    const key = sessionKey(workspaceId, sessionId);
+    try {
+      await this.queueLock(workspaceId, sessionId, 'data', () => {
+        storageSet(queuePauseStorageKey(workspaceId, sessionId), 'false');
+        this.patchEntry(key, { queuePaused: false });
+      });
+      void this.flushQueue(workspaceId, sessionId);
+    } catch (error) {
+      this.queueError(error);
     }
   }
 
@@ -2717,7 +2784,7 @@ export class AppStore {
     const key = sessionKey(workspaceId, sessionId);
     if (this.disposed || this.flushingQueues.has(key)) return;
     const entry = this.state.entries[key];
-    if (entry === undefined || !entry.loaded || entry.loading || entry.draft
+    if (entry === undefined || !entry.loaded || entry.loading || entry.draft || entry.queuePaused
       || entry.run !== undefined || entry.running || entry.queued.length === 0) return;
     this.flushingQueues.add(key);
     try {
@@ -2895,8 +2962,13 @@ export class AppStore {
           throw new Error('Unrecoverable run snapshot');
         }
         const restoredReview = run.planReview?.requestId.startsWith('restored:') === true ? run.planReview : undefined;
-        if (prefixMatches) {
+        if (prefixMatches && run.frozen !== true) {
           for (const item of snapshot.events.slice(previous.length)) foldEvent(item);
+        } else if (run.frozen === true) {
+          const frozenIndex = this.frozenTurns.get(key);
+          if (frozenIndex === undefined || run.turns.at(-1)?.index === frozenIndex) {
+            mergeFrozenReplay(run, snapshot.events);
+          }
         } else {
           const baseline = snapshot.baseline;
           if (baseline !== undefined && (typeof baseline !== 'object' || baseline === null
@@ -3039,24 +3111,77 @@ export class AppStore {
     const running = entry?.running === true;
     if (entry?.draft === true || (run === undefined && !running)
       || (run !== undefined && (run.stopping === true || run.finishing === true))) return;
+    const frozenIndex = run?.turns.at(-1)?.index;
     if (run !== undefined) {
       run.stopping = true;
+      run.frozen = true;
       const live = this.liveRuns.get(key);
-      if (live !== undefined) live.stopping = true;
-      this.patchEntry(key, { run: { ...run } });
+      if (live !== undefined) {
+        live.stopping = true;
+        live.frozen = true;
+      }
+      if (frozenIndex !== undefined) this.frozenTurns.set(key, frozenIndex);
+      storageSet(queuePauseStorageKey(workspaceId, sessionId), 'true');
+      this.patchEntry(key, { run: { ...run }, queuePaused: true });
     }
     try {
-      await this.api(sessionApiPath(workspaceId, sessionId, 'interrupt'), jsonOptions('POST', {}));
+      const response = await this.fetch(sessionApiPath(workspaceId, sessionId, 'interrupt'), jsonOptions('POST', {}));
+      if (!response.ok) throw Object.assign(new Error(await responseError(response)), { status: response.status, code: await this.responseCode(response) });
       if (run === undefined) this.scheduleRunningPoll(workspaceId, sessionId);
     } catch (error) {
-      if (run !== undefined) {
+      const typed = error as Error & { code?: unknown; status?: unknown };
+      const message = typed.message;
+      const settled = typed.code === 'turn_not_running' || typed.status === 409
+        || (typed.status === undefined && typed.code === undefined);
+      const currentIndex = this.state.entries[key]?.run?.turns.at(-1)?.index;
+      if (frozenIndex !== undefined && currentIndex === frozenIndex && (settled || !(error instanceof Error))) {
+        await this.calibrateFrozenTurn(workspaceId, sessionId, key, frozenIndex);
+        return;
+      }
+      if (run !== undefined && currentIndex === frozenIndex) {
         const live = this.liveRuns.get(key);
         if (live !== undefined) live.stopping = false;
         const latest = this.state.entries[key]?.run;
         if (latest !== undefined) this.patchEntry(key, { run: { ...latest, stopping: false } });
       }
-      this.showAlert(translator(this.state.locale)('Could not stop turn: {message}', { message: (error as Error).message }));
+      this.showAlert(translator(this.state.locale)('Could not stop turn: {message}', { message }));
     }
+  }
+
+  private async responseCode(response: Response): Promise<string> {
+    try {
+      const body = await response.clone().json() as { code?: unknown };
+      return typeof body.code === 'string' ? body.code : '';
+    } catch {
+      return '';
+    }
+  }
+
+  /**
+   * Replace only the frozen turn with the persisted Core projection.
+   * A newer turn is left untouched, and a failed reload cannot remain busy.
+   */
+  private async calibrateFrozenTurn(workspaceId: string, sessionId: string, key: string, frozenIndex: number): Promise<void> {
+    // Reconcile through the normal detail path: silent mode refuses to replace an
+    // existing run and would make a typed stop race impossible to verify.
+    const loaded = await this.loadDetail(workspaceId, sessionId, true, false);
+    const current = this.state.entries[key];
+    const latest = current?.run;
+    if (!loaded) {
+      // Keep the frozen snapshot and make Stop retryable; a failed detail read
+      // cannot establish that this turn ended.
+      if (latest !== undefined && latest.turns.at(-1)?.index === frozenIndex) {
+        this.patchEntry(key, { run: { ...latest, stopping: false } });
+      }
+      return;
+    }
+    if (latest !== undefined && latest.turns.at(-1)?.index !== frozenIndex) return;
+    if (latest !== undefined && current?.running === true) {
+      this.patchEntry(key, { run: { ...latest, stopping: false } });
+      return;
+    }
+    this.liveRuns.delete(key);
+    this.frozenTurns.delete(key);
   }
 
   /** Ask the host to compact older context before the next turn. */

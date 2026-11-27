@@ -18,6 +18,13 @@ describe('web locale catalogue', () => {
     expect(translate('zh', 'Automation tasks')).toBe('自动化任务');
   });
 
+  it('translates the queued message controls', () => {
+    expect(translate('zh', 'Messages waiting to send')).toBe('待发送消息');
+    expect(translate('zh', 'Queue paused')).toBe('队列已暂停');
+    expect(translate('zh', 'Continue queued messages')).toBe('继续发送排队消息');
+    expect(translator('en')('Continue')).toBe('Continue');
+  });
+
   it('translates the draft attachment notices', () => {
     expect(translate('zh', 'Restoring attachments…')).toBe('正在恢复附件…');
     expect(translate('zh', 'Kept for this session only; a refresh may lose these attachments.'))

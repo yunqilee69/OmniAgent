@@ -3,6 +3,7 @@ import { z } from 'zod';
 import type { Message } from '../domain/message';
 import { userMessage } from '../domain/message';
 import type { Tool } from '../domain/tool';
+import type { AuditEntry } from '../store/audit';
 import type { AgentEvent } from '../protocol/events';
 import type { PermissionGate } from '../protocol/permission';
 import { ProviderRequestError } from '../providers/errors';
@@ -62,6 +63,12 @@ async function collect(generator: AsyncGenerator<AgentEvent, Message[]>) {
     next = await generator.next();
   }
   return { events, messages: next.value };
+}
+
+function deferred<T>() {
+  let resolve!: (value: T) => void;
+  const promise = new Promise<T>((done) => { resolve = done; });
+  return { promise, resolve };
 }
 
 describe('AgentLoop', () => {
@@ -726,6 +733,139 @@ describe('AgentLoop', () => {
     expect(compactedIndex).toBeGreaterThan(0);
     expect(types[types.indexOf('context.compacted') - 1]).toBe('turn.start');
     expect(snapshots.at(-1)?.messages.length).toBe(3);
+  });
+
+  it('aborts before evaluating a model call', async () => {
+    const controller = new AbortController();
+    let called = false;
+    const model: ModelClient = {
+      name: 'preflight',
+      complete() { called = true; throw new Error('complete must not be called'); },
+      stream() { called = true; throw new Error('stream must not be called'); },
+    };
+    const loop = new AgentLoop({ model, modelId: 'preflight', system: '', tools: registryWithEcho(),
+      permissions: allowAll, cwd: process.cwd(), sessionId: 'test' });
+    const generator = loop.run([userMessage('go')], controller.signal);
+    expect((await generator.next()).value).toMatchObject({ type: 'turn.start' });
+    controller.abort();
+    expect((await generator.next()).value).toEqual({ type: 'turn.end', reason: 'interrupted' });
+    expect(called).toBe(false);
+  });
+
+  it('releases a provider that ignores abort and closes its iterator', async () => {
+    const controller = new AbortController();
+    let closed = false;
+    const model: ModelClient = {
+      name: 'stuck',
+      async complete() { throw new Error('complete is not used'); },
+      async *stream() {
+        try {
+          yield { type: 'text' as const, text: 'partial' };
+          await new Promise<void>(() => undefined);
+          yield { type: 'text' as const, text: 'late' };
+          return { message: textResponse('late complete').message, usage: { inputTokens: 0, outputTokens: 0 }, stopReason: 'end_turn' as const };
+        } finally {
+          closed = true;
+        }
+      },
+    };
+    const loop = new AgentLoop({ model, modelId: 'stuck', system: '', tools: registryWithEcho(),
+      permissions: allowAll, cwd: process.cwd(), sessionId: 'test' });
+    const generator = loop.run([userMessage('go')], controller.signal);
+    const events: AgentEvent[] = [];
+    const first = await generator.next();
+    if (!first.done) events.push(first.value);
+    const second = await generator.next();
+    if (!second.done) events.push(second.value);
+    controller.abort();
+    const third = await Promise.race([
+      generator.next(),
+      new Promise<never>((_resolve, reject) => setTimeout(() => reject(new Error('stream did not release')), 500)),
+    ]);
+    if (!third.done) events.push(third.value);
+    expect(closed).toBe(true);
+    expect(events.map((event) => event.type)).toEqual(['turn.start', 'assistant.delta', 'turn.end']);
+    expect(events.at(-1)).toMatchObject({ reason: 'interrupted' });
+  });
+
+  it('does not execute a tool when aborted after its allow decision is consumed', async () => {
+    const controller = new AbortController();
+    let executions = 0;
+    const audits: AuditEntry[] = [];
+    const model = new FakeModel([
+      toolCallResponse([
+        { id: 'c1', name: 'echo', args: { text: 'one' } },
+        { id: 'c2', name: 'echo', args: { text: 'two' } },
+      ]),
+    ]);
+    const loop = new AgentLoop({
+      model, modelId: 'fake', system: '', tools: registryWithEcho(), permissions: allowAll,
+      cwd: process.cwd(), sessionId: 'test',
+      prepareToolCall: async (call) => ({
+        decision: 'allow', source: 'test', execute: async () => {
+          executions += 1;
+          return { callId: call.id, name: call.name, ok: true, content: 'started', truncated: false };
+        },
+      }),
+      audit: (entry) => { audits.push(entry); },
+    });
+    const generator = loop.run([userMessage('start')], controller.signal);
+    let next = await generator.next();
+    while (!next.done && !(next.value.type === 'permission.decided' && next.value.decision === 'allow')) {
+      next = await generator.next();
+    }
+    expect(next.value).toMatchObject({ type: 'permission.decided', callId: 'c1', decision: 'allow' });
+    controller.abort();
+    next = await generator.next();
+    const events = next.done ? [] : [next.value];
+    expect(events).toEqual([{ type: 'turn.end', reason: 'interrupted' }]);
+    expect(executions).toBe(0);
+    expect(audits).toEqual([]);
+    expect(model.requests).toHaveLength(1);
+  });
+
+  it('keeps only the started execution when aborted before the next tool', async () => {
+    const controller = new AbortController();
+    const started = deferred<void>();
+    const release = deferred<void>();
+    const executions: string[] = [];
+    const audits: AuditEntry[] = [];
+    const model = new FakeModel([
+      toolCallResponse([
+        { id: 'c1', name: 'echo', args: { text: 'one' } },
+        { id: 'c2', name: 'echo', args: { text: 'two' } },
+      ]),
+    ]);
+    const loop = new AgentLoop({
+      model, modelId: 'fake', system: '', tools: registryWithEcho(), permissions: allowAll,
+      cwd: process.cwd(), sessionId: 'test',
+      prepareToolCall: async (call) => ({
+        decision: 'allow', source: 'test', execute: async () => {
+          executions.push(call.id);
+          if (call.id === 'c1') {
+            started.resolve();
+            await release.promise;
+          }
+          return { callId: call.id, name: call.name, ok: true, content: call.id, truncated: false };
+        },
+      }),
+      audit: (entry) => { audits.push(entry); },
+    });
+    const generator = loop.run([userMessage('start')], controller.signal);
+    const running = collect(generator);
+    await started.promise;
+    controller.abort();
+    release.resolve();
+    const { events } = await running;
+    expect(events.filter((event) => event.type === 'tool.result')).toMatchObject([
+      { result: { callId: 'c1', ok: true, content: 'c1' } },
+    ]);
+    expect(events.filter((event) => event.type === 'turn.end')).toEqual([
+      { type: 'turn.end', reason: 'interrupted' },
+    ]);
+    expect(executions).toEqual(['c1']);
+    expect(audits).toMatchObject([{ callId: 'c1', tool: 'echo', decision: 'allow', ok: true }]);
+    expect(model.requests).toHaveLength(1);
   });
 
   it('未知工具不会抛异常，而是变成错误结果的 observation', async () => {

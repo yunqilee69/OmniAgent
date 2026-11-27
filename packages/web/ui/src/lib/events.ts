@@ -244,6 +244,8 @@ export interface AskUserRequest {
 }
 
 export interface LiveTurnState {
+  /** Stop freezes the visible partial reply until Core reconciliation supplies its persisted result. */
+  frozen?: boolean;
   transcript: TranscriptItem[];
   turns: TurnMeta[];
   metrics?: SessionMetrics;
@@ -407,9 +409,58 @@ function userContent(content: PublicMessage['content']): { text: string; attachm
  * reasoning/assistant/tool items, and `assistant.message` replaces the streamed
  * text rather than appending a second copy.
  */
+/** Whether an event belongs to the turn that was frozen by Stop. */
+function frozenTurnEvent(turn: LiveTurnState, type: string): boolean {
+  return turn.frozen === true && (type === 'assistant.delta' || type === 'assistant.reasoning.delta'
+    || type === 'assistant.message' || type === 'tool.call' || type === 'tool.result'
+    || type === 'run.user.message');
+}
+
+/**
+ * Merge a replay into the frozen turn without rewriting earlier history.
+ *
+ * A prefix that is already on screen is kept. Only the current turn may gain
+ * the accepted user message, a tool result, or the authoritative final reply.
+ */
+export function mergeFrozenReplay(turn: LiveTurnState, events: readonly unknown[], now = Date.now()): void {
+  const current = turn.turns.at(-1);
+  if (current === undefined) return;
+  const currentIndex = current.index;
+  const prefixLength = turn.transcript.findIndex((item) => item.turn === currentIndex);
+  const preserved = prefixLength < 0 ? turn.transcript.slice() : turn.transcript.slice(0, prefixLength);
+  const currentItems = prefixLength < 0 ? [] : turn.transcript.slice(prefixLength);
+  const replay = createLiveState();
+  replay.turns.push({ ...current });
+  for (const event of events) {
+    if (typeof event !== 'object' || event === null) continue;
+    const type = (event as { type?: unknown }).type;
+    if (type !== 'assistant.delta' && type !== 'assistant.reasoning.delta' && type !== 'assistant.message'
+      && type !== 'tool.call' && type !== 'tool.result' && type !== 'run.user.message'
+      && type !== 'turn.end' && type !== 'error') continue;
+    applyAgentEvent(replay, event as never, now);
+  }
+  const accepted = replay.transcript.filter((item) => item.turn === currentIndex && (
+    item.kind === 'user' || item.kind === 'tool' || (item.kind === 'assistant' && !item.streaming)
+  ));
+  const kept = currentItems.filter((item) => !accepted.some((incoming) =>
+    (item.kind === 'user' && incoming.kind === 'user' && item.text === incoming.text)
+    || (item.kind === 'tool' && incoming.kind === 'tool' && item.call.id === incoming.call.id)
+    || (item.kind === 'assistant' && incoming.kind === 'assistant' && item.text === incoming.text)));
+  turn.transcript = [...preserved, ...kept.map((item) => ({ ...item, turn: currentIndex })),
+    ...accepted.map((item) => ({ ...item, turn: currentIndex, streaming: false }))];
+  turn.streamText = '';
+  turn.streamReasoning = '';
+  turn.streamAssistantId = undefined;
+  turn.streamReasoningId = undefined;
+  for (const item of turn.transcript) {
+    if ((item.kind === 'assistant' || item.kind === 'reasoning') && item.turn === currentIndex) item.streaming = false;
+  }
+}
+
 export function applyAgentEvent(turn: LiveTurnState, event: AgentEvent | Record<string, unknown>, now = Date.now()): void {
   const data = event as Record<string, unknown>;
   const type = typeof data.type === 'string' ? data.type : '';
+  if (frozenTurnEvent(turn, type)) return;
   if (turn.metrics !== undefined) {
     const step = typeof data.step === 'number' && Number.isSafeInteger(data.step) && data.step >= 0 ? data.step : undefined;
     const newRun = (turn.metricsStepsSeen ?? 0) === 0 || turn.metricsRunEnded === true

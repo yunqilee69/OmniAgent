@@ -1227,8 +1227,66 @@ describe('workspace web host', () => {
 
     const idleSteer = await fetch(messagesUrl, jsonRequest({ text: 'after', mode: 'steer' }));
     expect(idleSteer.status).toBe(409);
+    expect(await idleSteer.json()).toMatchObject({ code: 'steer_not_accepted' });
     expect(calls).toBe(1);
   });
+
+  it('keeps one interrupted terminal when stop races a late event', async () => {
+    const started = signal();
+    const release = signal();
+    const { base, first } = await setup((id) => ({
+      id,
+      async *send() {
+        yield { type: 'turn.start', step: 0 };
+        started.resolve();
+        await release.promise;
+        yield { type: 'assistant.delta', text: 'late' };
+        yield { type: 'turn.end', reason: 'end_turn' };
+      },
+      interrupt() { release.resolve(); },
+    }));
+    const url = sessionsUrl(base, first.id);
+    const { session } = await (await fetch(url, jsonRequest({}))).json() as { session: { id: string } };
+    const active = await fetch(`${url}/${session.id}/messages`, jsonRequest({ text: 'first' }));
+    const reader = active.body!.getReader();
+    await reader.read();
+    await started.promise;
+    expect((await fetch(`${url}/${session.id}/interrupt`, jsonRequest({}))).status).toBe(200);
+    const chunks: string[] = [];
+    const decoder = new TextDecoder();
+    for (;;) {
+      const part = await reader.read();
+      if (part.done) break;
+      chunks.push(decoder.decode(part.value, { stream: true }));
+    }
+    const frames = chunks.join('').split('\n\n').filter(Boolean).map((frame) => JSON.parse(frame.slice(6)));
+    expect(frames.filter((frame) => frame.type === 'turn.end')).toEqual([{ type: 'turn.end', reason: 'interrupted' }]);
+    expect(frames.some((frame) => frame.type === 'assistant.delta')).toBe(false);
+  });
+
+  it('follows an ask-user recovery past one minute while the turn stays active', async () => {
+    const started = signal();
+    let active = true;
+    const { base, first, store } = await setup((id, _permissions, workspace, handle) => {
+      const session = new Session({ cwd: workspace.path, session: handle, dshPermissions: _permissions, model: new FakeModel([]) });
+      Object.defineProperty(session, 'activeTurn', { get: () => active });
+      session.interrupt = () => { active = false; };
+      session.addBackgroundListener = (listener) => { started.resolve(); return () => listener({ type: 'turn.end', reason: 'end_turn' }); };
+      return session;
+    });
+    const handle = await store.create({ id: 'ask-session', workspace: first.path, cwd: first.path });
+    await handle.append(createInitialDshPermissionEvent('read-only'));
+    await handle.append({ type: 'ask-user/pending', data: { requestId: 'ask-1', callId: 'call-1', questions: [{ id: 'q', question: 'Continue?', multiSelect: false }], timeoutSec: -1 } });
+    await handle.append({ type: 'ask-user/continued', data: { requestId: 'ask-1', callId: 'call-1' } });
+    const response = await fetch(`${sessionsUrl(base, first.id)}/ask-session/ask-user`, jsonRequest({ requestId: 'ask-1', action: 'cancel' }));
+    expect(response.status).toBe(202);
+    await started.promise;
+    await new Promise((resolve) => setTimeout(resolve, 61_000));
+    const follow = await fetch(`${sessionsUrl(base, first.id)}/ask-session/follow`);
+    expect(follow.status).toBe(200);
+    await follow.body?.cancel();
+    expect((await fetch(`${sessionsUrl(base, first.id)}/ask-session/interrupt`, jsonRequest({}))).status).toBe(200);
+  }, 70_000);
 
   it('changes the global default while a turn is starting without affecting that turn', async () => {
     const root = await mkdtemp(join(tmpdir(), 'omniagent-web-permissions-snapshot-'));
@@ -1894,6 +1952,10 @@ describe('workspace web host', () => {
     const { base, first } = await setup();
     const response = await fetch(`${sessionsUrl(base, first.id)}/missing/interrupt`, jsonRequest({}));
     expect(response.status).toBe(404);
+    const { session } = await (await fetch(`${sessionsUrl(base, first.id)}`, jsonRequest({}))).json() as { session: { id: string } };
+    const idle = await fetch(`${sessionsUrl(base, first.id)}/${session.id}/interrupt`, jsonRequest({}));
+    expect(idle.status).toBe(409);
+    expect(await idle.json()).toMatchObject({ code: 'turn_not_running' });
   });
 
   it('returns 404 when a legacy session has a conflicting modern identity', async () => {

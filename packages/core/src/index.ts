@@ -307,7 +307,7 @@ export type {
 
 // Context
 export { compactMessages, estimateMessageTokens, estimateMessages } from './context/compaction';
-export { estimateModelHistory } from './session';
+export { estimateModelHistory, SteerNotAcceptedError } from './session';
 export type { CompactionOptions, CompactionResult } from './context/compaction';
 
 // Sandbox and skills

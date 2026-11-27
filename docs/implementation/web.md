@@ -132,7 +132,7 @@ Web 由一个本地 Node HTTP Host（`packages/web/src`）和一个 React 工作
 | `POST` | `.../plan-review` | 审批计划 |
 | `POST` | `.../approvals` | 审批工具调用 |
 | `POST` | `.../compact` | 安排手动压缩 |
-| `POST` | `.../interrupt` | 中断当前回合 |
+| `POST` | `.../interrupt` | 中断当前回合；空闲 typed `409 turn_not_running` |
 | `GET` | `.../context` | Context Meter 估算（push 通道的 pull 对照；工作台不调用） |
 | `GET` | `.../follow` | 以 `run.snapshot` 加入正在运行的回合 |
 | `GET` | `.../events` | trace 投影（会话级；易与工作区状态流混淆） |
@@ -231,8 +231,8 @@ server 维护：
 2. `mode: 'steer'` 且会话运行中：
    - 等待 `active.ready`（最多 10 秒）；
    - `session.deliverUserMessage(content)`；
-   - 返回 `202 { accepted, delivery: 'queued' }`。
-3. 非 steer 且已有运行回合 → 409。
+   - 持久化确认后返回 `202 { accepted, delivery: 'queued' }`；若停止竞态或无法确认持久化，返回 typed `409`（`steer_not_accepted`），未知失败保持原错误。
+3. 非 steer 且已有运行回合 → 409；无活动回合的 steer 也返回 typed `409 steer_not_accepted`，不会暗中启动回合。
 4. 创建 `RunningTurn { cancelled, ready }`，放入 `running`。
 5. 客户端断开：
    - 当前 turn 已绑定 Session → `interrupt()`；
@@ -369,7 +369,7 @@ tool.result
 - 切换 plan；
 - 删除会话。
 
-`LiveSessionRegistry` 默认上限 128，用于让计划任务和 Web 标签页共享同一个 Session，避免两个实例写同一日志。运行中的 `RunningTurn` 独立于 Session 缓存：它保存 baseline、事件 replay buffer 和 follower 集合，在 POST 连接断开后仍继续执行，直到回合结束或显式 interrupt。
+`ask-user` 恢复观察跟随真实 active turn，不使用固定 60 秒清理；`LiveSessionRegistry` 默认上限 128，用于让计划任务和 Web 标签页共享同一个 Session，避免两个实例写同一日志。运行中的 `RunningTurn` 独立于 Session 缓存：它保存 baseline、事件 replay buffer 和 follower 集合，在 POST 连接断开后仍继续执行，直到回合结束或显式 interrupt。
 
 ### 6.1 上下文读数：`/context`、详情字段与 `run.context` 帧
 

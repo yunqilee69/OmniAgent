@@ -85,6 +85,7 @@ import {
   projectPendingPlanReview,
   projectPlanMode,
 } from '../../core/src/session/plan';
+import { SteerNotAcceptedError } from '../../core/src/session';
 import { projectPendingAskUser } from '../../core/src/session/ask-user';
 import { countUserMessages, createGoalGrantEvent, projectGoalGrant } from '../../core/src/session/goal-grant';
 import { projectGoal } from '../../core/src/session/goal';
@@ -1930,9 +1931,8 @@ async function route(
       if (running.get(key) !== turn) return;
       publishTurnEvent(turn, publicAgentEvent(event, turn.startedAt));
     });
-    const started = Date.now();
     void (async () => {
-      while (Date.now() - started < 60_000 && turn.session?.activeTurn === true) {
+      while (turn.session?.activeTurn === true) {
         await new Promise((resolve) => setTimeout(resolve, 200));
       }
       stopListening?.();
@@ -1997,7 +1997,7 @@ async function route(
       cancelTurn(turn);
     }
     await openSession(options.store, workspace, sessionId);
-    if (!turn) throw new HttpError(409, 'Session is not running');
+    if (!turn) throw new HttpError(409, 'Session is not running', 'turn_not_running');
     return json(response, 200, { ok: true });
   }
   if (request.method === 'GET' && parts.length === 6 && parts[5] === 'follow') {
@@ -2055,7 +2055,7 @@ async function route(
         if (timer !== undefined) clearTimeout(timer);
       }
       if (running.get(key) !== active || active.session?.deliverUserMessage === undefined) {
-        throw new HttpError(409, 'The active turn cannot accept another message yet');
+        throw new HttpError(409, 'The active turn cannot accept another message yet', 'steer_not_accepted');
       }
       const registered = await options.workspaces.get(workspace.id);
       if (!registered || registered.path !== workspace.path) throw new HttpError(404, 'Workspace not found');
@@ -2063,11 +2063,13 @@ async function route(
       const stored = await storeAttachments(workspace.path, handle.header.cwd, attachments);
       let accepted = false;
       try {
-        if (running.get(key) !== active || active.closing || removing.has(workspace.id)) throw new HttpError(409, 'Session is no longer running');
+        if (running.get(key) !== active || active.closing || active.cancelled || removing.has(workspace.id)) {
+          throw new HttpError(409, 'Session is no longer running', 'steer_not_accepted');
+        }
         const content = attachments.length === 0 ? text : [...(text.trim() ? [{ type: 'text' as const, text }] : []), ...stored.parts];
         const operation = active.session.deliverUserMessage(content).then((delivery) => {
           accepted = true;
-          publishTurnEvent(active, publicUserEvent(content));
+          publishTurnEvent(active, { ...(publicUserEvent(content) as object), delivery: 'accepted_pending' });
           return delivery;
         });
         const settled = operation.then(() => undefined, () => undefined);
@@ -2077,12 +2079,15 @@ async function route(
         return json(response, 202, { accepted: true, delivery, broadcast: true });
       } catch (error) {
         accepted = await attachmentsCommitted(options.store, workspace, sessionId, stored.parts);
+        if (error instanceof SteerNotAcceptedError) {
+          throw new HttpError(409, 'The active turn cannot accept another message', 'steer_not_accepted');
+        }
         throw error;
       } finally {
         await stored.finish(accepted);
       }
     }
-    if (sendMode === 'steer') throw new HttpError(409, 'Session is not running');
+    if (sendMode === 'steer') throw new HttpError(409, 'Session is not running', 'steer_not_accepted');
     if (running.has(key)) throw new HttpError(409, 'Session already has an active turn');
     if (removing.has(workspace.id)) throw new HttpError(409, 'Workspace is being unregistered');
     let markReady!: () => void;
@@ -2221,13 +2226,17 @@ async function route(
             publishAgentEvent(turn, first.value);
           }
           for await (const event of stream) {
-            if (event.type === 'turn.start') turn.closing = false;
-            if (event.type === 'turn.end') {
+            if (turn.cancelled && event.type !== 'turn.end') continue;
+            const published = turn.cancelled && event.type === 'turn.end' && event.reason !== 'interrupted'
+              ? { type: 'turn.end' as const, reason: 'interrupted' as const }
+              : event;
+            if (published.type === 'turn.start') turn.closing = false;
+            if (published.type === 'turn.end') {
               turn.closing = true;
               await Promise.all(turn.deliveries);
             }
-            ended = event.type === 'turn.end';
-            publishAgentEvent(turn, event);
+            ended = published.type === 'turn.end';
+            publishAgentEvent(turn, published);
           }
           if (!ended) {
             turn.closing = true;
@@ -2240,8 +2249,8 @@ async function route(
           if (!attachmentFinished) {
             await stored.finish(await attachmentsCommitted(options.store, workspace, sessionId, stored.parts)).catch(() => undefined);
           }
-          publishTurnEvent(turn, publicAgentError(agentErrorFromUnknown(error)));
-          publishTurnEvent(turn, { type: 'turn.end', reason: 'error' });
+          if (!turn.cancelled) publishTurnEvent(turn, publicAgentError(agentErrorFromUnknown(error)));
+          publishTurnEvent(turn, { type: 'turn.end', reason: turn.cancelled ? 'interrupted' : 'error' });
         } finally {
           markReady();
           markStarted(false);

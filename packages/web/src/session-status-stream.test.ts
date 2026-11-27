@@ -185,14 +185,16 @@ describe('workspace session status stream', () => {
       type: 'session.status', sessionId: 'status-session', running: true, pending: null,
     });
 
-    // Finishing publishes a settled row with the recorded outcome.
+    // Finishing publishes a settled row. The list contract is only running and
+    // pending; the persisted outcome is read from the session's trace events.
     expect(await status.next()).toEqual({
       type: 'session.status', sessionId: 'status-session', running: false, pending: null,
     });
-    const finished = await waitForList(sessions, (row) => row.running === false && row.lastTurn !== undefined);
-    expect(finished.lastTurn).toMatchObject({ reason: 'end_turn' });
+    const finished = await waitForList(sessions, (row) => row.running === false);
     expect(finished.pending).toBeUndefined();
-    expect(typeof (finished.lastTurn as { endedAt?: unknown }).endedAt).toBe('number');
+    expect(finished.lastTurn).toBeUndefined();
+    const detail = await (await fetch(`${path}`)).json() as { events: Array<{ type: string; data?: { reason?: string } }> };
+    expect(detail.events.findLast((event) => event.type === 'trace/turn.end')).toMatchObject({ data: { reason: 'end_turn' } });
     status.cancel();
   });
 

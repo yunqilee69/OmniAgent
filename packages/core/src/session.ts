@@ -1,9 +1,9 @@
 import { realpath } from 'node:fs/promises';
 import { resolve } from 'node:path';
 import { z } from 'zod';
-import type { ContentPart, Message, ToolCall } from './domain/message';
+import type { AssistantMessage, ContentPart, Message, ToolCall } from './domain/message';
 import type { Tool, ToolSpec } from './domain/tool';
-import { assistantText, userMessage } from './domain/message';
+import { assistantText, text, userMessage } from './domain/message';
 import type { SessionEvent } from './session/types';
 import {
   SESSION_TITLE_EVENT,
@@ -305,6 +305,10 @@ export class Session {
   private titleGeneration?: Promise<void>;
   private readonly inbox: Message[] = [];
   private readonly inboxWaiters = new Set<() => void>();
+  private readonly steerWrites: Promise<void>[] = [];
+  private readonly steerInbox: Message[] = [];
+  private readonly acceptedSteers: Message[] = [];
+  private steerClosed = false;
   private readonly goalController: GoalController;
   private planActive: boolean;
   private compactRequested = false;
@@ -546,7 +550,8 @@ export class Session {
       system: () => this.systemText(),
       tools: this.tools,
       toolSpecs: () => this.visibleToolSpecs(),
-      takeQueuedMessages: () => this.inbox.splice(0),
+      takeQueuedMessages: () => this.consumeSteers(this.steerInbox.splice(0)).concat(this.inbox.splice(0)),
+      beforeNaturalEnd: () => this.drainSteers(),
       afterToolBatch: (signal) => this.settleStartedChildren(signal),
       takeForceCompact: () => {
         const requested = this.compactRequested;
@@ -781,7 +786,7 @@ export class Session {
 
   /** Resolve when a message or notice is waiting for the next model step. */
   async waitForInput(timeoutMs: number, signal: AbortSignal): Promise<{ timedOut: boolean }> {
-    if (this.inbox.length > 0) return { timedOut: false };
+    if (this.inbox.length > 0 || this.steerInbox.length > 0) return { timedOut: false };
     signal.throwIfAborted();
     return new Promise((resolve, reject) => {
       let settled = false;
@@ -794,7 +799,7 @@ export class Session {
         operation();
       };
       const onInput = (): void => {
-        if (this.inbox.length > 0) finish(() => resolve({ timedOut: false }));
+        if (this.inbox.length > 0 || this.steerInbox.length > 0) finish(() => resolve({ timedOut: false }));
       };
       const onAbort = (): void => {
         finish(() => reject(signal.reason ?? new Error('Input wait aborted')));
@@ -1006,7 +1011,7 @@ export class Session {
    * the next step, so the turn keeps streaming instead of being restarted.
    */
   async deliverUserMessage(input: string | readonly ContentPart[]): Promise<'queued'> {
-    if (!this.executing) throw new Error('A turn is not active in this session');
+    if (!this.executing || this.steerClosed) throw new SteerNotAcceptedError();
     const content = typeof input === 'string' ? userMessage(input).content : input.slice();
     if (content.length === 0
       || !content.some((part) => part.type === 'image' || (part.type === 'text' && part.text.trim() !== ''))) {
@@ -1015,11 +1020,27 @@ export class Session {
     const message: Message = expandInitCommand(content) === undefined
       ? { role: 'user', content }
       : { role: 'user', content, initCommand: true };
-    this.history.push(message);
-    await this.appendMessage('message/user', typeof input === 'string' ? { text: input } : { content });
-    this.inbox.push(message);
-    this.notifyInbox();
-    return 'queued';
+    let finish!: () => void;
+    let fail!: (error: unknown) => void;
+    const write = new Promise<void>((resolve, reject) => { finish = resolve; fail = reject; });
+    this.steerWrites.push(write);
+    try {
+      await this.appendMessage('message/user', typeof input === 'string'
+        ? { text: input, source: { kind: 'steer', state: 'accepted_pending' } }
+        : { content, source: { kind: 'steer', state: 'accepted_pending' } });
+      this.history.push(message);
+      this.acceptedSteers.push(message);
+      this.steerInbox.push(message);
+      this.notifyInbox();
+      finish();
+      return 'queued';
+    } catch (error) {
+      fail(error);
+      throw error;
+    } finally {
+      const index = this.steerWrites.indexOf(write);
+      if (index >= 0) this.steerWrites.splice(index, 1);
+    }
   }
 
   /**
@@ -1249,6 +1270,7 @@ export class Session {
     }
     const controller = new AbortController();
     this.controller = controller;
+    this.steerClosed = false;
     if (this.interruptRequested) controller.abort();
     let generator: AsyncGenerator<AgentEvent, Message[]> | undefined;
     let terminal = false;
@@ -1256,6 +1278,7 @@ export class Session {
     let recordedError = false;
     let pendingAudit = false;
     let compactedThisTurn = false;
+    let partialAssistantText = '';
     let stopReason: StopReason = 'interrupted';
 
     try {
@@ -1266,17 +1289,8 @@ export class Session {
       generator = this.loop.run(modelHistory.messages, controller.signal);
 
       while (true) {
-        if (controller.signal.aborted && !terminal) {
-          const event: AgentEvent = { type: 'turn.end', reason: 'interrupted' };
-          await this.appendTrace(event);
-          terminal = true;
-          if (background) this.emitBackground(event);
-          yield event;
-          return 'interrupted';
-        }
-
-        pendingAudit = false;
         const next = await generator.next();
+        pendingAudit = false;
         if (next.done) {
           // Adopt the loop's history unless the only difference is a repair:
           // the transcript stays an exact record of events, so placeholder tool
@@ -1284,11 +1298,19 @@ export class Session {
           // adopted even then, otherwise the next turn would compact the same
           // messages again and the idle reading would jump back to pre-compaction.
           // No event is appended for either case.
-          if (!modelHistory.repaired || compactedThisTurn) this.history = next.value;
+          if (!modelHistory.repaired || compactedThisTurn) this.history = withoutOmittedAssistants(next.value);
+          for (const steer of this.acceptedSteers.splice(0)) {
+            if (!this.history.includes(steer)) this.history.push(steer);
+          }
           return stopReason;
         }
 
         const event = next.value;
+        if (controller.signal.aborted && event.type !== 'tool.result'
+          && !(event.type === 'turn.end' && event.reason === 'interrupted')) continue;
+        if (controller.signal.aborted && event.type === 'turn.end' && event.reason !== 'interrupted') continue;
+        if (event.type === 'assistant.delta') partialAssistantText += event.text;
+        if (event.type === 'assistant.message') partialAssistantText = '';
         if (event.type === 'context.compacted') compactedThisTurn = true;
         if (event.type === 'tool.result') pendingAudit = true;
         if (event.type === 'permission.decided' || event.type === 'tool.result') {
@@ -1310,10 +1332,19 @@ export class Session {
           if (previous?.role === 'tool') previous.results.push(event.result);
           else this.history.push({ role: 'tool', results: [event.result] });
         }
+        if (event.type === 'turn.end') {
+          this.steerClosed = true;
+          await Promise.allSettled(this.steerWrites);
+        }
+        if (event.type === 'turn.end' && event.reason === 'interrupted' && partialAssistantText !== '') {
+          await this.persistInterruptedAssistant(partialAssistantText);
+          partialAssistantText = '';
+        }
         await this.appendTrace(event);
         if (event.type === 'turn.end') {
           terminal = true;
           stopReason = event.reason;
+          this.steerClosed = true;
         }
         if (event.type === 'error') {
           recordedError = true;
@@ -1328,6 +1359,7 @@ export class Session {
           const event: AgentEvent = { type: 'turn.end', reason: 'interrupted' };
           await this.appendTrace(event);
           terminal = true;
+          if (partialAssistantText !== '') await this.persistInterruptedAssistant(partialAssistantText);
           if (background) this.emitBackground(event);
           yield event;
         }
@@ -1358,11 +1390,19 @@ export class Session {
         } finally {
           try {
             if (!terminal) {
-              await this.appendTrace({ type: 'turn.end', reason: failed ? 'error' : 'interrupted' });
+              const reason = failed ? 'error' : 'interrupted';
+              if (reason === 'interrupted' && partialAssistantText !== '') {
+                await this.persistInterruptedAssistant(partialAssistantText);
+                partialAssistantText = '';
+              }
+              await this.appendTrace({ type: 'turn.end', reason });
             }
           } finally {
             if (!failed) await this.recordAbandonedPermissions();
             this.#projectionHistory = undefined;
+            this.steerClosed = true;
+            await Promise.allSettled(this.steerWrites);
+            if (controller.signal.aborted) this.steerInbox.length = 0;
             this.controller = undefined;
             // A notice or external message can arrive after the last model
             // step. Its text is already in history, so retire the step queue
@@ -1375,6 +1415,28 @@ export class Session {
         }
       }
     }
+  }
+
+  private async drainSteers(): Promise<Message[]> {
+    while (this.steerWrites.length > 0) await Promise.allSettled([...this.steerWrites]);
+    if (this.controller?.signal.aborted) return [];
+    const queued = this.steerInbox.splice(0);
+    if (queued.length === 0) this.steerClosed = true;
+    return this.consumeSteers(queued);
+  }
+
+  private consumeSteers(queued: Message[]): Message[] {
+    const consumed = new Set(queued);
+    this.acceptedSteers.splice(0, this.acceptedSteers.length, ...this.acceptedSteers.filter((message) => !consumed.has(message)));
+    return queued;
+  }
+
+  /** Keep only visible text published since the last complete assistant message. */
+  private async persistInterruptedAssistant(content: string): Promise<void> {
+    if (content === '') return;
+    await this.appendMessage('message/assistant', {
+      role: 'assistant', content: [text(content)], toolCalls: [], display: 'partial', context: 'omit',
+    });
   }
 
   private runBackgroundTurn(source: 'external' | 'notice'): void {
@@ -1813,6 +1875,12 @@ function formatSubagentNotice(notice: SubagentNotice): string {
   return `${title}${description}${result}\n\nReview the result before relying on it; open the child session for full details.`;
 }
 
+/** A steer was refused before its persistence was accepted. Unknown failures stay ordinary errors. */
+export class SteerNotAcceptedError extends Error {
+  readonly code = 'steer_not_accepted';
+  constructor() { super('The active turn cannot accept another message'); this.name = 'SteerNotAcceptedError'; }
+}
+
 function copyDshPermissions(value: DshPermissionSnapshot | undefined): DshPermissionSnapshot | undefined {
   if (value === undefined) return undefined;
   if (typeof value !== 'object' || value === null || !isDshPermissionPreset(value.preset)) {
@@ -1887,6 +1955,20 @@ export function estimateModelHistory(history: readonly Message[], imageInput?: b
   return estimateMessages(projectImageInput(projectCommandInput(prepareModelHistory(history).messages), imageInput));
 }
 
+/** A partial assistant is a display log only. It must not re-enter provider history. */
+function omittedAssistantContext(message: AssistantMessage): unknown {
+  const persisted = message as AssistantMessage & { context?: unknown };
+  return 'context' in persisted ? persisted.context : undefined;
+}
+
+function isOmittedAssistant(message: Message): boolean {
+  return message.role === 'assistant' && omittedAssistantContext(message) === 'omit';
+}
+
+function withoutOmittedAssistants(messages: readonly Message[]): Message[] {
+  return messages.filter((message) => !isOmittedAssistant(message));
+}
+
 function prepareModelHistory(history: readonly Message[]): { messages: Message[]; repaired: boolean } {
   const messages: Message[] = [];
   let repaired = false;
@@ -1898,6 +1980,7 @@ function prepareModelHistory(history: readonly Message[]): { messages: Message[]
       repaired = true;
       continue;
     }
+    if (isOmittedAssistant(message)) continue;
     if (message.role !== 'assistant' || message.toolCalls.length === 0) {
       messages.push(message);
       continue;

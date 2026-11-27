@@ -1525,28 +1525,37 @@ describe('workbench store', () => {
     store.dispose();
   });
 
-  it('starts a normal turn when steering races with an idle session', async () => {
+  it('does not upgrade a steer race into a normal turn', async () => {
     const posted: Array<{ text: string; mode?: string }> = [];
-    let running = true;
-    let controller!: ReadableStreamDefaultController<Uint8Array>;
     const store = await boot(sessionFetcher((url, init) => {
-      if (url === '/api/workspaces/a/sessions/shared') return json(detail({ running }));
+      if (url === '/api/workspaces/a/sessions/shared') return json(detail({ running: true }));
       if (url === '/api/workspaces/a/sessions/shared/messages' && init?.method === 'POST') {
-        const body = JSON.parse(String(init.body)) as { text: string; mode?: string };
-        posted.push(body);
-        if (body.mode === 'steer') {
-          running = false;
-          return json({ error: 'Session is not running' }, 409);
-        }
-        return new Response(new ReadableStream<Uint8Array>({ start(value) { controller = value; } }), { status: 200 });
+        posted.push(JSON.parse(String(init.body)) as { text: string; mode?: string });
+        return json({ error: 'Session is not running' }, 409);
       }
       return undefined;
     }));
-    expect(await store.steerMessage('late')).toBe(true);
-    expect(posted).toEqual([{ text: 'late', mode: 'steer' }, { text: 'late' }]);
-    controller.enqueue(new TextEncoder().encode('data: {"type":"turn.end","reason":"end_turn"}\n\n'));
-    controller.close();
-    await waitFor(() => store.currentEntry()?.run === undefined);
+    expect(await store.steerMessage('late')).toBe(false);
+    expect(posted).toEqual([{ text: 'late', mode: 'steer' }]);
+    expect(store.currentEntry()?.queued).toEqual([]);
+    expect(store.getSnapshot().alert).not.toBe('');
+    store.dispose();
+  });
+
+  it('does not queue a direct steer rejected with the typed 409 response', async () => {
+    const posted: Array<{ text: string; mode?: string }> = [];
+    const store = await boot(sessionFetcher((url, init) => {
+      if (url === '/api/workspaces/a/sessions/shared') return json(detail({ running: true }));
+      if (url === '/api/workspaces/a/sessions/shared/messages' && init?.method === 'POST') {
+        posted.push(JSON.parse(String(init.body)) as { text: string; mode?: string });
+        return json({ error: 'The active turn cannot accept another message', code: 'steer_not_accepted' }, 409);
+      }
+      return undefined;
+    }));
+    expect(await store.steerMessage('keep as draft')).toBe(false);
+    expect(posted).toEqual([{ text: 'keep as draft', mode: 'steer' }]);
+    expect(store.currentEntry()?.queued).toEqual([]);
+    expect(store.getSnapshot().alert).toContain('The active turn cannot accept another message');
     store.dispose();
   });
 
@@ -2528,6 +2537,103 @@ describe('refresh strategy and stable rendering', () => {
     // Same arrays: a repeated response must not remount the conversation.
     expect(second.transcript).toBe(first.transcript);
     expect(second.turns).toBe(first.turns);
+    store.dispose();
+  });
+
+  it('freezes late deltas and reconciles only the stopped turn', async () => {
+    let controller!: ReadableStreamDefaultController<Uint8Array>;
+    let detailCalls = 0;
+    const encoder = new TextEncoder();
+    const store = await boot(sessionFetcher((url, init) => {
+      if (url === '/api/workspaces/a/sessions/shared/follow') {
+        return new Response(new ReadableStream({ start(value) { controller = value; } }));
+      }
+      if (url === '/api/workspaces/a/sessions/shared/interrupt' && init?.method === 'POST') return json({ error: 'Session is not running', code: 'turn_not_running' }, 409);
+      if (url === '/api/workspaces/a/sessions/shared') {
+        detailCalls += 1;
+        return json(detailCalls < 2 ? detail({ running: true }) : { ...detail(), messages: [
+          { role: 'user', content: [{ type: 'text', text: 'Alpha history' }] },
+          { role: 'assistant', content: [{ type: 'text', text: 'persisted partial' }] },
+        ] });
+      }
+      return undefined;
+    }));
+    await waitFor(() => controller !== undefined);
+    controller.enqueue(encoder.encode('data: {"type":"assistant.delta","text":"live"}\n\n'));
+    await waitFor(() => store.currentEntry()?.run?.streamText === 'live');
+    const stopping = store.stopTurn();
+    controller.enqueue(encoder.encode('data: {"type":"assistant.delta","text":" late"}\n\n'));
+    await stopping;
+    expect(store.currentEntry()?.run).toBeUndefined();
+    expect(store.currentEntry()?.running).toBe(false);
+    expect(store.currentEntry()?.transcript.some((item) => item.kind === 'assistant' && item.text.includes('late'))).toBe(false);
+    store.dispose();
+    controller.close();
+  });
+
+  it('keeps an existing queued steer when it is not accepted', async () => {
+    const store = await boot(sessionFetcher((url, init) => {
+      if (url === '/api/workspaces/a/sessions/shared') return json(detail({ running: true }));
+      if (url === '/api/workspaces/a/sessions/shared/follow') return new Response(new ReadableStream());
+      if (url === '/api/workspaces/a/sessions/shared/messages' && init?.method === 'POST') {
+        return json({ error: 'not accepted', code: 'steer_not_accepted' }, 409);
+      }
+      return undefined;
+    }));
+    expect(await store.queueMessage('keep me')).toBe(true);
+    await waitFor(() => store.currentEntry()?.queued.some((item) => item.text === 'keep me') === true);
+    const existingId = store.currentEntry()!.queued[0]!.id;
+    expect(await store.steerQueuedMessage(existingId)).toBe(false);
+    expect(store.currentEntry()?.queued).toMatchObject([{ id: existingId, text: 'keep me' }]);
+    expect(store.currentEntry()?.queued[0]?.delivery).toBeUndefined();
+    store.dispose();
+  });
+
+  it('pauses after stop and resumes FIFO only when continued', async () => {
+    let posts: string[] = [];
+    const store = await boot(sessionFetcher((url, init) => {
+      if (url === '/api/workspaces/a/sessions/shared') return json(detail());
+      if (url === '/api/workspaces/a/sessions/shared/messages' && init?.method === 'POST') {
+        posts.push((JSON.parse(String(init.body)) as { text: string }).text);
+        return json({ accepted: true }, 202);
+      }
+      if (url === '/api/workspaces/a/sessions/shared/follow') return new Response(null, { status: 204 });
+      return undefined;
+    }));
+    await store.pauseQueue();
+    expect(await store.queueMessage('first')).toBe(true);
+    expect(await store.queueMessage('second')).toBe(true);
+    await new Promise((resolve) => setTimeout(resolve, 20));
+    expect(posts).toEqual([]);
+    await store.resumeQueue();
+    await waitFor(() => posts.length === 1);
+    expect(posts).toEqual(['first']);
+    store.dispose();
+  });
+
+  it('shares a queue pause across tabs through storage and Web Locks', async () => {
+    const store = await boot(sessionFetcher((url) => url === '/api/workspaces/a/sessions/shared' ? json(detail()) : undefined));
+    await store.pauseQueue();
+    const other = await boot(sessionFetcher((url) => url === '/api/workspaces/a/sessions/shared' ? json(detail()) : undefined));
+    expect(other.currentEntry()?.queuePaused).toBe(true);
+    other.dispose();
+    store.dispose();
+  });
+
+  it('does not hold the queue after a turn ends naturally', async () => {
+    let controller!: ReadableStreamDefaultController<Uint8Array>;
+    const store = await boot(sessionFetcher((url, init) => {
+      if (url === '/api/workspaces/a/sessions/shared') return json(detail());
+      if (url === '/api/workspaces/a/sessions/shared/messages' && init?.method === 'POST') return json({ accepted: true }, 202);
+      if (url === '/api/workspaces/a/sessions/shared/follow') return new Response(new ReadableStream({ start(value) { controller = value; } }));
+      return undefined;
+    }));
+    expect(await store.sendMessage('Question')).toBe(true);
+    await waitFor(() => controller !== undefined);
+    controller.enqueue(new TextEncoder().encode('data: {"type":"turn.end","reason":"end_turn"}\n\n'));
+    controller.close();
+    await waitFor(() => store.currentEntry()?.run === undefined);
+    expect(store.currentEntry()?.queuePaused).toBe(false);
     store.dispose();
   });
 });

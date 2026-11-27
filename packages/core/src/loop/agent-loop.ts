@@ -47,6 +47,8 @@ export interface AgentLoopDeps {
   toolSpecs?: () => ToolSpec[];
   /** Drain messages delivered while a turn is running (agent messaging/notices). */
   takeQueuedMessages?: () => Message[];
+  /** Drain confirmed user steers before publishing a natural end-turn terminal. */
+  beforeNaturalEnd?: () => Promise<Message[]>;
   /** Await platform work spawned by a completed tool batch before the next model request. */
   afterToolBatch?: (signal: AbortSignal) => Promise<Message[]>;
   /** One-shot manual compaction request, consumed before the next model request. */
@@ -226,15 +228,16 @@ export class AgentLoop {
         const maxRetries = clampMaxRetries(this.deps.maxRetries);
         let attempt = 0;
         while (response === undefined) {
+          signal?.throwIfAborted();
           let streamed = false;
           try {
             if (this.deps.model.stream) {
-              response = yield* this.forwardStream(this.deps.model.stream(request), () => {
+              response = yield* this.forwardStream(this.deps.model.stream(request), signal, () => {
                 streamed = true;
                 markFirstToken();
               });
             } else {
-              response = await this.deps.model.complete(request);
+              response = await awaitWithAbort(this.deps.model.complete(request), signal);
             }
             if (response === undefined) throw new Error('model stream ended without a response');
           } catch (error) {
@@ -296,6 +299,21 @@ export class AgentLoop {
       yield { type: 'assistant.message', message: assistant };
 
       if (assistant.toolCalls.length === 0 || stopReason === 'max_tokens') {
+        if (stopReason === 'end_turn' && assistant.toolCalls.length === 0 && this.deps.beforeNaturalEnd) {
+          const queued = await this.deps.beforeNaturalEnd();
+          if (signal?.aborted) {
+            yield { type: 'turn.end', reason: 'interrupted' };
+            return messages;
+          }
+          if (queued.length > 0) {
+            queued.forEach((message, index) => {
+              if (message.role === 'user') protectedIndices.push(messages.length + index);
+            });
+            messages.push(...queued);
+            this.publishHistory(messages);
+            continue;
+          }
+        }
         yield { type: 'turn.end', reason: stopReason };
         return messages;
       }
@@ -306,7 +324,6 @@ export class AgentLoop {
         cwd: this.deps.cwd,
         signal: callSignal,
       });
-
       for (const call of assistant.toolCalls) {
         if (callSignal.aborted) {
           yield { type: 'turn.end', reason: 'interrupted' };
@@ -333,6 +350,8 @@ export class AgentLoop {
           source: permission.source,
         };
 
+        // Yielding permission.decided gives the consumer a chance to interrupt
+        // before the allowed call starts. An allow decision is not execution.
         if (callSignal.aborted) {
           yield { type: 'turn.end', reason: 'interrupted' };
           return messages;
@@ -342,10 +361,7 @@ export class AgentLoop {
             ? prepared.execute()
             : executor.execute(call)
           : Promise.resolve(deniedResult(call, permission.source));
-        const result = await Promise.race([
-          execution,
-          abortResult(call, callSignal),
-        ]);
+        const result = await execution;
 
         results.push(result);
         yield { type: 'tool.result', result };
@@ -380,6 +396,10 @@ export class AgentLoop {
           return messages;
         }
       }
+      if (callSignal.aborted) {
+        yield { type: 'turn.end', reason: 'interrupted' };
+        return messages;
+      }
     }
 
     yield { type: 'turn.end', reason: 'max_steps' };
@@ -403,23 +423,80 @@ export class AgentLoop {
    */
   private async *forwardStream(
     stream: AsyncGenerator<ModelStreamDelta, ModelResponse>,
+    signal: AbortSignal | undefined,
     onFirstDelta: () => void,
   ): AsyncGenerator<AgentEvent, ModelResponse> {
-    let next = await stream.next();
+    let next = await nextWithAbort(stream, signal);
     let announced = false;
-    while (!next.done) {
-      if (!announced) {
-        announced = true;
-        onFirstDelta();
+    let closed = false;
+    const release = (): void => {
+      if (closed || signal?.aborted !== true) return;
+      closed = true;
+      closeAsyncIterator(stream);
+    };
+    signal?.addEventListener('abort', release, { once: true });
+    try {
+      while (!next.done) {
+        if (signal?.aborted) break;
+        if (!announced) {
+          announced = true;
+          onFirstDelta();
+        }
+        if (next.value.type === 'text') {
+          yield { type: 'assistant.delta', text: next.value.text };
+        } else {
+          yield { type: 'assistant.reasoning.delta', text: next.value.text };
+        }
+        next = await nextWithAbort(stream, signal);
       }
-      if (next.value.type === 'text') {
-        yield { type: 'assistant.delta', text: next.value.text };
-      } else {
-        yield { type: 'assistant.reasoning.delta', text: next.value.text };
-      }
-      next = await stream.next();
+      if (signal?.aborted) throw signal.reason ?? new Error('The operation was aborted');
+      return next.value;
+    } finally {
+      signal?.removeEventListener('abort', release);
+      if (signal?.aborted) release();
     }
-    return next.value;
+  }
+}
+
+/** Stop waiting for a provider that ignores AbortSignal, without losing its rejection. */
+async function awaitWithAbort<T>(operation: Promise<T>, signal?: AbortSignal): Promise<T> {
+  if (signal === undefined) return operation;
+  let onAbort!: () => void;
+  let settled = false;
+  const aborted = new Promise<never>((_, reject) => {
+    onAbort = () => {
+      settled = true;
+      reject(signal.reason ?? new Error('The operation was aborted'));
+    };
+    signal.addEventListener('abort', onAbort, { once: true });
+  });
+  try {
+    return await Promise.race([
+      operation.then((value) => {
+        if (settled) return new Promise<T>(() => undefined);
+        return value;
+      }, (error: unknown) => {
+        if (settled) return new Promise<T>(() => undefined);
+        throw error;
+      }),
+      aborted,
+    ]);
+  } finally {
+    signal.removeEventListener('abort', onAbort);
+    void operation.catch(() => undefined);
+  }
+}
+
+async function nextWithAbort<T>(iterator: AsyncIterator<T>, signal?: AbortSignal): Promise<IteratorResult<T>> {
+  return awaitWithAbort(Promise.resolve(iterator.next()), signal);
+}
+
+function closeAsyncIterator(iterator: AsyncIterator<unknown>): void {
+  if (typeof iterator.return !== 'function') return;
+  try {
+    void Promise.resolve(iterator.return()).catch(() => undefined);
+  } catch {
+    // Cancellation must remain non-blocking when a provider rejects close.
   }
 }
 
@@ -467,24 +544,6 @@ function waitForRetry(delayMs: number, signal?: AbortSignal): Promise<void> {
     }
     signal?.addEventListener('abort', onAbort, { once: true });
   });
-}
-
-/** A stop request ends the wait. The underlying call may still finish later. */
-function abortResult(call: ToolCall, signal: AbortSignal): Promise<ToolResult> {
-  if (signal.aborted) return Promise.resolve(interruptedResult(call));
-  return new Promise((resolve) => {
-    signal.addEventListener('abort', () => resolve(interruptedResult(call)), { once: true });
-  });
-}
-
-function interruptedResult(call: ToolCall): ToolResult {
-  return {
-    callId: call.id,
-    name: call.name,
-    ok: false,
-    content: 'Tool execution was interrupted before it finished. Do not assume it ran.',
-    truncated: false,
-  };
 }
 
 /** 被拒也是一种 observation：告诉模型为什么不行，它才有机会换个做法。 */

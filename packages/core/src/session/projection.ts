@@ -17,7 +17,9 @@ export function projectPublicHistory(identity: unknown, events: readonly Session
   const result: PublicHistoryMessage[] = [];
   for (const event of events) {
     if (isInternalNotice(event)) continue;
-    const message = projectMessages([event])[0];
+    const message = isDisplayOnlyAssistant(event.data) && (event.type === 'message/assistant' || event.type === 'assistant/message')
+      ? readAssistantMessage(event.data)
+      : projectMessages([event])[0];
     if (message === undefined) continue;
     const safe = safePublicMessages([message])[0]!;
     const previous = result.at(-1);
@@ -66,6 +68,7 @@ export function projectMessages(events: readonly SessionEvent[]): Message[] {
       const message = readSubagentNotice(event.data);
       if (message) messages.push(message);
     } else if (event.type === 'message/assistant' || event.type === 'assistant/message') {
+      if (isDisplayOnlyAssistant(event.data)) continue;
       const message = readAssistantMessage(event.data);
       if (message) messages.push(message);
     } else if (event.type === 'message/tool-result' || event.type === 'tool/result') {
@@ -224,4 +227,10 @@ function readToolResult(data: unknown): ToolResult | undefined {
     truncated: candidate.truncated ?? false,
     ...(candidate.durationMs === undefined ? {} : { durationMs: candidate.durationMs }),
   };
+}
+
+
+function isDisplayOnlyAssistant(data: unknown): boolean {
+  return typeof data === 'object' && data !== null && !Array.isArray(data)
+    && (data as { context?: unknown }).context === 'omit';
 }

@@ -4,7 +4,7 @@ import { join } from 'node:path';
 import { describe, expect, it } from 'vitest';
 import type { AgentEvent } from './protocol/events';
 import { FakeModel, textResponse, toolCallResponse } from './providers/fake';
-import { Session } from './session';
+import { Session, SteerNotAcceptedError } from './session';
 import { SessionStore } from './session/store';
 import {
   createInitialDshPermissionEvent,
@@ -89,9 +89,16 @@ describe('Session background continuation', () => {
         role: 'user', content: expect.arrayContaining([expect.objectContaining({ text: 'steer now' })]),
       }));
       expect(handle.events).toContainEqual(expect.objectContaining({
-        type: 'message/user', data: { text: 'steer now' },
+        type: 'message/user', data: expect.objectContaining({
+          text: 'steer now',
+          source: { kind: 'steer', state: 'accepted_pending' },
+        }),
       }));
-      await expect(session.deliverUserMessage('late')).rejects.toThrow('A turn is not active in this session');
+      await expect(session.deliverUserMessage('late')).rejects.toMatchObject({
+        name: 'SteerNotAcceptedError',
+        code: 'steer_not_accepted',
+        message: 'The active turn cannot accept another message',
+      } satisfies Partial<SteerNotAcceptedError>);
     } finally {
       await rm(cwd, { recursive: true, force: true });
     }

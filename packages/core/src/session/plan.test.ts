@@ -117,20 +117,23 @@ describe('exit_plan_mode', () => {
 
   it('stops waiting for review when the presenting turn is interrupted', async () => {
     const controller = new AbortController();
-    const review = vi.fn((_plan: string, signal: AbortSignal) => new Promise<never>((_resolve, reject) => {
-      const fail = (): void => reject(signal.reason instanceof Error ? signal.reason : new Error('The operation was aborted'));
-      if (signal.aborted) fail();
-      else signal.addEventListener('abort', fail, { once: true });
+    let approveLate: ((value: { approved: boolean }) => void) | undefined;
+    const onApproved = vi.fn(async () => undefined);
+    const review = vi.fn(() => new Promise<{ approved: boolean }>((resolve) => {
+      approveLate = resolve;
     }));
-    const tool = createExitPlanModeTool({ review, onApproved: async () => undefined });
+    const tool = createExitPlanModeTool({ review, onApproved });
     const running = tool.execute({ plan: '# Plan\n\nDo it.' }, {
       callId: 'c1', cwd: '/tmp', signal: controller.signal,
     } as never);
     await vi.waitFor(() => { expect(review).toHaveBeenCalledOnce(); });
     controller.abort();
-    await expect(running).resolves.toMatchObject({
+    await expect(running).resolves.toEqual({
       ok: false,
-      content: expect.stringContaining('Plan review was interrupted'),
+      content: 'Plan review was interrupted before the user answered.',
     });
+    approveLate?.({ approved: true });
+    await new Promise((resolve) => setTimeout(resolve, 0));
+    expect(onApproved).not.toHaveBeenCalled();
   });
 });
