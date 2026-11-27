@@ -294,6 +294,9 @@ export function Composer({ hero = false, onOpenPlanPreview }: { hero?: boolean; 
   const [risk, setRisk] = useState<{ preset: PermissionPreset; acknowledged: boolean } | null>(null);
   const [attachments, setAttachments] = useState<Attachment[]>([]);
   const [attachmentError, setAttachmentError] = useState('');
+  const [modelOpenRequest, setModelOpenRequest] = useState(0);
+  const [permissionOpenRequest, setPermissionOpenRequest] = useState(0);
+  const [agentOpenRequest, setAgentOpenRequest] = useState(0);
   const [readingFiles, setReadingFiles] = useState(false);
   const readingFilesRef = useRef(false);
   // Attachments are restored per draft key from IndexedDB. While that read runs the
@@ -1201,6 +1204,7 @@ export function Composer({ hero = false, onOpenPlanPreview }: { hero?: boolean; 
                   items={Object.entries(permissionPresets).map(([value, preset]) => ({
                     id: value, label: t(preset.label), icon: permissionIcon(value as PermissionPreset),
                   }))}
+                  openRequest={permissionOpenRequest}
                   onSelect={choosePermission} ariaLabel={t('Session permission')}
                   title={selectedPermission === null ? t('Choose a permission for this session.')
                     : busy ? t('{permission} · applies from your next message', { permission: t(permissionPresets[selectedPermission].description) })
@@ -1235,6 +1239,7 @@ export function Composer({ hero = false, onOpenPlanPreview }: { hero?: boolean; 
                 <>
                   {entry?.mode == null && (
                     <SelectMenu value={agentValue} items={agentItems}
+                      openRequest={agentOpenRequest}
                       onSelect={(id) => {
                         if (app.sessionId === null) store.setCreationAgent(id);
                         else void store.saveSessionAgent(id);
@@ -1266,6 +1271,7 @@ export function Composer({ hero = false, onOpenPlanPreview }: { hero?: boolean; 
                         : t('Model source for this session')}
                     disabled={saving || (!available && !creating)}
                     saving={saving}
+                    openRequest={modelOpenRequest}
                     side="top"
                     align="end"
                   />
@@ -1327,10 +1333,26 @@ export function Composer({ hero = false, onOpenPlanPreview }: { hero?: boolean; 
             )}
           </div>
         </div>
-        {(entry?.permissionError !== undefined && entry.permissionError !== '')
+        {(entry?.composerError !== undefined && entry.composerError !== '')
+          || (entry?.permissionError !== undefined && entry.permissionError !== '')
           || (entry?.agentError !== undefined && entry.agentError !== '')
           || (entry?.modelError !== undefined && entry.modelError !== '') ? (
             <div className={appCss.composerErrors}>
+              {entry?.composerError !== undefined && entry.composerError !== '' && (
+                <p>
+                  {entry.composerError}
+                  {entry.composerAction !== undefined && (
+                    <button type="button" onClick={() => {
+                      if (entry.composerAction === 'model') setModelOpenRequest((current) => current + 1);
+                      else if (entry.composerAction === 'permission') setPermissionOpenRequest((current) => current + 1);
+                      else if (entry.composerAction === 'agent') setAgentOpenRequest((current) => current + 1);
+                      else store.openSettings('models');
+                    }}>
+                      {entry.composerAction === 'model-settings' ? t('Open model settings') : t('Open')}
+                    </button>
+                  )}
+                </p>
+              )}
               {entry?.permissionError !== undefined && entry.permissionError !== '' && <p>{entry.permissionError}</p>}
               {entry?.agentError !== undefined && entry.agentError !== '' && <p>{entry.agentError}</p>}
               {entry?.modelError !== undefined && entry.modelError !== '' && <p>{entry.modelError}</p>}

@@ -12,6 +12,7 @@ import {
   createSessionForkEvent,
   createSessionPinEvent,
   DEFAULT_SESSION_TITLE_LIMITS,
+  DeepSeekMessagesError,
   estimateModelHistory,
   foldSessionArchived,
   foldSessionPinned,
@@ -310,6 +311,7 @@ class HttpError extends Error {
     readonly status: number,
     message: string,
     readonly code?: string,
+    readonly failure?: 'runtime_unavailable' | 'MISSING_CREDENTIAL',
   ) {
     super(message);
   }
@@ -319,6 +321,7 @@ interface RunningTurn {
   session?: WebSession;
   approval?: ApprovalTurn;
   cancelled: boolean;
+  startupFailure?: 'runtime_unavailable' | 'MISSING_CREDENTIAL';
   closing?: boolean;
   /** Session-facing id, used as the address of published status frames. */
   sessionId: string;
@@ -576,6 +579,7 @@ export function createWebHost(options: WebHostOptions): WebHost {
       json(response, status, {
         error: message,
         ...(error instanceof HttpError && error.code !== undefined ? { code: error.code } : {}),
+        ...(error instanceof HttpError && error.failure !== undefined ? { failure: error.failure } : {}),
       });
     });
   });
@@ -1497,7 +1501,7 @@ async function route(
       blank: !hasHumanMessage(handle.events),
       mode: mode.status === 'selected' ? mode.selection : null,
       running: running.has(key),
-      messages: projectPublicHistory(handle.header, handle.events),
+      messages: associatePublicTurns(projectPublicHistory(handle.header, handle.events), handle.events),
       permission: { preset: permissionProjection(handle, key, failedPermissions).preset },
       ...selectionSummary,
       plan: projectPlanMode(handle.events),
@@ -1619,7 +1623,7 @@ async function route(
   if (request.method === 'GET' && parts.length === 6 && parts[5] === 'messages') {
     const handle = await openSession(options.store, workspace, sessionId);
     return json(response, 200, {
-      messages: projectPublicHistory(handle.header, handle.events),
+      messages: associatePublicTurns(projectPublicHistory(handle.header, handle.events), handle.events),
     });
   }
   if (request.method === 'POST' && parts.length === 6 && parts[5] === 'permission') {
@@ -1832,7 +1836,7 @@ async function route(
       session, cancelled: false, ready: Promise.resolve(), baselineReady: Promise.resolve(),
       startedAt: Date.now(), deliveries: new Set(), events: [], replayBytes: 0, replayOverflow: false,
       followers: new Set(), sessionId,
-      baseline: { messages: projectPublicHistory(handle.header, handle.events), metrics: projectSessionMetrics(handle.events) },
+      baseline: { messages: associatePublicTurns(projectPublicHistory(handle.header, handle.events), handle.events), metrics: projectSessionMetrics(handle.events) },
       publishStatus: (active) => {
         statusHub.publish(workspace.id, { type: 'session.status', sessionId, running: active, pending: null });
       },
@@ -1919,7 +1923,7 @@ async function route(
       session, cancelled: false, ready: Promise.resolve(), baselineReady: Promise.resolve(),
       startedAt: Date.now(), deliveries: new Set(), events: [], replayBytes: 0, replayOverflow: false,
       followers: new Set(), sessionId,
-      baseline: { messages: projectPublicHistory(handle.header, handle.events), metrics: projectSessionMetrics(handle.events) },
+      baseline: { messages: associatePublicTurns(projectPublicHistory(handle.header, handle.events), handle.events), metrics: projectSessionMetrics(handle.events) },
       publishStatus: (active) => {
         statusHub.publish(workspace.id, { type: 'session.status', sessionId, running: active, pending: null });
       },
@@ -2088,7 +2092,7 @@ async function route(
       }
     }
     if (sendMode === 'steer') throw new HttpError(409, 'Session is not running', 'steer_not_accepted');
-    if (running.has(key)) throw new HttpError(409, 'Session already has an active turn');
+    if (running.has(key)) throw new HttpError(409, 'Session already has an active turn', 'turn_in_progress');
     if (removing.has(workspace.id)) throw new HttpError(409, 'Workspace is being unregistered');
     let markReady!: () => void;
     const ready = new Promise<void>((resolve) => { markReady = resolve; });
@@ -2134,7 +2138,7 @@ async function route(
       const { handle, permissions, runtime } = await withPermissionLock(permissionLocks, key, async () => {
         const handle = await openSession(options.store, workspace, sessionId);
         const projection = permissionProjection(handle, key, failedPermissions);
-        if (projection.status !== 'ready') throw new HttpError(409, 'A permission preset must be selected');
+        if (projection.status !== 'ready') throw new HttpError(409, 'A permission preset must be selected', 'permission_preset_required');
         const permissions = snapshotDshPermissions(projection);
         if (!options.runtime) return { handle, permissions, runtime: undefined };
         if (!options.createRuntimeSession) throw new HttpError(409, 'Runtime session composition is unavailable');
@@ -2142,13 +2146,15 @@ async function route(
         if (agent.status !== 'selected') {
           throw new HttpError(409, agent.status === 'invalid'
             ? 'The session agent selection is invalid; select an agent again'
-            : 'An agent must be selected before sending a message');
+            : 'An agent must be selected before sending a message', agent.status === 'invalid'
+            ? 'agent_selection_invalid' : 'agent_selection_required');
         }
         const binding = projectModelSelection(handle.events);
         if (binding.status !== 'selected') {
           throw new HttpError(409, binding.status === 'invalid'
             ? 'The session model binding is invalid; select a model again'
-            : 'A model binding must be selected before sending a message');
+            : 'A model binding must be selected before sending a message', binding.status === 'invalid'
+            ? 'model_selection_invalid' : 'model_selection_required');
         }
         let resolved: ResolvedSessionRuntime;
         try {
@@ -2161,11 +2167,11 @@ async function route(
             ...(modeRuntimeOverride(handle) === undefined ? {} : { mode: modeRuntimeOverride(handle) }),
           });
         } catch (error) {
-          throw new HttpError(409, error instanceof Error ? error.message : 'The selected agent is unavailable');
+          throw directSendResolverError(error);
         }
         return { handle, permissions, runtime: resolved };
       });
-      turn.baseline = { messages: projectPublicHistory(handle.header, handle.events), metrics: projectSessionMetrics(handle.events) };
+      turn.baseline = { messages: associatePublicTurns(projectPublicHistory(handle.header, handle.events), handle.events), metrics: projectSessionMetrics(handle.events) };
       // The window fields are fixed for the whole turn: a model switch during the
       // turn is recorded for the next one, so every reading this turn pushes
       // carries the budget it is actually running under.
@@ -2180,7 +2186,7 @@ async function route(
       if (response.destroyed || turn.cancelled || running.get(key) !== turn || removing.has(workspace.id)) {
         await stored.finish(false);
         if (response.destroyed) return;
-        throw new HttpError(409, 'Turn cancelled during initialization');
+        throw new HttpError(409, 'Turn cancelled during initialization', 'turn_initialization_cancelled');
       }
       const content = attachments.length === 0 ? text : [...(text.trim() ? [{ type: 'text' as const, text }] : []), ...stored.parts];
       turn.session = session;
@@ -2245,6 +2251,8 @@ async function route(
           }
         } catch (error) {
           turn.closing = true;
+          const startupFailure = startupFailureCategory(error);
+          if (!attachmentFinished && startupFailure !== undefined) turn.startupFailure = startupFailure;
           await Promise.all(turn.deliveries);
           if (!attachmentFinished) {
             await stored.finish(await attachmentsCommitted(options.store, workspace, sessionId, stored.parts)).catch(() => undefined);
@@ -2270,7 +2278,11 @@ async function route(
       const startedSuccessfully = await started;
       if (asyncResponse && !response.destroyed) {
         if (startedSuccessfully) json(response, 202, { accepted: true });
-        else json(response, 500, { error: 'The turn failed', code: 'turn_start_failed_message_may_be_saved' });
+        else json(response, 500, {
+          error: 'The turn failed',
+          code: 'turn_start_failed_message_may_be_saved',
+          ...(turn.startupFailure === undefined ? {} : { failure: turn.startupFailure }),
+        });
       }
     } finally {
       if (!accepted) {
@@ -2517,6 +2529,97 @@ function publishTurnEvent(turn: RunningTurn, event: unknown, excluded?: ServerRe
      || type === 'ask-user.requested' || type === 'ask-user.decided') {
     turn.publishStatus(true);
   }
+}
+
+/**
+ * Associates each public message with the turn that owns it.
+ *
+ * The index is derived by scanning the original event sequence. It is response-only:
+ * the persisted event format is unchanged, and callers without these optional fields
+ * keep their existing fallback.
+ */
+export function associatePublicTurns<T extends { role: string }>(
+  messages: readonly T[],
+  events: readonly { seq?: number; ts?: number; type?: string; data?: unknown }[],
+): Array<T & { turnIndex?: number }> {
+  const spans = turnEventSpans(events);
+  const indexes: Array<number | undefined> = [];
+  let currentSpan: TurnEventSpan | undefined;
+  let spanIndex = 0;
+  let publicIndex = -1;
+  let previousRole: string | undefined;
+  const pending = new Set<number>();
+  const assignPending = (index: number | undefined): void => {
+    if (index !== undefined) for (const messageIndex of pending) indexes[messageIndex] = index;
+    pending.clear();
+  };
+  for (const event of events) {
+    if (event.type === 'trace/turn.start') {
+      if (currentSpan === undefined) currentSpan = spans[spanIndex++];
+      assignPending(currentSpan?.index);
+    }
+    const projected = projectMessages([event] as never)[0];
+    if (projected !== undefined) {
+      const mergedTool = projected.role === 'tool' && previousRole === 'tool';
+      if (!mergedTool) publicIndex += 1;
+      if (currentSpan === undefined) pending.add(publicIndex);
+      else indexes[publicIndex] = currentSpan.index;
+      previousRole = projected.role;
+    }
+    if (event.type === 'trace/turn.end') {
+      if (currentSpan === undefined && spans[spanIndex]?.startSeq === event.seq) {
+        const recovered = spans[spanIndex++];
+        if (recovered !== undefined) {
+          currentSpan = recovered;
+          assignPending(recovered.index);
+        }
+      }
+      currentSpan = undefined;
+    }
+  }
+  return messages.map((message, index) => {
+    const turnIndex = indexes[index];
+    return turnIndex === undefined ? message : { ...message, turnIndex };
+  });
+}
+
+interface TurnEventSpan {
+  index: number;
+  startSeq: number;
+  endSeq?: number;
+}
+
+function turnEventSpans(events: readonly { seq?: number; type?: string; data?: unknown }[]): TurnEventSpan[] {
+  const spans: TurnEventSpan[] = [];
+  let open: TurnEventSpan | undefined;
+  for (const event of events) {
+    if (typeof event.seq !== 'number' || !Number.isSafeInteger(event.seq) || event.seq < 0) continue;
+    if (event.type === 'trace/turn.start') {
+      if (open === undefined || open.endSeq !== undefined) {
+        open = { index: spans.length, startSeq: event.seq };
+        spans.push(open);
+      }
+    } else if (event.type === 'trace/turn.end') {
+      if (open === undefined || open.endSeq !== undefined) {
+        open = { index: spans.length, startSeq: event.seq };
+        spans.push(open);
+      }
+      open.endSeq = event.seq;
+    }
+  }
+  return spans;
+}
+
+function directSendResolverError(error: unknown): HttpError {
+  if (error instanceof DeepSeekMessagesError && error.code === 'MISSING_CREDENTIAL') {
+    return new HttpError(409, 'The selected model credentials are missing', 'MISSING_CREDENTIAL', 'MISSING_CREDENTIAL');
+  }
+  return new HttpError(409, 'The selected runtime is unavailable', 'runtime_unavailable', 'runtime_unavailable');
+}
+
+function startupFailureCategory(error: unknown): 'runtime_unavailable' | 'MISSING_CREDENTIAL' | undefined {
+  if (error instanceof DeepSeekMessagesError && error.code === 'MISSING_CREDENTIAL') return 'MISSING_CREDENTIAL';
+  return undefined;
 }
 
 function publicAgentError(error: AgentError): unknown {

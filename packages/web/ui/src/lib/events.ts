@@ -123,6 +123,9 @@ export interface AssistantFailure {
 export interface AssistantRetry {
   attempt: number;
   maxAttempts: number;
+  code?: string;
+  status?: number;
+  delayMs?: number;
 }
 
 export interface AssistantItem {
@@ -198,6 +201,12 @@ export interface TurnMeta {
   startedAt?: number;
   endedAt?: number;
   reason?: StopReason;
+  /** Original event sequence that opened this turn, when the host projected one. */
+  anchorSeq?: number;
+  /** Failure that ended this turn. It belongs to the turn, not to a fabricated reply. */
+  error?: AssistantFailure;
+  /** Automatic retry still waiting for the current model request in this turn. */
+  retry?: AssistantRetry;
 }
 
 export interface ApprovalRequest {
@@ -285,11 +294,23 @@ function assistantRetry(value: Record<string, unknown>): AssistantRetry | undefi
   const maxAttempts = value.maxAttempts;
   if (typeof attempt !== 'number' || !Number.isSafeInteger(attempt) || attempt < 1) return undefined;
   if (typeof maxAttempts !== 'number' || !Number.isSafeInteger(maxAttempts) || maxAttempts < attempt) return undefined;
-  return { attempt, maxAttempts };
+  const error = typeof value.error === 'object' && value.error !== null ? value.error as { code?: unknown; status?: unknown } : {};
+  const code = typeof error.code === 'string' && /^[A-Za-z0-9][A-Za-z0-9_.:-]{0,63}$/.test(error.code) ? error.code : undefined;
+  const status = typeof error.status === 'number' && Number.isInteger(error.status) && error.status >= 100 && error.status <= 599
+    ? error.status : undefined;
+  const delayMs = typeof value.delayMs === 'number' && Number.isSafeInteger(value.delayMs) && value.delayMs >= 0 && value.delayMs <= 60_000
+    ? value.delayMs : undefined;
+  return {
+    attempt,
+    maxAttempts,
+    ...(code === undefined ? {} : { code }),
+    ...(status === undefined ? {} : { status }),
+    ...(delayMs === undefined ? {} : { delayMs }),
+  };
 }
 
-/** The reply that is still open, or a new empty one when the failure arrived first. */
-function ensureAssistant(turn: LiveTurnState, now: number): AssistantItem {
+/** The assistant reply already rendered for this turn, if one exists. */
+function existingAssistant(turn: LiveTurnState): AssistantItem | undefined {
   const meta = currentTurn(turn);
   if (turn.streamAssistantId !== undefined) {
     const streaming = turn.transcript.find((candidate) => candidate.id === turn.streamAssistantId);
@@ -300,15 +321,14 @@ function ensureAssistant(turn: LiveTurnState, now: number): AssistantItem {
     if (item?.kind === 'user') break;
     if (item?.kind === 'assistant' && item.turn === meta.index) return item;
   }
-  return appendItem(turn, {
-    kind: 'assistant', id: itemId('assistant'), turn: meta.index, text: '', timestamp: now, streaming: false,
-  });
+  return undefined;
 }
 
 function currentTurn(turn: LiveTurnState): TurnMeta {
   let latest = turn.turns[turn.turns.length - 1];
   if (latest === undefined || latest.endedAt !== undefined) {
-    latest = { index: turn.turns.length, startedAt: Date.now() };
+    const nextIndex = latest === undefined ? 0 : Math.max(latest.index + 1, turn.turns.length);
+    latest = { index: nextIndex, startedAt: Date.now() };
     turn.turns.push(latest);
   }
   return latest;
@@ -552,6 +572,8 @@ export function applyAgentEvent(turn: LiveTurnState, event: AgentEvent | Record<
       const message = data.message as { content?: unknown; toolCalls?: ToolCall[]; usage?: unknown } | undefined;
       const text = messageText(message);
       const meta = currentTurn(turn);
+      meta.retry = undefined;
+      meta.error = undefined;
       let assistant: AssistantItem | undefined;
       if (turn.streamAssistantId !== undefined) {
         const item = turn.transcript.find((candidate) => candidate.id === turn.streamAssistantId);
@@ -702,22 +724,31 @@ export function applyAgentEvent(turn: LiveTurnState, event: AgentEvent | Record<
     case 'model.retry': {
       const retry = assistantRetry(data);
       if (retry === undefined) return;
-      const assistant = ensureAssistant(turn, now);
-      assistant.retry = retry;
-      assistant.error = undefined;
-      assistant.streaming = false;
+      const meta = currentTurn(turn);
+      meta.retry = retry;
+      meta.error = undefined;
+      const assistant = existingAssistant(turn);
+      if (assistant !== undefined) {
+        assistant.retry = undefined;
+        assistant.error = undefined;
+        assistant.streaming = false;
+      }
       return;
     }
     case 'error': {
       const failure = assistantFailure(data.error);
-      const text = failure.message;
-      turn.error = text;
+      turn.error = failure.message;
       turn.approval = undefined;
       turn.planReview = undefined;
-      const assistant = ensureAssistant(turn, now);
-      assistant.error = failure;
-      assistant.retry = undefined;
-      assistant.streaming = false;
+      const meta = currentTurn(turn);
+      meta.error = failure;
+      meta.retry = undefined;
+      const assistant = existingAssistant(turn);
+      if (assistant !== undefined) {
+        assistant.error = undefined;
+        assistant.retry = undefined;
+        assistant.streaming = false;
+      }
       return;
     }
     case 'turn.end': {
@@ -725,6 +756,15 @@ export function applyAgentEvent(turn: LiveTurnState, event: AgentEvent | Record<
       if (latest !== undefined && latest.endedAt === undefined) {
         latest.endedAt = now;
         latest.reason = data.reason as StopReason | undefined;
+        latest.retry = undefined;
+        if (data.reason === 'error' && latest.error === undefined) latest.error = { message: 'The agent reported an error.' };
+        if (data.reason !== 'error') latest.error = undefined;
+      }
+      const assistant = existingAssistant(turn);
+      if (assistant !== undefined) {
+        assistant.retry = undefined;
+        assistant.error = undefined;
+        assistant.streaming = false;
       }
       turn.outcome = typeof data.reason === 'string' ? data.reason as StopReason : 'error';
       turn.approval = undefined;
@@ -760,9 +800,13 @@ function isHumanTraceEvent(event: object): boolean {
 }
 
 interface TraceSpan {
+  index: number;
   startedAt?: number;
   endedAt?: number;
+  startSeq?: number;
+  endSeq?: number;
   reason?: StopReason;
+  error?: AssistantFailure;
 }
 
 /**
@@ -773,24 +817,49 @@ interface TraceSpan {
  * multi-step reply together: treating step 0 as the only boundary drops the
  * duration of every reply whose first recorded step is not zero.
  */
+function eventSeq(value: unknown): number | undefined {
+  if (typeof value !== 'object' || value === null) return undefined;
+  const seq = (value as { seq?: unknown }).seq;
+  return typeof seq === 'number' && Number.isSafeInteger(seq) && seq >= 0 ? seq : undefined;
+}
+
 function replySpans(events: readonly unknown[]): TraceSpan[] {
   const spans: TraceSpan[] = [];
   let open: TraceSpan | undefined;
+  let pendingError: AssistantFailure | undefined;
   for (const event of events) {
     if (typeof event !== 'object' || event === null) continue;
     const record = event as { type?: unknown; data?: unknown };
     const timestamp = eventTimestamp(event);
+    const seq = eventSeq(event);
     if (record.type === 'trace/turn.start') {
-      if (open?.endedAt !== undefined || open === undefined) {
-        open = {};
+      if (open?.endedAt !== undefined || open?.endSeq !== undefined || open === undefined) {
+        open = { index: spans.length };
         spans.push(open);
       }
+      pendingError = undefined;
       if (open.startedAt === undefined && timestamp !== undefined) open.startedAt = timestamp;
-    } else if (record.type === 'trace/turn.end' && open !== undefined && open.endedAt === undefined) {
-      if (timestamp !== undefined) open.endedAt = timestamp;
+      if (open.startSeq === undefined && seq !== undefined) open.startSeq = seq;
+    } else if (record.type === 'trace/turn.end') {
+      if (open === undefined || open.endedAt !== undefined || open.endSeq !== undefined) {
+        open = { index: spans.length };
+        spans.push(open);
+      }
+      if (open.endedAt === undefined && open.endSeq === undefined) {
+        if (timestamp !== undefined) open.endedAt = timestamp;
+        if (seq !== undefined) open.endSeq = seq;
+      }
       const reason = typeof record.data === 'object' && record.data !== null
         ? (record.data as { reason?: unknown }).reason : undefined;
       if (typeof reason === 'string') open.reason = reason as StopReason;
+      if (open.error === undefined && pendingError !== undefined) open.error = pendingError;
+      pendingError = undefined;
+    } else if (record.type === 'trace/error') {
+      if (open !== undefined && open.endedAt === undefined && open.endSeq === undefined) {
+        open.error = traceFailure(event, open) ?? open.error;
+      } else {
+        pendingError = traceFailure(event, { index: spans.length }) ?? pendingError;
+      }
     }
   }
   return spans;
@@ -826,7 +895,9 @@ export function turnTiming(events: readonly unknown[]): TurnMeta[] {
         const turn = ensure(Math.max(0, turnIndex));
         if (span.startedAt !== undefined) turn.startedAt = span.startedAt;
         if (span.endedAt !== undefined) turn.endedAt = span.endedAt;
+        if (span.startSeq !== undefined) turn.anchorSeq = span.startSeq;
         if (span.reason !== undefined) turn.reason = span.reason;
+        if (span.error !== undefined) turn.error = span.error;
         spanIndex += 1;
       }
     }
@@ -902,21 +973,24 @@ export function pendingPlanReview(
   return undefined;
 }
 
+function traceFailure(event: unknown, span: TraceSpan | undefined): AssistantFailure | undefined {
+  if (typeof event !== 'object' || event === null || span === undefined) return undefined;
+  const record = event as { type?: unknown; data?: unknown };
+  if (record.type !== 'trace/error') return undefined;
+  const seq = eventSeq(event);
+  if (seq !== undefined && span.startSeq !== undefined && seq < span.startSeq) return undefined;
+  if (seq !== undefined && span.endSeq !== undefined && seq > span.endSeq) return undefined;
+  const timestamp = eventTimestamp(event);
+  if (seq === undefined && timestamp !== undefined && span.startedAt !== undefined && timestamp < span.startedAt) return undefined;
+  if (seq === undefined && timestamp !== undefined && span.endedAt !== undefined && timestamp > span.endedAt) return undefined;
+  const data = typeof record.data === 'object' && record.data !== null ? record.data : undefined;
+  return assistantFailure(data);
+}
+
 function assistantFailureForTurn(events: readonly unknown[], replyIndex: number): AssistantFailure | undefined {
-  const spans = replySpans(events);
-  const span = spans[replyIndex];
-  if (span === undefined) return undefined;
+  const span = replySpans(events)[replyIndex];
   let latest: AssistantFailure | undefined;
-  for (const event of events) {
-    if (typeof event !== 'object' || event === null) continue;
-    const record = event as { type?: unknown; data?: unknown };
-    if (record.type !== 'trace/error') continue;
-    const timestamp = eventTimestamp(event);
-    if (timestamp !== undefined && span.startedAt !== undefined && timestamp < span.startedAt) continue;
-    if (timestamp !== undefined && span.endedAt !== undefined && timestamp > span.endedAt) continue;
-    const data = typeof record.data === 'object' && record.data !== null ? record.data : undefined;
-    latest = assistantFailure(data);
-  }
+  for (const event of events) latest = traceFailure(event, span) ?? latest;
   return latest;
 }
 
@@ -943,18 +1017,21 @@ export function hydrateTranscript(
   const transcript: TranscriptItem[] = [];
   const turns = turnTiming(events);
   const takePreviousId = previousIds(previous);
-  let turnIndex = 0;
+  let fallbackIndex = 0;
   let started = false;
-  const startTurn = (): number => {
-    if (started) turnIndex += 1;
+  const startTurn = (requested?: number): number => {
+    const index = requested ?? (started ? fallbackIndex + 1 : fallbackIndex);
+    fallbackIndex = index;
     started = true;
-    if (turns[turnIndex] === undefined) turns[turnIndex] = { index: turnIndex };
-    return turnIndex;
+    if (turns[index] === undefined) turns[index] = { index };
+    return index;
   };
   for (const [messageIndex, message] of source.entries()) {
     if (message.role === 'system') continue;
+    const requestedTurn = typeof message.turnIndex === 'number' && Number.isSafeInteger(message.turnIndex) && message.turnIndex >= 0
+      ? message.turnIndex : undefined;
     if (message.role === 'user') {
-      const index = startTurn();
+      const index = startTurn(requestedTurn);
       const { text, attachments } = userContent(message.content);
       if (text !== '' || attachments.length > 0) {
         const timestamp = typeof message.timestamp === 'number' && Number.isFinite(message.timestamp)
@@ -973,24 +1050,22 @@ export function hydrateTranscript(
       continue;
     }
     if (message.role === 'assistant') {
-      if (!started) startTurn();
+      const index = requestedTurn ?? (started ? fallbackIndex : startTurn());
       const text = message.content === undefined ? '' : messageText(message);
       const usage = messageUsage(message.usage);
       const calls = message.toolCalls ?? [];
-      const failure = calls.length === 0 ? assistantFailureForTurn(events, turnIndex) : undefined;
-      if (text !== '' || failure !== undefined) {
+      if (text !== '' || calls.length > 0) {
         const persistedMessageId = typeof message.messageId === 'string' && message.messageId !== ''
           ? message.messageId : undefined;
         transcript.push({
           kind: 'assistant',
-          id: takePreviousId(`assistant|${turnIndex}|${text}|${usageKey(usage)}`) ?? hydratedMessageId('a', messageIndex),
-          turn: turnIndex,
+          id: takePreviousId(`assistant|${index}|${text}|${usageKey(usage)}`) ?? hydratedMessageId('a', messageIndex),
+          turn: index,
           text,
           ...(persistedMessageId === undefined ? {} : { messageId: persistedMessageId }),
           streaming: false,
           ...(typeof message.timestamp === 'number' && Number.isFinite(message.timestamp) ? { timestamp: message.timestamp } : {}),
           ...(usage === undefined ? {} : { usage }),
-          ...(failure === undefined ? {} : { error: failure }),
         });
       }
       for (const [callIndex, call] of calls.entries()) {
@@ -998,7 +1073,7 @@ export function hydrateTranscript(
           transcript.push({
             kind: 'tool',
             id: takePreviousId(`tool|${call.id}`) ?? hydratedToolId(call.id, messageIndex, callIndex),
-            turn: turnIndex,
+            turn: index,
             call,
           });
         }
@@ -1013,13 +1088,21 @@ export function hydrateTranscript(
           transcript.push({
             kind: 'tool',
             id: takePreviousId(`tool|${result.callId}`) ?? hydratedToolId(result.callId, messageIndex, resultIndex),
-            turn: turnIndex,
+            turn: requestedTurn ?? fallbackIndex,
             call: { id: result.callId, name: result.name, arguments: {} },
             result,
           });
         }
       }
     }
+  }
+  const spans = replySpans(events);
+  for (const span of spans) {
+    if (span.reason !== 'error') continue;
+    const meta = turns[span.index] ?? { index: span.index };
+    if (meta.error === undefined) meta.error = span.error ?? { message: 'The agent reported an error.' };
+    meta.reason ??= span.reason;
+    turns[span.index] = meta;
   }
   return { transcript, turns };
 }
@@ -1063,6 +1146,9 @@ export interface DisplayTurn {
   goalState?: 'running' | 'failed' | 'passed';
   process: TranscriptItem[];
   final?: AssistantItem;
+  /** Turn-level failure/retry when there is no assistant reply to own it. */
+  failure?: AssistantFailure;
+  retry?: AssistantRetry;
   extras: TranscriptItem[];
   live: boolean;
   startedAt?: number;
@@ -1106,6 +1192,8 @@ export function groupTurns(transcript: readonly TranscriptItem[], turns: readonl
     const process: TranscriptItem[] = [];
     const extras: TranscriptItem[] = [];
     let toolCount = 0;
+    const failure = meta?.error;
+    const retry = meta?.retry;
     for (const item of items) {
       if (item === final) continue;
       if (item.kind === 'user') continue;
@@ -1135,6 +1223,8 @@ export function groupTurns(transcript: readonly TranscriptItem[], turns: readonl
       ...(meta?.startedAt === undefined ? {} : { startedAt: meta.startedAt }),
       ...(meta?.endedAt === undefined ? {} : { endedAt: meta.endedAt }),
       ...(meta?.reason === undefined ? {} : { reason: meta.reason }),
+      ...(failure === undefined ? {} : { failure }),
+      ...(retry === undefined ? {} : { retry }),
       toolCount,
     });
   }

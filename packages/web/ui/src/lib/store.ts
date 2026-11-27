@@ -218,6 +218,10 @@ export interface SessionEntry {
   error: string;
   request: number;
   outcome: '' | 'error' | 'interrupted';
+  /** A direct-send rejection shown in the composer instead of the top alert. */
+  composerError: string;
+  /** Opens an existing picker or settings page for the rejected direct send. */
+  composerAction?: 'model' | 'permission' | 'agent' | 'model-settings';
   /** The server reports an active turn even when this tab is not streaming it. */
   running: boolean;
   /**
@@ -510,6 +514,7 @@ function emptyEntry(): SessionEntry {
     error: '',
     request: 0,
     outcome: '',
+    composerError: '',
     running: false,
     queued: [],
     queuePaused: false,
@@ -2137,6 +2142,7 @@ export class AppStore {
         loading: false,
         error: '',
         outcome: '',
+        composerError: displayed.composerError,
         running: body.running === true,
         ...(restoredReview !== undefined
           ? { run: { ...createLiveState(), ...hydratedWithNotices, planReview: restoredReview } }
@@ -2683,7 +2689,7 @@ export class AppStore {
       },
     ];
     entry.request += 1;
-    this.patchEntry(key, { run, outcome: '', todos: null, transcript: run.transcript, turns: run.turns });
+    this.patchEntry(key, { run, outcome: '', composerError: '', todos: null, transcript: run.transcript, turns: run.turns });
     let accepted = false;
     let posting = false;
     let rejected = false;
@@ -2746,18 +2752,35 @@ export class AppStore {
         headers: { 'content-type': 'application/json', prefer: 'respond-async' },
       });
       if (!response.ok) {
-        let uncertainStart = false;
+        let body: { code?: unknown; failure?: unknown } = {};
         try {
-          const body = await response.clone().json() as { code?: unknown };
-          uncertainStart = body.code === 'turn_start_failed_message_may_be_saved';
+          body = await response.clone().json() as typeof body;
         } catch {
-          // An unreadable error response cannot establish the special error code.
+          // An unreadable response cannot establish a stable rejection code.
         }
+        const uncertainStart = body.code === 'turn_start_failed_message_may_be_saved';
         rejected = response.status < 500 && !uncertainStart;
-        const message = await responseError(response);
-        throw new Error(response.status === 409 ? translator(this.state.locale)('Another turn is already running. {message}', { message }) : message);
+        const t = translator(this.state.locale);
+        const code = typeof body.code === 'string' ? body.code : '';
+        const action = code === 'model_selection_required' || code === 'model_selection_invalid' ? 'model'
+          : code === 'permission_preset_required' ? 'permission'
+            : code === 'agent_selection_required' || code === 'agent_selection_invalid' ? 'agent'
+              : code === 'MISSING_CREDENTIAL' ? 'model-settings' : undefined;
+        const message = code === 'turn_in_progress' ? t('Another turn is already running. {message}', { message: t('Wait for the current turn to finish before sending.') })
+          : code === 'model_selection_required' || code === 'model_selection_invalid' ? t('Choose a model before sending.')
+            : code === 'permission_preset_required' ? t('Choose a permission for this session.')
+              : code === 'agent_selection_required' || code === 'agent_selection_invalid' ? t('Choose an agent before sending.')
+                : code === 'MISSING_CREDENTIAL' ? t('The selected model is missing credentials. Open model settings to configure them.')
+                  : code === 'runtime_unavailable' ? t('The selected runtime is unavailable. Try again later.')
+                    : uncertainStart || response.status >= 500 ? t('Send status is unknown. Check whether the message appears before sending again.')
+                      : response.status === 409 ? t('The message was not accepted. Review the session settings and try again.')
+                        : t('The message was not accepted. Review the session settings and try again.');
+        const rejection = new Error(message) as Error & { composerAction?: SessionEntry['composerAction'] };
+        rejection.composerAction = action;
+        throw rejection;
       }
       accepted = true;
+      this.patchEntry(targetKey, { composerError: '' });
       onAccepted?.();
       if (response.status === 202 || response.headers.get('content-type')?.includes('application/json')) {
         this.followRun(workspaceId, targetId, run);
@@ -2769,8 +2792,12 @@ export class AppStore {
       return true;
     } catch (error) {
       const uncertain = posting && !rejected && !accepted;
+      const safeError = rejected
+        ? error as Error
+        : new Error(translator(this.state.locale)('Send status is unknown. Check whether the message appears before sending again.'));
       this.patchEntry(targetKey, { run: undefined, transcript: entry.transcript, turns: entry.turns, outcome: uncertain ? '' : 'error' });
-      this.showAlert(translator(this.state.locale)('Could not complete turn: {message}', { message: (error as Error).message }));
+      if (rejected) this.patchEntry(targetKey, { composerError: (safeError as Error).message, composerAction: (error as { composerAction?: SessionEntry['composerAction'] }).composerAction });
+      else this.showAlert(translator(this.state.locale)('Could not complete turn: {message}', { message: (safeError as Error).message }));
       if (uncertain) {
         onUncertain?.();
         void this.loadDetail(workspaceId, targetId, true);
@@ -3087,7 +3114,8 @@ export class AppStore {
         if (!observed) this.followRun(workspaceId, sessionId, run);
         return false;
       }
-      if (run.error !== undefined) {
+      const failureVisible = run.turns.at(-1)?.error !== undefined;
+      if (run.error !== undefined && !failureVisible) {
         this.showAlert(translator(this.state.locale)(run.error));
       }
     } catch {

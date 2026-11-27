@@ -1650,7 +1650,7 @@ describe('workbench store', () => {
   it('restores the draft transcript when the server rejects a concurrent turn', async () => {
     const store = await boot(sessionFetcher(async (url, init) => {
       if (url === '/api/workspaces/a/sessions/shared/messages' && init?.method === 'POST') {
-        return json({ error: 'A turn is already active' }, 409);
+        return json({ error: 'A turn is already active', code: 'turn_in_progress' }, 409);
       }
       if (url === '/api/workspaces/a/sessions/shared') return json(detail());
       return undefined;
@@ -1659,7 +1659,56 @@ describe('workbench store', () => {
     await expect(store.sendMessage('Second turn')).resolves.toBe(false);
     expect(store.currentEntry()?.run).toBeUndefined();
     expect(store.currentEntry()?.transcript).toHaveLength(1);
-    expect(store.getSnapshot().alert).toContain('已有回合正在运行');
+    expect(store.currentEntry()?.composerError).toContain('当前回合结束后');
+  });
+
+  it('shows a direct-send rejection in the composer and retains the optimistic draft', async () => {
+    const store = await boot(sessionFetcher(async (url, init) => {
+      if (url === '/api/workspaces/a/sessions/shared/messages' && init?.method === 'POST') {
+        return json({ error: 'safe', code: 'model_selection_invalid' }, 409);
+      }
+      if (url === '/api/workspaces/a/sessions/shared') return json(detail());
+      return undefined;
+    }));
+    await expect(store.sendMessage('Keep me')).resolves.toBe(false);
+    expect(store.currentEntry()).toMatchObject({ composerError: '请先选择模型。', run: undefined });
+    expect(store.currentEntry()?.transcript).toHaveLength(1);
+    expect(store.getSnapshot().alert).toBe('');
+    store.dispose();
+  });
+
+  it('keeps direct-send failures local and safe for null or unreadable responses', async () => {
+    const responses = [
+      new Response('null', { status: 500, headers: { 'content-type': 'application/json' } }),
+      new Response('not-json', { status: 500 }),
+    ];
+    let index = 0;
+    const store = await boot(sessionFetcher(async (url, init) => {
+      if (url === '/api/workspaces/a/sessions/shared/messages' && init?.method === 'POST') return responses[index++]!;
+      if (url === '/api/workspaces/a/sessions/shared') return json(detail());
+      return undefined;
+    }));
+    await store.sendMessage('First');
+    expect(store.getSnapshot().alert).toContain('发送结果尚未确认');
+    expect(store.getSnapshot().alert).not.toContain('null');
+    await store.sendMessage('Second');
+    expect(store.getSnapshot().alert).toContain('发送结果尚未确认');
+    expect(store.currentEntry()?.transcript).toHaveLength(1);
+    store.dispose();
+  });
+
+  it('treats unknown 409 as a safe rejection rather than an active turn', async () => {
+    const store = await boot(sessionFetcher(async (url, init) => {
+      if (url === '/api/workspaces/a/sessions/shared/messages' && init?.method === 'POST') {
+        return json({ error: 'private server text', code: 'future_code' }, 409);
+      }
+      if (url === '/api/workspaces/a/sessions/shared') return json(detail());
+      return undefined;
+    }));
+    await store.sendMessage('Keep me');
+    expect(store.currentEntry()?.composerError).toBe('消息未被接收，请检查会话设置后重试。');
+    expect(store.currentEntry()?.composerError).not.toContain('private');
+    store.dispose();
   });
 
   it('blocks sending until a permission preset is explicitly selected', async () => {

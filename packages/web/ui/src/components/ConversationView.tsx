@@ -21,7 +21,9 @@ import {
 import {
   groupTurns,
   userMessageCopyText,
+  type AssistantFailure,
   type AssistantItem,
+  type AssistantRetry,
   type DisplayTurn,
   type LiveTurnState,
   type MessageUsage,
@@ -249,13 +251,48 @@ function ProcessItem({ item, live, reviewing, t, labels }: {
 }
 
 function failureHeadline(status: number | undefined, code: string | undefined, t: Translate): string {
+  if (code === 'QUOTA') return t('The model quota is exhausted.');
   if (status === 429 || code === 'RATE_LIMIT') return t('The model is busy. Try again shortly.');
   if (status === 408 || code === 'TIMEOUT') return t('The model took too long to respond.');
   if (status === 401 || status === 403 || code === 'AUTH') return t('The model rejected the credentials.');
   if (code === 'QUOTA') return t('The model quota is exhausted.');
   if (code === 'CONTEXT_WINDOW_EXCEEDED') return t('The conversation is too long for this model.');
+  if (code === 'CONTEXT_BUDGET') return t('The context budget is too small for this conversation.');
   if ((status !== undefined && status >= 500) || code === 'SERVER') return t('The model service is temporarily unavailable.');
   return t('This reply failed');
+}
+
+function TurnFailureView({ failure, retry, t }: {
+  failure?: AssistantFailure;
+  retry?: AssistantRetry;
+  t: Translate;
+}): ReactNode {
+  if (retry !== undefined) {
+    return (
+      <div className={messageCss.turnErrorRow} role="status">
+        <StateDot state="ongoing" className={messageCss.turnErrorDot} />
+        <div className={messageCss.turnErrorCopy}>
+          <span className={messageCss.turnErrorTitle}>{failureHeadline(retry.status, retry.code, t)}</span>
+          <span className={messageCss.turnErrorMessage}>
+            {t('Retrying this reply, attempt {attempt} of {total}', { attempt: retry.attempt, total: retry.maxAttempts })}
+            {retry.delayMs !== undefined && retry.delayMs > 0 ? ` · ${t('Waiting {seconds} seconds', { seconds: Math.ceil(retry.delayMs / 1000) })}` : ''}
+          </span>
+        </div>
+      </div>
+    );
+  }
+  if (failure === undefined) return null;
+  const detail = [failure.status === undefined ? undefined : `HTTP ${failure.status}`, failure.code]
+    .filter((part): part is string => part !== undefined).join(' · ');
+  return (
+    <div className={messageCss.turnErrorRow} role="status">
+      <StateDot state="error" className={messageCss.turnErrorDot} />
+      <div className={messageCss.turnErrorCopy}>
+        <span className={messageCss.turnErrorTitle}>{failureHeadline(failure.status, failure.code, t)}</span>
+        {detail !== '' && <span className={messageCss.turnErrorCode}>{detail}</span>}
+      </div>
+    </div>
+  );
 }
 
 function AssistantFailureView({ item, t }: {
@@ -267,34 +304,17 @@ function AssistantFailureView({ item, t }: {
       <div className={messageCss.turnErrorRow} role="status">
         <StateDot state="ongoing" className={messageCss.turnErrorDot} />
         <div className={messageCss.turnErrorCopy}>
-          <span className={messageCss.turnErrorTitle}>{t('Retrying this reply')}</span>
+          <span className={messageCss.turnErrorTitle}>{failureHeadline(item.retry.status, item.retry.code, t)}</span>
           <span className={messageCss.turnErrorMessage}>
-            {t('Attempt {attempt} of {total}', { attempt: item.retry.attempt, total: item.retry.maxAttempts })}
+            {t('Retrying this reply, attempt {attempt} of {total}', { attempt: item.retry.attempt, total: item.retry.maxAttempts })}
+            {item.retry.delayMs !== undefined && item.retry.delayMs > 0
+              ? ` · ${t('Waiting {seconds} seconds', { seconds: Math.ceil(item.retry.delayMs / 1000) })}` : ''}
           </span>
         </div>
       </div>
     );
   }
-  const error = item.error;
-  if (error === undefined) return null;
-  const detail = [error.status === undefined ? undefined : `HTTP ${error.status}`, error.code]
-    .filter((part): part is string => part !== undefined)
-    .join(' · ');
-  return (
-    <div className={messageCss.turnErrorRow} role="status">
-      <StateDot state="error" className={messageCss.turnErrorDot} />
-      <div className={messageCss.turnErrorCopy}>
-        <span className={messageCss.turnErrorTitle}>{failureHeadline(error.status, error.code, t)}</span>
-        {detail !== '' && <span className={messageCss.turnErrorCode}>{detail}</span>}
-        {error.message !== '' && (
-          <details className={messageCss.retryRow}>
-            <summary className={messageCss.retrySummary}>{t('Error details')}</summary>
-            <div className={messageCss.retryDetails}>{error.message}</div>
-          </details>
-        )}
-      </div>
-    </div>
-  );
+  return <TurnFailureView failure={item.error} retry={item.retry} t={t} />;
 }
 
 function NoticeView({ item, t }: { item: Extract<TranscriptItem, { kind: 'notice' }>; t: Translate }): ReactNode {
@@ -490,6 +510,9 @@ function TurnView({ turn, processDisplay, reviewing, locale, t, labels }: {
           <span className={turnProcessCss.label}>{label}</span>
         </button>
       ) : null}
+      {(turn.final === undefined && (turn.failure !== undefined || turn.retry !== undefined)) && (
+        <TurnFailureView failure={turn.failure} retry={turn.retry} t={t} />
+      )}
       {hasProcess && open && (
         <div className={groupCss.content}>
           {turn.process.map((item) => (

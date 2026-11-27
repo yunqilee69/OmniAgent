@@ -31,6 +31,7 @@ export function SelectMenu({
   minWidthFromAnchor = false,
   listClassName,
   wrapperClassName,
+  openRequest = 0,
 }: {
   value: string;
   items: readonly MenuEntry[];
@@ -49,8 +50,15 @@ export function SelectMenu({
   minWidthFromAnchor?: boolean;
   listClassName?: string;
   wrapperClassName?: string;
+  /** Increment to open the existing menu from an external recovery action. */
+  openRequest?: number;
 }): ReactNode {
   const [open, setOpen] = useState(false);
+  const [requested, setRequested] = useState(openRequest);
+  if (openRequest !== requested) {
+    setRequested(openRequest);
+    if (openRequest > 0) setOpen(true);
+  }
   return (
     <Menu
       open={open}

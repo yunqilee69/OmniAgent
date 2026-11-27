@@ -407,7 +407,7 @@ describe('configured session API', () => {
     expect(detail.agent).toBeNull();
     expect(detail.model).toBeNull();
     expect(detail.agentError).toMatch(/agent must be selected/i);
-    expect((await fetch(`${sessionUrl}/messages`, post({ text: 'go' }))).status).toBe(409);
+    expect(await (await fetch(`${sessionUrl}/messages`, post({ text: 'go' }))).json()).toMatchObject({ code: 'agent_selection_required' });
 
     expect((await fetch(`${sessionUrl}/model`, post({ version: 2, kind: 'agent' }))).status).toBe(409);
     expect((await fetch(`${sessionUrl}/agent`, post({ agent: 'default' }))).status).toBe(200);

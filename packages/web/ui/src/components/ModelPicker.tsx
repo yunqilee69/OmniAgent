@@ -131,6 +131,7 @@ export function ModelPicker({
   align = 'start',
   showLeading = true,
   saving = false,
+  openRequest = 0,
 }: {
   binding: ModelBinding | null;
   models: readonly ModelSummary[];
@@ -151,6 +152,8 @@ export function ModelPicker({
   showLeading?: boolean;
   /** Prevent transient range previews and writes while the host is saving. */
   saving?: boolean;
+  /** Increment to open the existing picker from an external recovery action. */
+  openRequest?: number;
 }): ReactNode {
   const app = useApp();
   const t = translator(app.locale);
@@ -185,6 +188,9 @@ export function ModelPicker({
   const closeSource = (): void => { setSourceOpen(false); };
   const sourceGrace = usePointerGrace(closeSource);
 
+  useEffect(() => {
+    if (openRequest > 0) setOpen(true);
+  }, [openRequest]);
   useEffect(() => {
     if (!open || pane !== 'model') return;
     const frame = requestAnimationFrame(() => {

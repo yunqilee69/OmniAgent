@@ -672,6 +672,8 @@ export interface PublicMessage {
   results?: ToolResult[];
   usage?: { inputTokens: number; outputTokens: number };
   goalRound?: number;
+  /** Non-persistent association computed from the original event sequence. */
+  turnIndex?: number;
 }
 
 export interface ContextEstimate {

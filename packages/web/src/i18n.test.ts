@@ -33,6 +33,20 @@ describe('web locale catalogue', () => {
       .toBe('请等待附件恢复完成再发送。');
   });
 
+  it('covers the direct-send failure messages in both locales', () => {
+    for (const key of [
+      'Wait for the current turn to finish before sending.',
+      'Choose a model before sending.',
+      'The selected model is missing credentials. Open model settings to configure them.',
+      'The selected runtime is unavailable. Try again later.',
+      'Send status is unknown. Check whether the message appears before sending again.',
+      'Retrying this reply, attempt {attempt} of {total}',
+    ]) {
+      expect(translate('zh', key)).not.toBe(key);
+      expect(translate('en', key)).toBe(key);
+    }
+  });
+
   it('normalizes persisted locale values', () => {
     expect(normalizeLocale('zh')).toBe('zh');
     expect(normalizeLocale('en')).toBe('en');

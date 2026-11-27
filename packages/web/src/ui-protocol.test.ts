@@ -152,17 +152,13 @@ describe('web client protocol', () => {
       },
     });
     expect(turn.error).toBe('HTTP 503 · all_backends_unavailable: no available backends');
-    expect(turn.transcript.at(-1)).toMatchObject({
-      kind: 'assistant',
-      text: '',
-      error: {
-        message: 'HTTP 503 · all_backends_unavailable: no available backends',
-        code: 'all_backends_unavailable',
-        status: 503,
-      },
-    });
+    expect(turn.transcript.at(-1)).toBeUndefined();
+    expect(turn.turns.at(-1)).toMatchObject({ error: {
+      message: 'HTTP 503 · all_backends_unavailable: no available backends',
+      code: 'all_backends_unavailable', status: 503,
+    } });
     const grouped = groupTurns(turn.transcript, turn.turns, false);
-    expect(grouped.at(-1)?.final?.error?.status).toBe(503);
+    expect(grouped.at(-1)?.failure?.status).toBe(503);
   });
 
   it('shows a retry on the assistant reply and clears it when the reply succeeds', () => {
@@ -170,14 +166,30 @@ describe('web client protocol', () => {
     applyAgentEvent(turn, { type: 'turn.start', step: 0 });
     applyAgentEvent(turn, {
       type: 'model.retry', attempt: 1, maxAttempts: 2, delayMs: 500,
-      error: { message: 'HTTP 503', status: 503, retryable: true },
+      error: { message: 'HTTP 503', code: 'SERVER', status: 503, retryable: true },
     });
-    expect(turn.transcript.at(-1)).toMatchObject({ kind: 'assistant', retry: { attempt: 1, maxAttempts: 2 } });
+    expect(turn.turns.at(-1)).toMatchObject({ retry: { attempt: 1, maxAttempts: 2, code: 'SERVER', status: 503, delayMs: 500 } });
+    expect(turn.transcript).toEqual([]);
     applyAgentEvent(turn, {
       type: 'assistant.message',
       message: { role: 'assistant', content: [{ type: 'text', text: 'Recovered' }], toolCalls: [] },
     });
     expect(turn.transcript.at(-1)).toMatchObject({ kind: 'assistant', text: 'Recovered', retry: undefined, error: undefined });
+  });
+
+  it('shows turn.end(error) as a same-turn failure even without an assistant message', () => {
+    const live = createLiveState();
+    applyAgentEvent(live, { type: 'run.user.message', message: { role: 'user', content: [{ type: 'text', text: 'hi' }] } }, 100);
+    applyAgentEvent(live, { type: 'turn.end', reason: 'error' }, 200);
+    expect(live.transcript.at(-1)).toMatchObject({ kind: 'user', turn: 0 });
+    expect(live.turns[0]).toMatchObject({ index: 0, endedAt: 200, reason: 'error', error: { message: 'The agent reported an error.' } });
+
+    const restored = hydrateTranscript([{ role: 'user', content: [{ type: 'text', text: 'hi' }] }], [
+      { type: 'trace/turn.start', ts: 100, data: { step: 0 } },
+      { type: 'trace/turn.end', ts: 200, data: { reason: 'error' } },
+    ]);
+    expect(restored.transcript.at(-1)).toMatchObject({ kind: 'user', turn: 0 });
+    expect(restored.turns[0]).toMatchObject({ reason: 'error', error: { message: 'The agent reported an error.' } });
   });
 
   it('restores a persisted model failure onto the assistant reply', () => {
@@ -189,10 +201,53 @@ describe('web client protocol', () => {
       { type: 'trace/error', ts: 1_500, data: { message: 'HTTP 503 · overloaded', code: 'overloaded', status: 503 } },
       { type: 'trace/turn.end', ts: 1_600, data: { reason: 'error' } },
     ]);
-    expect(transcript.find((item) => item.kind === 'assistant')).toMatchObject({
-      error: { message: 'HTTP 503 · overloaded', code: 'overloaded', status: 503 },
-    });
+    expect(transcript.find((item) => item.kind === 'assistant')).toBeUndefined();
   });
+  it('keeps a stop before the first step separate from the next turn failure', () => {
+    const events = [
+      { type: 'message/user', seq: 1, ts: 1, data: { text: 'one' } },
+      { type: 'trace/turn.end', seq: 2, ts: 2, data: { reason: 'interrupted' } },
+      { type: 'message/user', seq: 3, ts: 3, data: { text: 'two' } },
+      { type: 'trace/error', seq: 4, ts: 4, data: { message: 'HTTP 503', code: 'SERVER', status: 503 } },
+      { type: 'trace/turn.end', seq: 5, ts: 5, data: { reason: 'error' } },
+    ];
+    const restored = hydrateTranscript([
+      { role: 'user', content: [{ type: 'text', text: 'one' }], turnIndex: 0 },
+      { role: 'user', content: [{ type: 'text', text: 'two' }], turnIndex: 1 },
+    ], events);
+    expect(restored.turns).toHaveLength(2);
+    expect(restored.turns[0]).toMatchObject({ reason: 'interrupted' });
+    expect(restored.turns[0]?.error).toBeUndefined();
+    expect(restored.turns[1]).toMatchObject({ reason: 'error', error: { code: 'SERVER', status: 503 } });
+  });
+
+  it('keeps consecutive failures, interruptions and tool-only turns on their own turn state', () => {
+    const events = [
+      { type: 'message/user', seq: 1, ts: 1, data: { text: 'one' } },
+      { type: 'trace/turn.start', seq: 2, ts: 2, data: { step: 0 } },
+      { type: 'trace/tool.call', seq: 3, ts: 3, data: { call: { id: 'call-1', name: 'bash' } } },
+      { type: 'trace/error', seq: 4, ts: 4, data: { message: 'HTTP 503', code: 'SERVER', status: 503 } },
+      { type: 'trace/turn.end', seq: 5, ts: 5, data: { reason: 'error' } },
+      { type: 'message/user', seq: 6, ts: 6, data: { text: 'two' } },
+      { type: 'trace/turn.start', seq: 7, ts: 7, data: { step: 0 } },
+      { type: 'trace/turn.end', seq: 8, ts: 8, data: { reason: 'interrupted' } },
+    ];
+    const restored = hydrateTranscript([
+      { role: 'user', content: [{ type: 'text', text: 'one' }], turnIndex: 0 },
+      { role: 'assistant', content: [], toolCalls: [{ id: 'call-1', name: 'bash', arguments: {} }], turnIndex: 0 },
+      { role: 'user', content: [{ type: 'text', text: 'two' }], turnIndex: 1 },
+    ], events);
+    expect(restored.transcript.map((item) => item.kind)).toEqual(['user', 'assistant', 'tool', 'user']);
+    expect(restored.turns[0]).toMatchObject({ reason: 'error', error: { code: 'SERVER', status: 503 } });
+    expect(restored.turns[1]).toMatchObject({ reason: 'interrupted' });
+    expect(restored.turns[1]?.error).toBeUndefined();
+    const grouped = groupTurns(restored.transcript, restored.turns, false);
+    expect(grouped[0]?.failure?.code).toBe('SERVER');
+    expect(grouped[0]?.process.some((item) => item.kind === 'tool')).toBe(true);
+    expect(grouped[1]?.reason).toBe('interrupted');
+    expect(grouped[1]?.failure).toBeUndefined();
+  });
+
   it('keeps persisted assistant identities separate from React transcript identities', () => {
     const { transcript } = hydrateTranscript([
       { role: 'user', content: [{ type: 'text', text: 'Question' }] },

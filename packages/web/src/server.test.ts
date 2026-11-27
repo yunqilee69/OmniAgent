@@ -22,7 +22,7 @@ import { readWorkspaceAudit, recordWorkspaceAudit } from './audit';
 import type { ConfigFileSnapshot } from './config-file';
 import { PermissionSettings } from './permissions';
 import { WorkspaceRegistry } from './workspaces';
-import { startWebHost } from './server';
+import { associatePublicTurns, startWebHost } from './server';
 import type { WebHost, WebHostOptions, WebSession } from './server';
 import { replayEndpointHash } from '../../core/src/providers/replay-identity';
 import { hydrateTranscript, userMessageCopyText } from '../ui/src/lib/events';
@@ -120,6 +120,21 @@ function sessionsUrl(base: string, workspaceId: string): string {
 }
 
 describe('workspace web host', () => {
+  it('assigns a turn without a first step to its terminal event', () => {
+    const events = [
+      { seq: 1, type: 'message/user', data: { text: 'first' } },
+      { seq: 2, type: 'trace/turn.end', data: { reason: 'interrupted' } },
+      { seq: 3, type: 'message/user', data: { text: 'second' } },
+      { seq: 4, type: 'trace/error', data: { message: 'failed', code: 'SERVER', status: 503 } },
+      { seq: 5, type: 'trace/turn.end', data: { reason: 'error' } },
+    ];
+    const messages = projectMessages(events as never).map((message, index) => ({ ...message, id: index }));
+    expect(associatePublicTurns(messages, events)).toEqual([
+      { role: 'user', content: [{ type: 'text', text: 'first' }], id: 0, turnIndex: 0 },
+      { role: 'user', content: [{ type: 'text', text: 'second' }], id: 1, turnIndex: 1 },
+    ]);
+  });
+
   it('follows before the initial message is persisted and replays steering in order', async () => {
     const beforeFirst = signal();
     const releaseFirst = signal();
@@ -304,6 +319,30 @@ describe('workspace web host', () => {
     expect((await fetch(`${path}/approvals`, jsonRequest({ requestId: prompt!.requestId, decision: 'allow' }))).status).toBe(200);
     await expect.poll(() => decision).toBe('allow');
     await reader!.cancel();
+  });
+
+  it('returns stable public codes for direct-send admission failures', async () => {
+    const { base, first, store } = await setup(undefined, undefined, {
+      async read() { return { defaultPreset: null, requiresSelection: true }; },
+      async update() { return { defaultPreset: null, requiresSelection: true }; },
+      snapshot() { return { defaultPreset: null, requiresSelection: true, revision: 0 }; },
+      async current() { return { defaultPreset: null, requiresSelection: true, revision: 0 }; },
+    } as never);
+    const url = sessionsUrl(base, first.id);
+    const { session } = await jsonResponse<{ session: { id: string } }>(await fetch(url, jsonRequest({})));
+    const path = `${url}/${session.id}`;
+    const permission = await fetch(`${path}/messages`, asyncRequest({ text: 'blocked' }));
+    expect(permission.status).toBe(409);
+    expect(await permission.json()).toMatchObject({ code: 'permission_preset_required', error: 'A permission preset must be selected' });
+
+    const handle = await store.open(first.path, session.id);
+    await handle.append(createInitialDshPermissionEvent('workspace-write'));
+    const running = await fetch(`${path}/messages`, asyncRequest({ text: 'hold' }));
+    expect(running.status).toBe(202);
+    const active = await fetch(`${path}/messages`, asyncRequest({ text: 'again' }));
+    expect(active.status).toBe(409);
+    expect(await active.json()).toMatchObject({ code: 'turn_in_progress' });
+    await fetch(`${path}/interrupt`, jsonRequest({}));
   });
 
   it('reports an async failure before the first event instead of acknowledging a lost run', async () => {
