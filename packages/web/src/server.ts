@@ -1340,12 +1340,12 @@ async function route(
     const restingEvents = new Map(resting.flatMap((item) => item === null ? [] : [[item.id, item.events]]));
     const summaries = page.map((item) => {
       const turn = running.get(`${workspace.path}\0${item.id}`);
-      const events = restingEvents.get(item.id);
-      const pending = sessionPendingKind(turn?.approval?.pendingPrompts() ?? [], events);
+      const pending = sessionPendingKind(turn?.approval?.pendingPrompts() ?? [], restingEvents.get(item.id));
       return {
         ...item,
         // Run state and the interaction it waits on are host facts, so a row
-        // never has to depend on the tab that happens to follow the turn.
+        // never has to depend on the tab that happens to follow the turn. How
+        // the last turn ended is part of the transcript and arrives with it.
         running: turn !== undefined,
         ...(pending === null ? {} : { pending }),
       };
