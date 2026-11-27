@@ -76,14 +76,18 @@ describe('SessionStore', () => {
     await handle.append({ type: 'agent/selected', data: { version: 1, agent: 'builder' } });
     await handle.append({ type: 'session/pinned', data: { pinned: true } });
     await handle.append({ type: 'session/title', data: { title: 'Long one', messageSeqs: [], source: { kind: 'user' } } });
+    await handle.append({ type: 'trace/turn.end', data: { reason: 'end_turn' } });
 
     const [summary] = await new SessionStore(root).list('/workspace');
-    expect(summary).toMatchObject({ id: 'long', agent: 'builder', pinned: true, title: 'Long one' });
+    expect(summary).toMatchObject({
+      id: 'long', agent: 'builder', pinned: true, title: 'Long one',
+      lastTurn: { reason: 'end_turn' },
+    });
     // Activity needs the whole log, and the middle was never read.
     expect(summary?.blank).toBeUndefined();
     expect(summary?.updatedAt).toBeUndefined();
     expect(summary?.eventCount).toBeUndefined();
-    expect((await new SessionStore(root).open('/workspace', 'long')).events).toHaveLength(4);
+    expect((await new SessionStore(root).open('/workspace', 'long')).events).toHaveLength(5);
   });
 
   it.each(['open', 'flush'] as const)(

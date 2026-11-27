@@ -7,6 +7,7 @@ import { z } from 'zod';
 import { withSessionLock } from './file-lock';
 import { cloneJson, SESSION_FORMAT_VERSION, SessionEventSchema, SessionHeaderSchema } from './types';
 import type { SessionEvent, SessionEventInput, SessionHeader } from './types';
+import type { StopReason } from '../protocol/events';
 import { foldSessionTitle, hasHumanMessage, lastActivityTime } from './title';
 import type { SessionTitleSource } from './title';
 import { projectAgentSelection } from './agent-selection';
@@ -160,6 +161,8 @@ export interface SessionSummary {
   updatedAt?: number;
   /** Persisted event count. Absent on the same bounded reads as `blank`. */
   eventCount?: number;
+  /** How the latest persisted turn ended, when the bounded tail contains it. */
+  lastTurn?: { endedAt: number; reason: StopReason };
   /**
    * The newest persisted event asks the user for a plan review or an answer.
    * The list opens only these sessions, because that request outlives its turn.
@@ -628,6 +631,7 @@ function summarizeLogText(header: SessionHeader, file: SummaryFile): SessionSumm
   const agent = projectAgentSelection(tail);
   const mode = projectModeSelection(tail);
   const title = foldSessionTitle(tail);
+  const ended = lastTurn(tail);
   return {
     id: header.id,
     ...(agent.status === 'selected' ? { agent: agent.agent } : {}),
@@ -639,6 +643,7 @@ function summarizeLogText(header: SessionHeader, file: SummaryFile): SessionSumm
     ...(title === undefined ? {} : { title: title.title, titleSource: title.source }),
     ...(foldSessionPinned(tail) ? { pinned: true } : {}),
     ...(foldSessionArchived(tail) ? { archived: true } : {}),
+    ...(ended === undefined ? {} : { lastTurn: ended }),
     // Activity time needs every event. Leaving it absent keeps an automatic
     // archive scan from treating an unread middle of the log as idle.
     updatedAt: undefined,
@@ -646,6 +651,21 @@ function summarizeLogText(header: SessionHeader, file: SummaryFile): SessionSumm
     cwd: header.cwd,
     createdAt: header.createdAt,
   };
+}
+
+const STOP_REASONS: ReadonlySet<string> = new Set<StopReason>([
+  'end_turn', 'tool_use', 'max_tokens', 'max_steps', 'interrupted', 'error',
+]);
+
+function lastTurn(events: readonly SessionEvent[]): SessionSummary['lastTurn'] {
+  for (let index = events.length - 1; index >= 0; index -= 1) {
+    const event = events[index];
+    if (event?.type !== 'trace/turn.end' || typeof event.data !== 'object' || event.data === null) continue;
+    const reason = (event.data as { reason?: unknown }).reason;
+    if (typeof reason !== 'string' || !STOP_REASONS.has(reason)) continue;
+    return { endedAt: event.ts, reason: reason as StopReason };
+  }
+  return undefined;
 }
 
 const RESTING_REQUEST_EVENTS = new Set(['plan/review.pending', 'ask-user/pending']);
@@ -667,6 +687,7 @@ function summaryFromEvents(header: SessionHeader, events: SessionEvent[]): Sessi
   const agent = projectAgentSelection(events);
   const mode = projectModeSelection(events);
   const title = foldSessionTitle(events);
+  const ended = lastTurn(events);
   return {
     id: header.id,
     ...(agent.status === 'selected' ? { agent: agent.agent } : {}),
@@ -678,6 +699,7 @@ function summaryFromEvents(header: SessionHeader, events: SessionEvent[]): Sessi
     ...(title === undefined ? {} : { title: title.title, titleSource: title.source }),
     ...(foldSessionPinned(events) ? { pinned: true } : {}),
     ...(foldSessionArchived(events) ? { archived: true } : {}),
+    ...(ended === undefined ? {} : { lastTurn: ended }),
     blank: !hasHumanMessage(events),
     ...(restingRequest(events) ? { restingRequest: true } : {}),
     workspace: header.workspace,
